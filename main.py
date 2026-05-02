@@ -336,10 +336,12 @@ async def market_monitor(bot: Bot, state: State) -> None:
                                     if pct > 0
                                     else "지지선 확인 필요. 성급한 매수 금지"
                                 )
+                                icon = "📈" if pct > 0 else "📉"
                                 msg = (
-                                    f"📈 [시장 감지]\n"
+                                    f"{icon} [시장 감지]\n"
                                     f"{symbol.replace('USDT', '')} 15분 {direction} {fmt_pct(pct)}\n"
-                                    f"코멘트: {line}"
+                                    f"현재가 {price:,.0f} USDT\n"
+                                    f"⚠️ {line}"
                                 )
                                 await safe_send(bot, msg)
                                 state.touch_cooldown(signal_key, now)
@@ -354,9 +356,10 @@ async def market_monitor(bot: Bot, state: State) -> None:
                                 signal_key = f"vol:{symbol}"
                                 if not state.is_on_cooldown(signal_key, now):
                                     msg = (
-                                        f"📊 [시장 감지]\n"
-                                        f"{symbol.replace('USDT', '')} 거래량 급증 x{ratio:.2f}\n"
-                                        "코멘트: 변동성 확대 구간. 포지션 축소 고려"
+                                        "🔥 [거래량 급증]\n"
+                                        f"{symbol.replace('USDT', '')} x{ratio:.2f} 급증\n"
+                                        f"5분 거래대금 {latest_vol:,.0f} USDT\n"
+                                        "⚠️ 변동성 확대 구간. 포지션 축소 고려"
                                     )
                                     await safe_send(bot, msg)
                                     state.touch_cooldown(signal_key, now)
