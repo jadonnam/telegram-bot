@@ -24,6 +24,7 @@ KIMCHI_CHECK_SECONDS = 10 * 60
 WHALE_CHECK_SECONDS = 60
 BRIEFING_CHECK_SECONDS = 30
 REFERRAL_CHECK_SECONDS = 60
+MARKET_SESSION_CHECK_SECONDS = 30
 
 PRICE_CHANGE_THRESHOLD = 1.5
 VOLUME_SURGE_THRESHOLD = 3.0
@@ -68,6 +69,7 @@ class State:
 
         self.briefing_sent_dates: Dict[str, date] = {}
         self.referral_sent_dates: Dict[str, date] = {}
+        self.market_session_sent_dates: Dict[str, date] = {}
 
         self.last_fng_zone = "normal"
         self.last_kimchi_zone = "normal"
@@ -220,6 +222,32 @@ async def get_usd_krw(session: aiohttp.ClientSession) -> Optional[float]:
     if "KRW" not in rates:
         return None
     return float(rates["KRW"])
+
+
+async def get_yahoo_snapshot(session: aiohttp.ClientSession, symbol: str) -> Optional[Tuple[float, float]]:
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+    data = await fetch_json(session, url)
+    if not data:
+        return None
+    chart = data.get("chart") or {}
+    results = chart.get("result") or []
+    if not results:
+        return None
+    meta = results[0].get("meta") or {}
+
+    price = meta.get("regularMarketPrice")
+    prev = meta.get("previousClose")
+    if prev is None:
+        prev = meta.get("chartPreviousClose")
+    if price is None or prev is None:
+        return None
+
+    price_f = float(price)
+    prev_f = float(prev)
+    if prev_f <= 0:
+        return None
+    pct = ((price_f - prev_f) / prev_f) * 100
+    return price_f, pct
 
 
 async def get_fear_greed(session: aiohttp.ClientSession) -> Optional[Tuple[int, str]]:
@@ -632,6 +660,120 @@ async def referral_scheduler(bot: Bot, state: State) -> None:
             await asyncio.sleep(max(5, REFERRAL_CHECK_SECONDS - int(elapsed)))
 
 
+async def market_session_scheduler(bot: Bot, state: State) -> None:
+    async with aiohttp.ClientSession() as session:
+        while True:
+            started = utc_now()
+            try:
+                now = now_kst()
+
+                if now.hour == 8 and now.minute == 30:
+                    key = "kr_open_0830"
+                    if state.market_session_sent_dates.get(key) != now.date():
+                        kospi = await get_yahoo_snapshot(session, "%5EKS11")
+                        kosdaq = await get_yahoo_snapshot(session, "%5EKQ11")
+                        usd_krw = await get_usd_krw(session)
+                        sp_fut = await get_yahoo_snapshot(session, "ES%3DF")
+                        nq_fut = await get_yahoo_snapshot(session, "NQ%3DF")
+                        if kospi and kosdaq and usd_krw and sp_fut and nq_fut:
+                            us_flow = (
+                                "위험선호 우위"
+                                if (sp_fut[1] + nq_fut[1]) >= 0
+                                else "리스크오프 우위"
+                            )
+                            issue_line = (
+                                "미국 선물 강세 시 외국인 수급 개선 여부 주목."
+                                if us_flow == "위험선호 우위"
+                                else "달러/원과 반도체 흐름 중심의 보수적 대응 필요."
+                            )
+                            msg = (
+                                "🇰🇷 [한국장 시작 전]\n"
+                                "오늘 주목할 이슈 TOP5\n\n"
+                                f"1. 코스피 {kospi[0]:,.2f} ({fmt_pct(kospi[1])})\n"
+                                f"2. 코스닥 {kosdaq[0]:,.2f} ({fmt_pct(kosdaq[1])})\n"
+                                f"3. 달러/원 환율 {usd_krw:,.2f}원\n"
+                                f"4. 간밤 미국장 주요 흐름: {us_flow}\n"
+                                f"5. 오늘 주목 이슈: {issue_line}\n\n"
+                                "⚡ 데이터 출처: Yahoo Finance API"
+                            )
+                            await safe_send(bot, msg)
+                            state.market_session_sent_dates[key] = now.date()
+
+                if now.hour == 15 and now.minute == 30:
+                    key = "kr_close_1530"
+                    if state.market_session_sent_dates.get(key) != now.date():
+                        kospi = await get_yahoo_snapshot(session, "%5EKS11")
+                        kosdaq = await get_yahoo_snapshot(session, "%5EKQ11")
+                        usd_krw = await get_usd_krw(session)
+                        if kospi and kosdaq and usd_krw:
+                            if kospi[1] >= 0 and kosdaq[1] >= 0:
+                                feature = "지수 동반 강세"
+                            elif kospi[1] >= 0 > kosdaq[1]:
+                                feature = "대형주 상대강세, 중소형주 약세"
+                            elif kospi[1] < 0 <= kosdaq[1]:
+                                feature = "종목장 성격 강화"
+                            else:
+                                feature = "지수 전반 약세"
+                            msg = (
+                                "🔔 [한국장 마감]\n"
+                                f"코스피: {kospi[0]:,.2f} ({fmt_pct(kospi[1])})\n"
+                                f"코스닥: {kosdaq[0]:,.2f} ({fmt_pct(kosdaq[1])})\n"
+                                f"달러/원: {usd_krw:,.0f}원\n"
+                                f"오늘의 특징: {feature}"
+                            )
+                            await safe_send(bot, msg)
+                            state.market_session_sent_dates[key] = now.date()
+
+                if now.hour == 21 and now.minute == 30:
+                    key = "us_open_2130"
+                    if state.market_session_sent_dates.get(key) != now.date():
+                        sp_fut = await get_yahoo_snapshot(session, "ES%3DF")
+                        nq_fut = await get_yahoo_snapshot(session, "NQ%3DF")
+                        dxy = await get_yahoo_snapshot(session, "DX-Y.NYB")
+                        tnx = await get_yahoo_snapshot(session, "%5ETNX")
+                        if sp_fut and nq_fut and dxy and tnx:
+                            calendar_line = "당일 CPI/FOMC/NFP 등 고변동 지표 일정 확인 필요"
+                            msg = (
+                                "🇺🇸 [미국장 시작 전]\n"
+                                "주목할 이슈 TOP5\n\n"
+                                f"1. S&P500 선물 {fmt_pct(sp_fut[1])}\n"
+                                f"2. 나스닥 선물 {fmt_pct(nq_fut[1])}\n"
+                                f"3. 달러인덱스(DXY) {dxy[0]:.2f} ({fmt_pct(dxy[1])})\n"
+                                f"4. 10년물 국채금리 {tnx[0]:.2f} ({fmt_pct(tnx[1])})\n"
+                                f"5. 오늘 주요 경제지표: {calendar_line}"
+                            )
+                            await safe_send(bot, msg)
+                            state.market_session_sent_dates[key] = now.date()
+
+                if now.hour == 4 and now.minute == 0:
+                    key = "us_close_0400"
+                    if state.market_session_sent_dates.get(key) != now.date():
+                        spx = await get_yahoo_snapshot(session, "%5EGSPC")
+                        ixic = await get_yahoo_snapshot(session, "%5EIXIC")
+                        dji = await get_yahoo_snapshot(session, "%5EDJI")
+                        if spx and ixic and dji:
+                            avg_move = (spx[1] + ixic[1] + dji[1]) / 3
+                            core = (
+                                "빅테크 주도 위험선호 지속"
+                                if avg_move >= 0
+                                else "리스크 관리 심리 우세"
+                            )
+                            msg = (
+                                "🌙 [미국장 마감]\n"
+                                f"S&P500: {spx[0]:,.2f} ({fmt_pct(spx[1])})\n"
+                                f"나스닥: {ixic[0]:,.2f} ({fmt_pct(ixic[1])})\n"
+                                f"다우: {dji[0]:,.2f} ({fmt_pct(dji[1])})\n"
+                                f"오늘의 핵심: {core}"
+                            )
+                            await safe_send(bot, msg)
+                            state.market_session_sent_dates[key] = now.date()
+            except Exception:
+                pass
+
+            elapsed = (utc_now() - started).total_seconds()
+            await asyncio.sleep(max(5, MARKET_SESSION_CHECK_SECONDS - int(elapsed)))
+
+
 async def run_forever() -> None:
     token = os.getenv("TELEGRAM_TOKEN")
     if not token:
@@ -649,6 +791,7 @@ async def run_forever() -> None:
         asyncio.create_task(whale_monitor(bot, state)),
         asyncio.create_task(news_monitor(bot, state)),
         asyncio.create_task(referral_scheduler(bot, state)),
+        asyncio.create_task(market_session_scheduler(bot, state)),
     ]
     await asyncio.gather(*tasks)
 
