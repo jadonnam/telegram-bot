@@ -35,8 +35,10 @@ VOLUME_SURGE_THRESHOLD = 3.0
 WHALE_NOTIONAL_THRESHOLD = 1_000_000
 SIGNAL_COOLDOWN = timedelta(minutes=30)
 
-NEWS_DAILY_LIMIT = 8
-NEWS_MIN_INTERVAL = timedelta(minutes=15)
+NEWS_DAILY_LIMIT = 6
+NEWS_MIN_INTERVAL = timedelta(minutes=20)
+NEWS_URGENT_SCORE = 7
+NEWS_NORMAL_SCORE = 4
 NEWS_BLOCK_HOURS = None  # 미국장 시간대도 뉴스 전송: 새벽 1~7시 차단 해제
 
 RSS_FEEDS = (
@@ -95,6 +97,10 @@ NEWS_BLOCK_KEYWORDS = (
     "opinion",
     "guide",
     "how to",
+    "recap",
+    "price prediction",
+    "sponsored",
+    "press release",
 )
 POLY_KEYWORDS = ("btc", "eth", "금리", "전쟁", "trump")
 
@@ -184,9 +190,9 @@ def news_importance_score(title: str, summary: str) -> int:
     high_weight = (
         "etf", "sec", "regulation", "lawsuit", "approval", "rejection",
         "fed", "fomc", "cpi", "inflation", "interest rate", "rate cut",
-        "trump", "tariff", "dollar", "oil", "hack", "exploit",
-        "binance", "coinbase", "exchange", "liquidation", "sell-off",
-        "금리", "연준", "유가", "달러", "규제", "해킹", "거래소",
+        "trump", "tariff", "dollar", "oil", "war", "ukraine", "iran",
+        "hack", "exploit", "binance", "coinbase", "exchange", "liquidation", "sell-off",
+        "금리", "연준", "유가", "달러", "규제", "해킹", "거래소", "전쟁",
     )
     medium_weight = (
         "bitcoin", "btc", "ethereum", "eth", "solana", "sol",
@@ -206,33 +212,39 @@ def news_importance_score(title: str, summary: str) -> int:
 
 def is_high_quality_news(title: str, summary: str) -> bool:
     text = f"{title}\n{summary}".lower()
+    if any(k in text for k in NEWS_BLOCK_KEYWORDS):
+        return False
     if not any(k in text for k in NEWS_KEYWORDS):
         return False
-    return news_importance_score(title, summary) >= 2
+    return news_importance_score(title, summary) >= NEWS_NORMAL_SCORE
+
+
+def is_urgent_news(title: str, summary: str) -> bool:
+    text = f"{title}\n{summary}".lower()
+    urgent_keywords = (
+        "breaking", "urgent", "sec", "etf", "fed", "fomc", "cpi",
+        "hack", "exploit", "lawsuit", "approval", "rejection",
+        "trump", "tariff", "war", "oil", "liquidation", "binance",
+        "coinbase", "해킹", "승인", "거절", "규제", "금리", "전쟁", "유가",
+    )
+    return any(k in text for k in urgent_keywords) and news_importance_score(title, summary) >= NEWS_URGENT_SCORE
 
 
 def news_importance_line(title: str, summary: str) -> str:
     text = f"{title}\n{summary}".lower()
     if any(k in text for k in ("etf", "sec", "regulation", "lawsuit", "approval", "rejection", "규제")):
-        return "ETF·규제랑 엮이면 비트코인 수급에 바로 영향 줄 수 있는 흐름."
+        return "ETF·규제랑 연결되면 비트코인 수급에 바로 영향 줄 수 있는 이슈."
     if any(k in text for k in ("fed", "fomc", "cpi", "inflation", "interest rate", "rate cut", "금리", "연준")):
         return "금리 기대가 흔들리면 코인·주식이 같이 움직일 수 있는 구간."
     if any(k in text for k in ("hack", "exploit", "해킹")):
         return "해킹 이슈는 단기 투자심리를 빠르게 식힐 수 있는 재료."
     if any(k in text for k in ("exchange", "binance", "coinbase", "거래소")):
         return "거래소 이슈는 수급이랑 신뢰도에 바로 연결되는 재료."
-    if any(k in text for k in ("trump", "tariff", "dollar", "oil", "유가", "달러")):
-        return "거시 이슈라 코인·주식 분위기를 같이 흔들 수 있는 흐름."
+    if any(k in text for k in ("trump", "tariff", "dollar", "oil", "war", "유가", "달러", "전쟁")):
+        return "거시 이슈라 유가·달러·위험자산 분위기를 같이 흔들 수 있음."
     if any(k in text for k in ("liquidation", "sell-off", "whale", "volume")):
         return "청산·거래량 이슈라 단기 변동성이 커질 수 있는 구간."
-    return "가격 흐름에 영향 줄 수 있어서 시장 반응까지 같이 볼 필요 있음."
-
-
-def indicator_soft_cta(title: str, summary: str) -> str:
-    text = f"{title}\n{summary}".lower()
-    if any(k in text for k in ("price", "rally", "drop", "volume", "liquidation", "whale", "btc", "bitcoin")):
-        return "이런 뉴스는 가격보다 반응 속도가 중요해서, 나는 직접 만든 보조지표랑 같이 보는 중."
-    return "이런 이슈는 시장 반응까지 같이 봐야 해서, 나는 보조지표로 흐름 확인 중."
+    return "당장 방향보다 시장 반응까지 같이 확인해야 하는 뉴스."
 
 def market_one_liner(btc_24h_pct: float) -> str:
     if btc_24h_pct >= 2.0:
@@ -327,9 +339,10 @@ async def build_korean_news_message(session: aiohttp.ClientSession, title: str, 
     title_ko = await translate_to_korean(session, title)
     source = source_name_from_link(link)
     line = news_importance_line(title, summary)
+    tag = "🚨 [속보]" if is_urgent_news(title, summary) else "📰 [뉴스]"
 
     return (
-        f"📰 [뉴스]\n"
+        f"{tag}\n"
         f"{title_ko}\n\n"
         f"{line}\n\n"
         f"출처: {source}\n"
@@ -770,8 +783,10 @@ async def news_monitor(bot: Bot, state: State) -> None:
                                 continue
 
                             now = utc_now()
+                            urgent = is_urgent_news(title, summary)
                             if (
-                                state.last_news_sent_at
+                                not urgent
+                                and state.last_news_sent_at
                                 and (now - state.last_news_sent_at) < NEWS_MIN_INTERVAL
                             ):
                                 continue
