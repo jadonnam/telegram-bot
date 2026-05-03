@@ -37,7 +37,7 @@ SIGNAL_COOLDOWN = timedelta(minutes=30)
 
 NEWS_DAILY_LIMIT = 8
 NEWS_MIN_INTERVAL = timedelta(minutes=15)
-NEWS_BLOCK_HOURS = (1, 7)  # 01:00 <= now < 07:00 (KST)
+NEWS_BLOCK_HOURS = None  # 미국장 시간대도 뉴스 전송: 새벽 1~7시 차단 해제
 
 RSS_FEEDS = (
     "https://www.coindesk.com/arc/outboundfeeds/rss/",
@@ -176,27 +176,63 @@ def has_keyword(text: str, keywords: Tuple[str, ...]) -> bool:
     return any(k in lowered for k in keywords)
 
 
+def news_importance_score(title: str, summary: str) -> int:
+    text = f"{title}\n{summary}".lower()
+    score = 0
+
+    # 시장에 바로 영향 줄 가능성이 큰 이슈
+    high_weight = (
+        "etf", "sec", "regulation", "lawsuit", "approval", "rejection",
+        "fed", "fomc", "cpi", "inflation", "interest rate", "rate cut",
+        "trump", "tariff", "dollar", "oil", "hack", "exploit",
+        "binance", "coinbase", "exchange", "liquidation", "sell-off",
+        "금리", "연준", "유가", "달러", "규제", "해킹", "거래소",
+    )
+    medium_weight = (
+        "bitcoin", "btc", "ethereum", "eth", "solana", "sol",
+        "price", "rally", "drop", "market", "volume", "whale",
+    )
+    low_quality = (
+        "airdrop", "fork", "ecash", "developer", "developers", "github",
+        "testnet", "protocol upgrade", "whitepaper", "podcast", "interview",
+        "opinion", "guide", "how to", "meme", "nft",
+    )
+
+    score += sum(3 for k in high_weight if k in text)
+    score += sum(1 for k in medium_weight if k in text)
+    score -= sum(3 for k in low_quality if k in text)
+    return score
+
+
 def is_high_quality_news(title: str, summary: str) -> bool:
     text = f"{title}\n{summary}".lower()
-    if any(k in text for k in NEWS_BLOCK_KEYWORDS):
+    if not any(k in text for k in NEWS_KEYWORDS):
         return False
-    return any(k in text for k in NEWS_KEYWORDS)
+    return news_importance_score(title, summary) >= 2
 
 
 def news_importance_line(title: str, summary: str) -> str:
     text = f"{title}\n{summary}".lower()
-    if any(k in text for k in ("etf", "sec", "regulation", "lawsuit", "규제")):
-        return "규제·ETF 이슈라 시장 방향에 바로 영향 줄 수 있음."
+    if any(k in text for k in ("etf", "sec", "regulation", "lawsuit", "approval", "rejection", "규제")):
+        return "ETF·규제 이슈라 비트코인 수급에 바로 영향 줄 수 있음."
     if any(k in text for k in ("fed", "fomc", "cpi", "inflation", "interest rate", "rate cut", "금리", "연준")):
-        return "금리 기대가 흔들리면 코인·주식 둘 다 같이 움직일 수 있음."
+        return "금리 기대가 흔들리면 코인·주식이 같이 움직일 수 있음."
     if any(k in text for k in ("hack", "exploit", "해킹")):
-        return "보안 이슈는 단기 심리를 빠르게 식힐 수 있음."
+        return "해킹 이슈는 단기 투자심리를 빠르게 식힐 수 있음."
     if any(k in text for k in ("exchange", "binance", "coinbase", "거래소")):
-        return "거래소 이슈는 수급과 투자심리에 바로 연결됨."
+        return "거래소 이슈는 수급과 신뢰도에 바로 연결됨."
     if any(k in text for k in ("trump", "tariff", "dollar", "oil", "유가", "달러")):
         return "거시 이슈라 위험자산 분위기를 흔들 수 있음."
+    if any(k in text for k in ("liquidation", "sell-off", "whale", "volume")):
+        return "청산·거래량 이슈라 단기 변동성이 커질 수 있음."
     return "가격 흐름에 영향 줄 수 있는 이슈라 체크할 만함."
 
+
+def indicator_soft_cta(title: str, summary: str) -> str:
+    text = f"{title}\n{summary}".lower()
+    if any(k in text for k in ("price", "rally", "drop", "volume", "liquidation", "whale", "btc", "bitcoin")):
+        return "이런 뉴스는 가격보다 반응 속도가 중요해서, 나는 직접 만든 보조지표랑 같이 보는 중."
+    return "이런 이슈는 시장 반응까지 같이 봐야 해서, 나는 보조지표로 흐름 확인 중."
 
 def market_one_liner(btc_24h_pct: float) -> str:
     if btc_24h_pct >= 2.0:
@@ -292,17 +328,16 @@ async def build_korean_news_message(session: aiohttp.ClientSession, title: str, 
     summary_ko = await translate_to_korean(session, summary)
     source = source_name_from_link(link)
     why = news_importance_line(title, summary)
+    cta = indicator_soft_cta(title, summary)
 
-    # 너무 길면 채널 가독성이 떨어져서 핵심만 짧게 보냄
-    if summary_ko:
-        return (
-            f"📰 [뉴스]\n"
-            f"{title_ko}\n\n"
-            f"왜 중요하냐면: {why}\n"
-            f"출처: {source}\n"
-            f"{link}"
-        )
-    return f"📰 [뉴스]\n{title_ko}\n\n왜 중요하냐면: {why}\n출처: {source}\n{link}"
+    return (
+        f"📰 [뉴스]\n"
+        f"{title_ko}\n\n"
+        f"왜 중요함?\n{why}\n\n"
+        f"{cta}\n\n"
+        f"출처: {source}\n"
+        f"{link}"
+    )
 
 
 async def get_binance_ticker_24h(session: aiohttp.ClientSession, symbol: str) -> Optional[dict]:
@@ -713,9 +748,7 @@ async def news_monitor(bot: Bot, state: State) -> None:
                     state.news_daily_date = kst.date()
                     state.news_daily_count = 0
 
-                if NEWS_BLOCK_HOURS[0] <= kst.hour < NEWS_BLOCK_HOURS[1]:
-                    await asyncio.sleep(max(5, NEWS_CHECK_SECONDS))
-                    continue
+                # 미국장 시간대가 한국 새벽이라 뉴스 차단하지 않음
 
                 if state.news_daily_count < NEWS_DAILY_LIMIT:
                     for feed in RSS_FEEDS:
