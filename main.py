@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from collections import defaultdict, deque
 from datetime import date, datetime, timedelta, timezone
@@ -162,13 +163,13 @@ def fear_greed_zone(value: int) -> str:
     return "normal"
 
 
-async def send_message(bot: Bot, text: str) -> None:
-    await bot.send_message(chat_id=CHANNEL_ID, text=text, disable_web_page_preview=False)
+async def send_message(bot: Bot, text: str, disable_preview: bool = False) -> None:
+    await bot.send_message(chat_id=CHANNEL_ID, text=text, disable_web_page_preview=disable_preview)
 
 
-async def safe_send(bot: Bot, text: str) -> None:
+async def safe_send(bot: Bot, text: str, disable_preview: bool = False) -> None:
     try:
-        await send_message(bot, text)
+        await send_message(bot, text, disable_preview=disable_preview)
     except Exception:
         logging.exception("Telegram 전송 실패 (chat_id=%s)", CHANNEL_ID)
 
@@ -185,6 +186,53 @@ async def fetch_text(session: aiohttp.ClientSession, url: str):
         if response.status != 200:
             return None
         return await response.text()
+
+
+def clean_text(value: str, limit: int = 180) -> str:
+    value = re.sub(r"<[^>]+>", " ", value or "")
+    value = re.sub(r"\s+", " ", value).strip()
+    if len(value) > limit:
+        return value[:limit].rstrip() + "..."
+    return value
+
+
+async def translate_to_korean(session: aiohttp.ClientSession, text: str) -> str:
+    text = clean_text(text, limit=450)
+    if not text:
+        return ""
+    # 이미 한글이 섞여 있으면 그대로 사용
+    if re.search(r"[가-힣]", text):
+        return text
+    try:
+        data = await fetch_json(
+            session,
+            "https://translate.googleapis.com/translate_a/single",
+            {"client": "gtx", "sl": "en", "tl": "ko", "dt": "t", "q": text},
+        )
+        if data and isinstance(data, list) and data[0]:
+            translated = "".join(part[0] for part in data[0] if part and part[0])
+            return clean_text(translated, limit=220) or text
+    except Exception:
+        logging.exception("뉴스 제목 번역 실패")
+    return text
+
+
+def source_name_from_link(link: str) -> str:
+    lowered = (link or "").lower()
+    if "coindesk" in lowered:
+        return "CoinDesk"
+    if "cointelegraph" in lowered:
+        return "Cointelegraph"
+    return "RSS"
+
+
+async def build_korean_news_message(session: aiohttp.ClientSession, title: str, summary: str, link: str) -> str:
+    title_ko = await translate_to_korean(session, title)
+    summary_ko = await translate_to_korean(session, summary)
+    source = source_name_from_link(link)
+    if summary_ko:
+        return f"📰 [뉴스]\n{title_ko}\n\n핵심: {summary_ko}\n출처: {source}\n{link}"
+    return f"📰 [뉴스]\n{title_ko}\n\n출처: {source}\n{link}"
 
 
 async def get_binance_ticker_24h(session: aiohttp.ClientSession, symbol: str) -> Optional[dict]:
@@ -628,8 +676,9 @@ async def news_monitor(bot: Bot, state: State) -> None:
                             ):
                                 continue
 
-                            msg = f"📰 [뉴스]\n{title}\n{link}"
-                            await safe_send(bot, msg)
+                            msg = await build_korean_news_message(session, title, summary, link)
+                            # 링크 미리보기는 원문 영어 카드가 떠서 끔
+                            await safe_send(bot, msg, disable_preview=True)
                             state.mark_news(nid)
                             state.last_news_sent_at = now
                             state.news_daily_count += 1
