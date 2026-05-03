@@ -31,14 +31,14 @@ REFERRAL_CHECK_SECONDS = 60
 MARKET_SESSION_CHECK_SECONDS = 30
 
 PRICE_CHANGE_THRESHOLD = 1.5
-VOLUME_SURGE_THRESHOLD = 3.0
-WHALE_NOTIONAL_THRESHOLD = 1_000_000
-SIGNAL_COOLDOWN = timedelta(minutes=30)
+VOLUME_SURGE_THRESHOLD = 4.0
+WHALE_NOTIONAL_THRESHOLD = 3_000_000
+SIGNAL_COOLDOWN = timedelta(minutes=45)
 
-NEWS_DAILY_LIMIT = 6
-NEWS_MIN_INTERVAL = timedelta(minutes=20)
-NEWS_URGENT_SCORE = 7
-NEWS_NORMAL_SCORE = 4
+NEWS_DAILY_LIMIT = 4
+NEWS_MIN_INTERVAL = timedelta(minutes=60)
+NEWS_URGENT_SCORE = 10
+NEWS_NORMAL_SCORE = 7
 NEWS_BLOCK_HOURS = None  # 미국장 시간대도 뉴스 전송: 새벽 1~7시 차단 해제
 
 RSS_FEEDS = (
@@ -98,9 +98,15 @@ NEWS_BLOCK_KEYWORDS = (
     "guide",
     "how to",
     "recap",
+    "what happened in crypto today",
+    "today in crypto",
+    "daily crypto news",
+    "market wrap",
     "price prediction",
     "sponsored",
     "press release",
+    "newsletter",
+    "magazine",
 )
 POLY_KEYWORDS = ("btc", "eth", "금리", "전쟁", "trump")
 
@@ -186,28 +192,33 @@ def news_importance_score(title: str, summary: str) -> int:
     text = f"{title}\n{summary}".lower()
     score = 0
 
-    # 시장에 바로 영향 줄 가능성이 큰 이슈
-    high_weight = (
-        "etf", "sec", "regulation", "lawsuit", "approval", "rejection",
+    # 10만명 채널 기준: 가격/수급/규제/거시/전쟁/해킹/거래소만 강하게 통과
+    tier_1 = (
+        "spot bitcoin etf", "bitcoin etf", "btc etf", "etf inflow", "etf outflow",
         "fed", "fomc", "cpi", "inflation", "interest rate", "rate cut",
-        "trump", "tariff", "dollar", "oil", "war", "ukraine", "iran",
-        "hack", "exploit", "binance", "coinbase", "exchange", "liquidation", "sell-off",
-        "금리", "연준", "유가", "달러", "규제", "해킹", "거래소", "전쟁",
+        "sec", "lawsuit", "approval", "rejection", "regulation",
+        "hack", "exploit", "binance", "coinbase", "exchange",
+        "trump", "tariff", "war", "ukraine", "iran", "israel", "oil", "dollar",
+        "liquidation", "sell-off", "crash", "surge",
+        "금리", "연준", "유가", "달러", "규제", "해킹", "거래소", "전쟁", "승인", "거절",
     )
-    medium_weight = (
+    tier_2 = (
         "bitcoin", "btc", "ethereum", "eth", "solana", "sol",
         "price", "rally", "drop", "market", "volume", "whale",
     )
-    low_quality = (
-        "airdrop", "fork", "ecash", "developer", "developers", "github",
-        "testnet", "protocol upgrade", "whitepaper", "podcast", "interview",
-        "opinion", "guide", "how to", "meme", "nft",
+    low_quality = NEWS_BLOCK_KEYWORDS + (
+        "op-ed", "opinion", "analysis: ", "guide", "explainer",
+        "what happened", "roundup", "daily", "prediction", "rumor",
     )
 
-    score += sum(3 for k in high_weight if k in text)
-    score += sum(1 for k in medium_weight if k in text)
-    score -= sum(3 for k in low_quality if k in text)
+    score += sum(3 for k in tier_1 if k in text)
+    score += sum(1 for k in tier_2 if k in text)
+    score -= sum(4 for k in low_quality if k in text)
     return score
+
+
+def normalized_news_score(title: str, summary: str) -> int:
+    return max(0, min(10, news_importance_score(title, summary)))
 
 
 def is_high_quality_news(title: str, summary: str) -> bool:
@@ -221,41 +232,30 @@ def is_high_quality_news(title: str, summary: str) -> bool:
 
 def is_urgent_news(title: str, summary: str) -> bool:
     text = f"{title}\n{summary}".lower()
-    urgent_keywords = (
-        "breaking", "urgent", "sec", "etf", "fed", "fomc", "cpi",
-        "hack", "exploit", "lawsuit", "approval", "rejection",
-        "trump", "tariff", "war", "oil", "liquidation", "binance",
-        "coinbase", "해킹", "승인", "거절", "규제", "금리", "전쟁", "유가",
+    hard_urgent = (
+        "breaking", "urgent", "emergency", "sec approves", "sec rejects",
+        "hacked", "exploit", "seized", "freeze", "frozen",
+        "war", "missile", "attack", "tariff", "cpi", "fomc",
+        "속보", "긴급", "해킹", "승인", "거절", "압수", "전쟁", "공격",
     )
-    return any(k in text for k in urgent_keywords) and news_importance_score(title, summary) >= NEWS_URGENT_SCORE
+    return any(k in text for k in hard_urgent) and news_importance_score(title, summary) >= NEWS_URGENT_SCORE
 
 
 def news_importance_line(title: str, summary: str) -> str:
     text = f"{title}\n{summary}".lower()
-    if any(k in text for k in ("etf", "sec", "regulation", "lawsuit", "approval", "rejection", "규제")):
-        return "ETF·규제랑 연결되면 비트코인 수급에 바로 영향 줄 수 있는 이슈."
+    if any(k in text for k in ("etf", "sec", "regulation", "lawsuit", "approval", "rejection", "규제", "승인", "거절")):
+        return "시장 해석: ETF·규제 이슈라 비트코인 수급에 직접 영향 줄 수 있음."
     if any(k in text for k in ("fed", "fomc", "cpi", "inflation", "interest rate", "rate cut", "금리", "연준")):
-        return "금리 기대가 흔들리면 코인·주식이 같이 움직일 수 있는 구간."
-    if any(k in text for k in ("hack", "exploit", "해킹")):
-        return "해킹 이슈는 단기 투자심리를 빠르게 식힐 수 있는 재료."
+        return "시장 해석: 금리 기대가 흔들리면 코인·주식이 같이 움직일 수 있음."
+    if any(k in text for k in ("hack", "exploit", "hacked", "해킹")):
+        return "시장 해석: 해킹 이슈는 단기 투자심리를 바로 식힐 수 있음."
     if any(k in text for k in ("exchange", "binance", "coinbase", "거래소")):
-        return "거래소 이슈는 수급이랑 신뢰도에 바로 연결되는 재료."
-    if any(k in text for k in ("trump", "tariff", "dollar", "oil", "war", "유가", "달러", "전쟁")):
-        return "거시 이슈라 유가·달러·위험자산 분위기를 같이 흔들 수 있음."
+        return "시장 해석: 거래소 이슈는 수급과 신뢰도에 바로 연결됨."
+    if any(k in text for k in ("trump", "tariff", "dollar", "oil", "war", "ukraine", "iran", "israel", "유가", "달러", "전쟁")):
+        return "시장 해석: 거시 이슈라 유가·달러·위험자산 분위기를 같이 흔들 수 있음."
     if any(k in text for k in ("liquidation", "sell-off", "whale", "volume")):
-        return "청산·거래량 이슈라 단기 변동성이 커질 수 있는 구간."
-    return "당장 방향보다 시장 반응까지 같이 확인해야 하는 뉴스."
-
-
-def news_display_tag(title: str, summary: str) -> str:
-    score = news_importance_score(title, summary)
-    display_score = max(1, min(10, score))
-
-    if is_urgent_news(title, summary):
-        return f"🚨 [속보 · 중요도 {display_score}/10]"
-    if score >= NEWS_URGENT_SCORE:
-        return f"🔥 [핵심 · 중요도 {display_score}/10]"
-    return f"📰 [주요뉴스 · 중요도 {display_score}/10]"
+        return "시장 해석: 청산·거래량 이슈라 단기 변동성이 커질 수 있음."
+    return "시장 해석: 방향보다 시장 반응까지 같이 확인해야 하는 뉴스."
 
 def market_one_liner(btc_24h_pct: float) -> str:
     if btc_24h_pct >= 2.0:
@@ -349,13 +349,20 @@ def source_name_from_link(link: str) -> str:
 async def build_korean_news_message(session: aiohttp.ClientSession, title: str, summary: str, link: str) -> str:
     title_ko = await translate_to_korean(session, title)
     source = source_name_from_link(link)
+    score = normalized_news_score(title, summary)
     line = news_importance_line(title, summary)
-    tag = news_display_tag(title, summary)
+
+    if is_urgent_news(title, summary):
+        tag = f"🚨 [속보 · 중요도 {score}/10]"
+    elif score >= 8:
+        tag = f"🔥 [핵심뉴스 · 중요도 {score}/10]"
+    else:
+        tag = f"📰 [뉴스 · 중요도 {score}/10]"
 
     return (
         f"{tag}\n"
         f"{title_ko}\n\n"
-        f"시장 해석: {line}\n\n"
+        f"{line}\n\n"
         f"출처: {source}\n"
         f"{link}"
     )
