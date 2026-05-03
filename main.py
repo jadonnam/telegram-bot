@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import os
 from collections import defaultdict, deque
 from datetime import date, datetime, timedelta, timezone
@@ -8,6 +9,7 @@ from typing import Deque, Dict, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import aiohttp
+from aiohttp import web
 import feedparser
 from telegram import Bot
 
@@ -167,7 +169,7 @@ async def safe_send(bot: Bot, text: str) -> None:
     try:
         await send_message(bot, text)
     except Exception:
-        pass
+        logging.exception("Telegram 전송 실패 (chat_id=%s)", CHANNEL_ID)
 
 
 async def fetch_json(session: aiohttp.ClientSession, url: str, params: Optional[dict] = None):
@@ -774,9 +776,32 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
             await asyncio.sleep(max(5, MARKET_SESSION_CHECK_SECONDS - int(elapsed)))
 
 
+async def railway_port_health_server() -> None:
+    """Railway 등에서 PORT 에 바인딩하지 않으면 배포 실패·재시작 되는 설정이 많아 둠."""
+    port_s = os.getenv("PORT")
+    if not port_s:
+        return
+    port = int(port_s)
+
+    async def ping(_request: web.Request) -> web.Response:
+        return web.Response(text="telegram-bot worker ok")
+
+    app = web.Application()
+    app.router.add_get("/", ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logging.info("PORT=%s 에 HTTP 헬스 응답 바인딩 (/)", port_s)
+    await asyncio.Future()
+
+
 async def run_forever() -> None:
-    token = os.getenv("TELEGRAM_TOKEN")
+    token = (os.getenv("TELEGRAM_TOKEN") or "").strip()
     if not token:
+        logging.error(
+            "TELEGRAM_TOKEN 이 비어 있습니다. Railway Variables 이름은 TELEGRAM_TOKEN (대문자) 인지 확인하세요."
+        )
         raise RuntimeError("TELEGRAM_TOKEN 환경변수가 필요합니다.")
 
     bot = Bot(token=token)
@@ -793,12 +818,25 @@ async def run_forever() -> None:
         asyncio.create_task(referral_scheduler(bot, state)),
         asyncio.create_task(market_session_scheduler(bot, state)),
     ]
+    port = os.getenv("PORT")
+    if port:
+        tasks.append(asyncio.create_task(railway_port_health_server()))
+    logging.info(
+        "워커 루프 시작 (브리핑·시장·뉴스 등 비동기 스케줄러 실행). CHANNEL=%s PORT=%s",
+        CHANNEL_ID,
+        port or "미사용",
+    )
     await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
     while True:
         try:
             asyncio.run(run_forever())
         except Exception:
+            logging.exception("run_forever 재시작 (예외)")
             continue
