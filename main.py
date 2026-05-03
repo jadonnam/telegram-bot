@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import os
+import time
 from collections import defaultdict, deque
 from datetime import date, datetime, timedelta, timezone
 from typing import Deque, Dict, Optional, Tuple
@@ -837,6 +838,16 @@ if __name__ == "__main__":
     while True:
         try:
             asyncio.run(run_forever())
+        except RuntimeError as e:
+            if "TELEGRAM_TOKEN" in str(e):
+                logging.error(
+                    "TELEGRAM_TOKEN 없음: Railway → 해당 서비스 → Variables 에 "
+                    "이름 정확히 TELEGRAM_TOKEN, 값은 BotFather 가 준 토큰 문자열 추가 후 재배포."
+                )
+                time.sleep(60)
+                continue
+            raise
         except Exception:
             logging.exception("run_forever 재시작 (예외)")
+            time.sleep(10)
             continue
