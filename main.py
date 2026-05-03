@@ -214,18 +214,18 @@ def is_high_quality_news(title: str, summary: str) -> bool:
 def news_importance_line(title: str, summary: str) -> str:
     text = f"{title}\n{summary}".lower()
     if any(k in text for k in ("etf", "sec", "regulation", "lawsuit", "approval", "rejection", "규제")):
-        return "ETF·규제 이슈라 비트코인 수급에 바로 영향 줄 수 있음."
+        return "ETF·규제랑 엮이면 비트코인 수급에 바로 영향 줄 수 있는 흐름."
     if any(k in text for k in ("fed", "fomc", "cpi", "inflation", "interest rate", "rate cut", "금리", "연준")):
-        return "금리 기대가 흔들리면 코인·주식이 같이 움직일 수 있음."
+        return "금리 기대가 흔들리면 코인·주식이 같이 움직일 수 있는 구간."
     if any(k in text for k in ("hack", "exploit", "해킹")):
-        return "해킹 이슈는 단기 투자심리를 빠르게 식힐 수 있음."
+        return "해킹 이슈는 단기 투자심리를 빠르게 식힐 수 있는 재료."
     if any(k in text for k in ("exchange", "binance", "coinbase", "거래소")):
-        return "거래소 이슈는 수급과 신뢰도에 바로 연결됨."
+        return "거래소 이슈는 수급이랑 신뢰도에 바로 연결되는 재료."
     if any(k in text for k in ("trump", "tariff", "dollar", "oil", "유가", "달러")):
-        return "거시 이슈라 위험자산 분위기를 흔들 수 있음."
+        return "거시 이슈라 코인·주식 분위기를 같이 흔들 수 있는 흐름."
     if any(k in text for k in ("liquidation", "sell-off", "whale", "volume")):
-        return "청산·거래량 이슈라 단기 변동성이 커질 수 있음."
-    return "가격 흐름에 영향 줄 수 있는 이슈라 체크할 만함."
+        return "청산·거래량 이슈라 단기 변동성이 커질 수 있는 구간."
+    return "가격 흐름에 영향 줄 수 있어서 시장 반응까지 같이 볼 필요 있음."
 
 
 def indicator_soft_cta(title: str, summary: str) -> str:
@@ -325,16 +325,13 @@ def source_name_from_link(link: str) -> str:
 
 async def build_korean_news_message(session: aiohttp.ClientSession, title: str, summary: str, link: str) -> str:
     title_ko = await translate_to_korean(session, title)
-    summary_ko = await translate_to_korean(session, summary)
     source = source_name_from_link(link)
-    why = news_importance_line(title, summary)
-    cta = indicator_soft_cta(title, summary)
+    line = news_importance_line(title, summary)
 
     return (
         f"📰 [뉴스]\n"
         f"{title_ko}\n\n"
-        f"왜 중요함?\n{why}\n\n"
-        f"{cta}\n\n"
+        f"{line}\n\n"
         f"출처: {source}\n"
         f"{link}"
     )
