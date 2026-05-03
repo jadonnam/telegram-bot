@@ -22,6 +22,7 @@ KST = ZoneInfo("Asia/Seoul")
 
 MARKET_CHECK_SECONDS = 5 * 60
 NEWS_CHECK_SECONDS = 15 * 60
+FUTURES_FLOW_CHECK_SECONDS = 15 * 60
 PREDICTION_CHECK_SECONDS = 60 * 60
 FNG_CHECK_SECONDS = 5 * 60
 KIMCHI_CHECK_SECONDS = 10 * 60
@@ -34,11 +35,12 @@ PRICE_CHANGE_THRESHOLD = 1.5
 VOLUME_SURGE_THRESHOLD = 4.0
 WHALE_NOTIONAL_THRESHOLD = 3_000_000
 SIGNAL_COOLDOWN = timedelta(minutes=45)
+FUTURES_SIGNAL_COOLDOWN = timedelta(minutes=90)
 
-NEWS_DAILY_LIMIT = 4
-NEWS_MIN_INTERVAL = timedelta(minutes=60)
-NEWS_URGENT_SCORE = 10
-NEWS_NORMAL_SCORE = 7
+NEWS_DAILY_LIMIT = 3
+NEWS_MIN_INTERVAL = timedelta(minutes=90)
+NEWS_URGENT_SCORE = 11
+NEWS_NORMAL_SCORE = 8
 NEWS_BLOCK_HOURS = None  # 미국장 시간대도 뉴스 전송: 새벽 1~7시 차단 해제
 
 RSS_FEEDS = (
@@ -129,6 +131,8 @@ class State:
         self.last_fng_zone = "normal"
         self.last_kimchi_zone = "normal"
         self.polymarket_prob_cache: Dict[str, float] = {}
+        self.futures_oi_cache: Dict[str, float] = {}
+        self.futures_last_signal: Dict[str, datetime] = {}
 
         self.whale_seen_ids: Deque[int] = deque(maxlen=8000)
         self.whale_seen_set = set()
@@ -385,6 +389,108 @@ async def get_recent_klines(session: aiohttp.ClientSession, symbol: str) -> Opti
         "https://api.binance.com/api/v3/klines",
         {"symbol": symbol, "interval": "5m", "limit": 3},
     )
+
+
+
+async def get_funding_rate(session: aiohttp.ClientSession, symbol: str) -> Optional[float]:
+    data = await fetch_json(
+        session,
+        "https://fapi.binance.com/fapi/v1/premiumIndex",
+        {"symbol": symbol},
+    )
+    if not data or "lastFundingRate" not in data:
+        return None
+    return float(data["lastFundingRate"]) * 100
+
+
+async def get_open_interest(session: aiohttp.ClientSession, symbol: str) -> Optional[float]:
+    data = await fetch_json(
+        session,
+        "https://fapi.binance.com/fapi/v1/openInterest",
+        {"symbol": symbol},
+    )
+    if not data or "openInterest" not in data:
+        return None
+    return float(data["openInterest"])
+
+
+async def get_orderbook_imbalance(session: aiohttp.ClientSession, symbol: str) -> Optional[Tuple[float, float, float]]:
+    data = await fetch_json(
+        session,
+        "https://fapi.binance.com/fapi/v1/depth",
+        {"symbol": symbol, "limit": "100"},
+    )
+    if not data:
+        return None
+    bids = data.get("bids") or []
+    asks = data.get("asks") or []
+    bid_notional = sum(float(price) * float(qty) for price, qty in bids[:50])
+    ask_notional = sum(float(price) * float(qty) for price, qty in asks[:50])
+    if ask_notional <= 0:
+        return None
+    imbalance = bid_notional / ask_notional
+    return imbalance, bid_notional, ask_notional
+
+
+def futures_signal_comment(symbol: str, funding_pct: float, oi_change_pct: float, imbalance: float) -> Optional[str]:
+    coin = symbol.replace("USDT", "")
+    if funding_pct >= 0.05 and oi_change_pct >= 3:
+        return f"{coin} 롱 쏠림 강함. 올라가도 추격보다 눌림 확인이 더 안전한 구간."
+    if funding_pct <= -0.05 and oi_change_pct >= 3:
+        return f"{coin} 숏 쏠림 강함. 아래로 밀려도 숏 추격은 조심할 자리."
+    if oi_change_pct >= 5:
+        return f"{coin} 미결제약정이 빠르게 늘어남. 곧 변동성 커질 수 있는 구간."
+    if imbalance >= 1.8:
+        return f"{coin} 매수 호가가 두꺼움. 단기 지지 시도는 있지만 가짜 지지도 조심."
+    if imbalance <= 0.55:
+        return f"{coin} 매도 호가가 두꺼움. 위로 갈수록 물량에 막힐 수 있는 자리."
+    return None
+
+
+async def futures_flow_monitor(bot: Bot, state: State) -> None:
+    async with aiohttp.ClientSession() as session:
+        while True:
+            started = utc_now()
+            try:
+                for symbol in SYMBOLS:
+                    now = utc_now()
+                    funding = await get_funding_rate(session, symbol)
+                    oi = await get_open_interest(session, symbol)
+                    ob = await get_orderbook_imbalance(session, symbol)
+                    if funding is None or oi is None or ob is None:
+                        continue
+
+                    old_oi = state.futures_oi_cache.get(symbol)
+                    state.futures_oi_cache[symbol] = oi
+                    if not old_oi or old_oi <= 0:
+                        continue
+
+                    oi_change = ((oi - old_oi) / old_oi) * 100
+                    imbalance, bid_notional, ask_notional = ob
+                    comment = futures_signal_comment(symbol, funding, oi_change, imbalance)
+                    if not comment:
+                        continue
+
+                    signal_key = f"futures-flow:{symbol}"
+                    last_at = state.futures_last_signal.get(signal_key)
+                    if last_at and now - last_at < FUTURES_SIGNAL_COOLDOWN:
+                        continue
+
+                    strength = "강함" if abs(oi_change) >= 5 or abs(funding) >= 0.08 else "주의"
+                    msg = (
+                        f"🧭 [선물 수급 감지 · {strength}]\n"
+                        f"{symbol.replace('USDT', '')} 펀딩비 {funding:+.3f}%\n"
+                        f"미결제약정 변화 {oi_change:+.1f}%\n"
+                        f"오더북 비율 {imbalance:.2f}\n\n"
+                        f"{comment}"
+                    )
+                    await safe_send(bot, msg, disable_preview=True)
+                    state.futures_last_signal[signal_key] = now
+            except Exception:
+                logging.exception("선물 수급 감지 오류")
+
+            elapsed = (utc_now() - started).total_seconds()
+            await asyncio.sleep(max(5, FUTURES_FLOW_CHECK_SECONDS - int(elapsed)))
 
 
 async def get_upbit_btc_krw(session: aiohttp.ClientSession) -> Optional[float]:
@@ -1020,6 +1126,7 @@ async def run_forever() -> None:
         asyncio.create_task(kimchi_monitor(bot, state)),
         asyncio.create_task(whale_monitor(bot, state)),
         asyncio.create_task(news_monitor(bot, state)),
+        asyncio.create_task(futures_flow_monitor(bot, state)),
         asyncio.create_task(referral_scheduler(bot, state)),
         asyncio.create_task(market_session_scheduler(bot, state)),
     ]
