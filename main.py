@@ -246,6 +246,17 @@ def news_importance_line(title: str, summary: str) -> str:
         return "청산·거래량 이슈라 단기 변동성이 커질 수 있는 구간."
     return "당장 방향보다 시장 반응까지 같이 확인해야 하는 뉴스."
 
+
+def news_display_tag(title: str, summary: str) -> str:
+    score = news_importance_score(title, summary)
+    display_score = max(1, min(10, score))
+
+    if is_urgent_news(title, summary):
+        return f"🚨 [속보 · 중요도 {display_score}/10]"
+    if score >= NEWS_URGENT_SCORE:
+        return f"🔥 [핵심 · 중요도 {display_score}/10]"
+    return f"📰 [주요뉴스 · 중요도 {display_score}/10]"
+
 def market_one_liner(btc_24h_pct: float) -> str:
     if btc_24h_pct >= 2.0:
         return "BTC 저항선 테스트 중. 돌파 여부 주목."
@@ -339,12 +350,12 @@ async def build_korean_news_message(session: aiohttp.ClientSession, title: str, 
     title_ko = await translate_to_korean(session, title)
     source = source_name_from_link(link)
     line = news_importance_line(title, summary)
-    tag = "🚨 [속보]" if is_urgent_news(title, summary) else "📰 [뉴스]"
+    tag = news_display_tag(title, summary)
 
     return (
         f"{tag}\n"
         f"{title_ko}\n\n"
-        f"{line}\n\n"
+        f"시장 해석: {line}\n\n"
         f"출처: {source}\n"
         f"{link}"
     )
