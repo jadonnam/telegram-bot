@@ -43,19 +43,58 @@ RSS_FEEDS = (
     "https://www.coindesk.com/arc/outboundfeeds/rss/",
     "https://cointelegraph.com/rss",
 )
+# 뉴스는 너무 기술적인 기사보다 가격/정책/거시/규제/거래소 이슈 위주로 보냄
 NEWS_KEYWORDS = (
+    "bitcoin",
     "btc",
+    "ethereum",
     "eth",
+    "solana",
     "sol",
     "etf",
-    "cpi",
     "fed",
+    "fomc",
+    "cpi",
+    "inflation",
+    "interest rate",
+    "rate cut",
+    "sec",
+    "regulation",
+    "lawsuit",
+    "tariff",
+    "trump",
+    "dollar",
+    "oil",
+    "hack",
+    "exploit",
+    "exchange",
+    "binance",
+    "coinbase",
     "금리",
     "유가",
     "달러",
     "연준",
-    "trump",
-    "bitcoin",
+    "규제",
+    "해킹",
+    "거래소",
+)
+
+# 일반 구독자에게 덜 중요한 개발자/기술 논쟁성 뉴스는 차단
+NEWS_BLOCK_KEYWORDS = (
+    "airdrop",
+    "fork",
+    "ecash",
+    "developer",
+    "developers",
+    "github",
+    "testnet",
+    "protocol upgrade",
+    "whitepaper",
+    "podcast",
+    "interview",
+    "opinion",
+    "guide",
+    "how to",
 )
 POLY_KEYWORDS = ("btc", "eth", "금리", "전쟁", "trump")
 
@@ -135,6 +174,28 @@ def news_id(title: str, link: str, published: str) -> str:
 def has_keyword(text: str, keywords: Tuple[str, ...]) -> bool:
     lowered = text.lower()
     return any(k in lowered for k in keywords)
+
+
+def is_high_quality_news(title: str, summary: str) -> bool:
+    text = f"{title}\n{summary}".lower()
+    if any(k in text for k in NEWS_BLOCK_KEYWORDS):
+        return False
+    return any(k in text for k in NEWS_KEYWORDS)
+
+
+def news_importance_line(title: str, summary: str) -> str:
+    text = f"{title}\n{summary}".lower()
+    if any(k in text for k in ("etf", "sec", "regulation", "lawsuit", "규제")):
+        return "규제·ETF 이슈라 시장 방향에 바로 영향 줄 수 있음."
+    if any(k in text for k in ("fed", "fomc", "cpi", "inflation", "interest rate", "rate cut", "금리", "연준")):
+        return "금리 기대가 흔들리면 코인·주식 둘 다 같이 움직일 수 있음."
+    if any(k in text for k in ("hack", "exploit", "해킹")):
+        return "보안 이슈는 단기 심리를 빠르게 식힐 수 있음."
+    if any(k in text for k in ("exchange", "binance", "coinbase", "거래소")):
+        return "거래소 이슈는 수급과 투자심리에 바로 연결됨."
+    if any(k in text for k in ("trump", "tariff", "dollar", "oil", "유가", "달러")):
+        return "거시 이슈라 위험자산 분위기를 흔들 수 있음."
+    return "가격 흐름에 영향 줄 수 있는 이슈라 체크할 만함."
 
 
 def market_one_liner(btc_24h_pct: float) -> str:
@@ -230,9 +291,18 @@ async def build_korean_news_message(session: aiohttp.ClientSession, title: str, 
     title_ko = await translate_to_korean(session, title)
     summary_ko = await translate_to_korean(session, summary)
     source = source_name_from_link(link)
+    why = news_importance_line(title, summary)
+
+    # 너무 길면 채널 가독성이 떨어져서 핵심만 짧게 보냄
     if summary_ko:
-        return f"📰 [뉴스]\n{title_ko}\n\n핵심: {summary_ko}\n출처: {source}\n{link}"
-    return f"📰 [뉴스]\n{title_ko}\n\n출처: {source}\n{link}"
+        return (
+            f"📰 [뉴스]\n"
+            f"{title_ko}\n\n"
+            f"왜 중요하냐면: {why}\n"
+            f"출처: {source}\n"
+            f"{link}"
+        )
+    return f"📰 [뉴스]\n{title_ko}\n\n왜 중요하냐면: {why}\n출처: {source}\n{link}"
 
 
 async def get_binance_ticker_24h(session: aiohttp.ClientSession, symbol: str) -> Optional[dict]:
@@ -662,7 +732,7 @@ async def news_monitor(bot: Bot, state: State) -> None:
 
                             if not title or not link:
                                 continue
-                            if not has_keyword(f"{title}\n{summary}", NEWS_KEYWORDS):
+                            if not is_high_quality_news(title, summary):
                                 continue
 
                             nid = news_id(title, link, published)
@@ -677,8 +747,8 @@ async def news_monitor(bot: Bot, state: State) -> None:
                                 continue
 
                             msg = await build_korean_news_message(session, title, summary, link)
-                            # 링크 미리보기는 원문 영어 카드가 떠서 끔
-                            await safe_send(bot, msg, disable_preview=True)
+                            # 링크 미리보기 켬: 텔레그램에서 기사 썸네일/사진이 다시 보이게 함
+                            await safe_send(bot, msg, disable_preview=False)
                             state.mark_news(nid)
                             state.last_news_sent_at = now
                             state.news_daily_count += 1
