@@ -777,6 +777,31 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
             await asyncio.sleep(max(5, MARKET_SESSION_CHECK_SECONDS - int(elapsed)))
 
 
+def resolve_telegram_token() -> Tuple[str, str]:
+    """Railway 변수명 실수 완화. 값은 노출하지 않고 요약만 로그한다."""
+    keys = ("TELEGRAM_TOKEN", "BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "TG_BOT_TOKEN")
+    summary: list[str] = []
+    for key in keys:
+        raw = os.getenv(key)
+        if raw is None:
+            summary.append(f"{key}=없음")
+            continue
+        stripped = raw.strip()
+        if not stripped:
+            summary.append(f"{key}=빈값")
+            continue
+        if key != "TELEGRAM_TOKEN":
+            logging.warning("토큰을 %s 에서 사용 중입니다. 가능하면 Railway 에 TELEGRAM_TOKEN 으로 통일하세요.", key)
+        return stripped, key
+    logging.error(
+        "봇 토큰 미설정. 같은 프로젝트의 **환경(Environment): Production** 과 "
+        "**지금 로그 나는 서비스(worker)** 의 Variables 에 TELEGRAM_TOKEN 을 두었는지 확인하세요. "
+        "[%s]",
+        " | ".join(summary),
+    )
+    return "", ""
+
+
 async def railway_port_health_server() -> None:
     """Railway 등에서 PORT 에 바인딩하지 않으면 배포 실패·재시작 되는 설정이 많아 둠."""
     port_s = os.getenv("PORT")
@@ -798,11 +823,8 @@ async def railway_port_health_server() -> None:
 
 
 async def run_forever() -> None:
-    token = (os.getenv("TELEGRAM_TOKEN") or "").strip()
+    token, _ = resolve_telegram_token()
     if not token:
-        logging.error(
-            "TELEGRAM_TOKEN 이 비어 있습니다. Railway Variables 이름은 TELEGRAM_TOKEN (대문자) 인지 확인하세요."
-        )
         raise RuntimeError("TELEGRAM_TOKEN 환경변수가 필요합니다.")
 
     bot = Bot(token=token)
@@ -841,8 +863,8 @@ if __name__ == "__main__":
         except RuntimeError as e:
             if "TELEGRAM_TOKEN" in str(e):
                 logging.error(
-                    "TELEGRAM_TOKEN 없음: Railway → 해당 서비스 → Variables 에 "
-                    "이름 정확히 TELEGRAM_TOKEN, 값은 BotFather 가 준 토큰 문자열 추가 후 재배포."
+                    "토큰 없음: 로그 상단의 '환경 요약' 을 참고하고, Railway 에서 Production 환경·worker 서비스 "
+                    "Variables 에 TELEGRAM_TOKEN(또는 BOT_TOKEN 등) 확인 후 재배포하세요."
                 )
                 time.sleep(60)
                 continue
