@@ -42,15 +42,17 @@ FUTURES_SIGNAL_COOLDOWN = timedelta(minutes=90)
 BTC_PRICE_MILESTONES = (60000, 70000, 75000, 80000, 85000, 90000, 100000)
 PRICE_MILESTONE_COOLDOWN = timedelta(hours=18)
 
-NEWS_DAILY_LIMIT = 5
+NEWS_DAILY_LIMIT = 4
 NEWS_MIN_INTERVAL = timedelta(minutes=60)
 NEWS_URGENT_SCORE = 9
-NEWS_NORMAL_SCORE = 6
+NEWS_NORMAL_SCORE = 8
 NEWS_BLOCK_HOURS = None  # 미국장 시간대도 뉴스 전송: 새벽 1~7시 차단 해제
 
 RSS_FEEDS = (
     "https://www.coindesk.com/arc/outboundfeeds/rss/",
     "https://cointelegraph.com/rss",
+    # 지정학 속보 보강: RSS 원문이 느릴 때 Google News RSS로 보완
+    "https://news.google.com/rss/search?q=(Iran%20OR%20Hormuz%20OR%20UAE%20OR%20Israel%20OR%20missile%20OR%20warship%20OR%20tanker)%20(US%20Navy%20OR%20oil%20OR%20attack%20OR%20strike)&hl=ko&gl=KR&ceid=KR:ko",
 )
 # 뉴스는 너무 기술적인 기사보다 가격/정책/거시/규제/거래소 이슈 위주로 보냄
 NEWS_KEYWORDS = (
@@ -290,11 +292,25 @@ def news_importance_score(title: str, summary: str) -> int:
 
 
 def normalized_news_score(title: str, summary: str) -> int:
+    if is_forced_breaking_news(title, summary):
+        return 10
     return max(0, min(10, news_importance_score(title, summary)))
+
+
+def is_forced_breaking_news(title: str, summary: str) -> bool:
+    """시장 영향이 큰 지정학/군사 속보는 일반 뉴스 점수를 우회해 통과."""
+    text = f"{title}\n{summary}".lower()
+    has_breaking = any(k in text for k in BREAKING_FORCE_TERMS)
+    # 군사/전쟁 단어가 있으면 시장 키워드가 없어도 속보로 인정. 단, 너무 잡다한 글은 제외.
+    has_market = any(k in text for k in BREAKING_MARKET_CONTEXT_TERMS)
+    return has_breaking and (has_market or any(k in text for k in ("iran", "hormuz", "israel", "이란", "호르무즈", "이스라엘")))
 
 
 def is_high_quality_news(title: str, summary: str) -> bool:
     text = f"{title}\n{summary}".lower()
+    # 속보 예외: 군함/미사일/호르무즈/이란 등은 일반 점수보다 우선
+    if is_forced_breaking_news(title, summary):
+        return True
     if any(k in text for k in NEWS_BLOCK_KEYWORDS):
         return False
     if not any(k in text for k in NEWS_KEYWORDS):
@@ -303,6 +319,8 @@ def is_high_quality_news(title: str, summary: str) -> bool:
 
 
 def is_urgent_news(title: str, summary: str) -> bool:
+    if is_forced_breaking_news(title, summary):
+        return True
     text = f"{title}\n{summary}".lower()
     hard_urgent = (
         "breaking", "urgent", "emergency", "sec approves", "sec rejects",
@@ -366,18 +384,34 @@ async def safe_send(bot: Bot, text: str, disable_preview: bool = False) -> None:
         logging.exception("Telegram 전송 실패 (chat_id=%s)", CHANNEL_ID)
 
 
+REQUEST_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+    "Accept": "application/json,text/plain,*/*",
+}
+
+
 async def fetch_json(session: aiohttp.ClientSession, url: str, params: Optional[dict] = None):
-    async with session.get(url, params=params, timeout=20) as response:
-        if response.status != 200:
-            return None
-        return await response.json()
+    try:
+        async with session.get(url, params=params, timeout=20, headers=REQUEST_HEADERS) as response:
+            if response.status != 200:
+                logging.warning("fetch_json 실패 status=%s url=%s", response.status, url)
+                return None
+            return await response.json()
+    except Exception:
+        logging.exception("fetch_json 예외 url=%s", url)
+        return None
 
 
 async def fetch_text(session: aiohttp.ClientSession, url: str):
-    async with session.get(url, timeout=25) as response:
-        if response.status != 200:
-            return None
-        return await response.text()
+    try:
+        async with session.get(url, timeout=25, headers=REQUEST_HEADERS) as response:
+            if response.status != 200:
+                logging.warning("fetch_text 실패 status=%s url=%s", response.status, url)
+                return None
+            return await response.text()
+    except Exception:
+        logging.exception("fetch_text 예외 url=%s", url)
+        return None
 
 
 def clean_text(value: str, limit: int = 180) -> str:
@@ -415,10 +449,84 @@ def source_name_from_link(link: str) -> str:
         return "CoinDesk"
     if "cointelegraph" in lowered:
         return "Cointelegraph"
+    if "news.google" in lowered or "google.com" in lowered:
+        return "Google News"
     return "RSS"
 
 
-async def build_korean_news_message(session: aiohttp.ClientSession, title: str, summary: str, link: str) -> str:
+def build_threads_text(title_ko: str, title: str, summary: str) -> str:
+    """스레드용: 출처/링크 없이 3~5문장 느낌으로 짧게 변환."""
+    text = f"{title}\n{summary}".lower()
+
+    if is_forced_breaking_news(title, summary):
+        return (
+            f"속보성 이슈다.\n\n"
+            f"{title_ko}\n\n"
+            f"중동 리스크가 다시 커지면 유가, 달러, 비트코인이 같이 흔들릴 수 있다.\n\n"
+            f"지금은 가격보다 뉴스 반응을 먼저 봐야 하는 구간."
+        )[:500]
+    if "etf" in text:
+        return (
+            f"비트코인 ETF 쪽 돈 흐름이 다시 살아나는 중이다.\n\n"
+            f"아직 완전 회복은 아니지만, 기관 자금이 천천히 돌아오는 신호다.\n\n"
+            f"이 흐름이 계속 쌓이면 가격도 늦게 반응할 수 있다."
+        )[:500]
+    if any(k in text for k in ("fed", "fomc", "cpi", "inflation", "금리", "연준")):
+        return (
+            f"지금 시장은 금리 뉴스에 예민하다.\n\n"
+            f"금리 기대가 바뀌면 주식이랑 비트코인이 같이 움직인다.\n\n"
+            f"그래서 오늘은 차트보다 발표 이후 반응이 더 중요하다."
+        )[:500]
+    return (
+        f"{title_ko}\n\n"
+        f"지금은 뉴스 하나에도 시장이 바로 흔들리는 구간이다.\n\n"
+        f"가격이 어디서 버티는지 같이 봐야 한다."
+    )[:500]
+
+
+async def publish_to_threads(session: aiohttp.ClientSession, text: str) -> None:
+    if not THREADS_AUTO_POST:
+        return
+    if not THREADS_USER_ID or not THREADS_ACCESS_TOKEN:
+        logging.warning("Threads 자동 업로드 설정 없음: THREADS_USER_ID / THREADS_ACCESS_TOKEN 확인")
+        return
+
+    try:
+        create_url = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads"
+        payload = {"access_token": THREADS_ACCESS_TOKEN, "text": text[:500]}
+        if THREADS_IMAGE_URL:
+            payload["media_type"] = "IMAGE"
+            payload["image_url"] = THREADS_IMAGE_URL
+        else:
+            payload["media_type"] = "TEXT"
+
+        async with session.post(create_url, data=payload, timeout=30) as response:
+            created = await response.json()
+            if response.status >= 300:
+                logging.error("Threads 컨테이너 생성 실패: %s", created)
+                return
+
+        creation_id = created.get("id")
+        if not creation_id:
+            logging.error("Threads creation_id 없음: %s", created)
+            return
+
+        publish_url = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads_publish"
+        async with session.post(
+            publish_url,
+            data={"access_token": THREADS_ACCESS_TOKEN, "creation_id": creation_id},
+            timeout=30,
+        ) as response:
+            published = await response.json()
+            if response.status >= 300:
+                logging.error("Threads 게시 실패: %s", published)
+                return
+        logging.info("Threads 자동 업로드 완료: %s", published)
+    except Exception:
+        logging.exception("Threads 자동 업로드 오류")
+
+
+async def build_korean_news_message(session: aiohttp.ClientSession, title: str, summary: str, link: str) -> Tuple[str, str]:
     title_ko = await translate_to_korean(session, title)
     source = source_name_from_link(link)
     score = normalized_news_score(title, summary)
@@ -431,13 +539,15 @@ async def build_korean_news_message(session: aiohttp.ClientSession, title: str, 
     else:
         tag = f"📰 [뉴스 · 중요도 {score}/10]"
 
-    return (
+    telegram_msg = (
         f"{tag}\n"
         f"{title_ko}\n\n"
-        f"{line}\n\n"
+        f"시장 해석: {line}\n\n"
         f"출처: {source}\n"
         f"{link}"
     )
+    threads_text = build_threads_text(title_ko, title, summary)
+    return telegram_msg, threads_text
 
 
 async def get_binance_ticker_24h(session: aiohttp.ClientSession, symbol: str) -> Optional[dict]:
@@ -988,9 +1098,10 @@ async def news_monitor(bot: Bot, state: State) -> None:
                             ):
                                 continue
 
-                            msg = await build_korean_news_message(session, title, summary, link)
+                            msg, threads_text = await build_korean_news_message(session, title, summary, link)
                             # 링크 미리보기 켬: 텔레그램에서 기사 썸네일/사진이 다시 보이게 함
                             await safe_send(bot, msg, disable_preview=False)
+                            await publish_to_threads(session, threads_text)
                             logging.info("뉴스 전송 완료 score=%s urgent=%s title=%s", score, urgent, clean_text(title, 80))
                             state.mark_news(nid)
                             state.last_news_sent_at = now
@@ -1087,13 +1198,23 @@ def us_close_conclusion(sp_pct: float, nq_pct: float, dji_pct: float) -> str:
     return "혼조 마감. 한국장은 환율과 선물 흐름이 방향을 정할 가능성."
 
 
+def append_if_value(lines: list[str], name: str, snap: Optional[Tuple[float, float]], digits: int = 2) -> None:
+    if snap:
+        price, pct = snap
+        lines.append(f"{name}: {price:,.{digits}f} ({fmt_pct(pct)})")
+
+
+def session_data_note(lines: list[str], required_min: int = 2) -> str:
+    # 데이터가 거의 없을 때만 짧게 알림. '확인중' 도배 방지.
+    return "" if len(lines) >= required_min else "\n데이터 일부 지연 중. 핵심 가격 반응 우선 확인."
+
+
 async def market_session_scheduler(bot: Bot, state: State) -> None:
     """
     10만명 정보방 운영용 고정 브리핑.
-    핵심 원칙:
-    - 정해진 시간에 가깝게 하루 1회 발송
-    - API 일부 실패해도 '확인중'으로 보내고 조용히 씹지 않음
-    - 10분 전송창만 사용: 사람들에게 '이 시간에 올라온다'는 습관을 만들기 위함
+    - 정해진 시간대 10분 창 안에서 1회 전송
+    - '확인중' 도배 금지: 받아온 데이터만 보여주고, 없으면 짧은 데이터 지연 문구만 표시
+    - Yahoo 응답 실패 대비: BTC/김프/공포탐욕 등 가능한 데이터로 메시지는 무조건 발송
 
     발송 시간대(KST):
     - 한국장 1시간 전: 08:00~08:10, 월~금
@@ -1103,19 +1224,20 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
     """
 
     def in_send_window(now: datetime, hour: int, minute: int, window_minutes: int = 10) -> bool:
-        """정해진 시각부터 window_minutes 안에서만 전송. 기본 10분."""
         start = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         end = start + timedelta(minutes=window_minutes)
         return start <= now < end
 
-    def snap_line(name: str, snap: Optional[Tuple[float, float]], digits: int = 2) -> str:
-        if not snap:
-            return f"{name}: 확인중"
-        price, pct = snap
-        return f"{name}: {price:,.{digits}f} ({fmt_pct(pct)})"
-
     def pct_or_zero(snap: Optional[Tuple[float, float]]) -> float:
         return float(snap[1]) if snap else 0.0
+
+    async def btc_line(session: aiohttp.ClientSession) -> Tuple[str, float]:
+        btc = await get_binance_ticker_24h(session, "BTCUSDT")
+        if not btc:
+            return "BTC: 데이터 지연", 0.0
+        price = float(btc["lastPrice"])
+        pct = float(btc["priceChangePercent"])
+        return f"BTC: {price:,.0f} USDT ({fmt_pct(pct)})", pct
 
     async with aiohttp.ClientSession() as session:
         while True:
@@ -1123,7 +1245,6 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
             try:
                 now = now_kst()
 
-                # 🇰🇷 한국장 1시간 전: 08:00~09:00 (정각 우선 + 보정)
                 if is_korean_market_weekday(now) and in_send_window(now, 8, 0, 10):
                     key = "kr_pre_0800"
                     if state.market_session_sent_dates.get(key) != now.date():
@@ -1132,37 +1253,34 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         usd_krw = await get_usd_krw(session)
                         sp_fut = await get_yahoo_snapshot(session, "ES%3DF")
                         nq_fut = await get_yahoo_snapshot(session, "NQ%3DF")
+                        btc_text, _ = await btc_line(session)
+
+                        lines = ["🇰🇷 [한국장 1시간 전]"]
+                        append_if_value(lines, "코스피", kospi)
+                        append_if_value(lines, "코스닥", kosdaq)
+                        if usd_krw:
+                            lines.append(f"달러/원: {usd_krw:,.2f}원")
+                        append_if_value(lines, "S&P500 선물", sp_fut)
+                        append_if_value(lines, "나스닥 선물", nq_fut)
+                        lines.append(btc_text)
 
                         us_flow = market_direction_label(pct_or_zero(sp_fut), pct_or_zero(nq_fut))
                         conclusion = kr_open_conclusion(
-                            pct_or_zero(kospi),
-                            pct_or_zero(kosdaq),
-                            pct_or_zero(sp_fut),
-                            pct_or_zero(nq_fut),
-                            usd_krw or 0,
+                            pct_or_zero(kospi), pct_or_zero(kosdaq),
+                            pct_or_zero(sp_fut), pct_or_zero(nq_fut), usd_krw or 0,
                         )
-                        msg = (
-                            "🇰🇷 [한국장 1시간 전]\n"
-                            f"{snap_line('코스피', kospi)}\n"
-                            f"{snap_line('코스닥', kosdaq)}\n"
-                            f"달러/원: {usd_krw:,.2f}원\n" if usd_krw else "달러/원: 확인중\n"
-                        ) + (
-                            f"{snap_line('S&P500 선물', sp_fut)}\n"
-                            f"{snap_line('나스닥 선물', nq_fut)}\n\n"
-                            f"시장 분위기: {us_flow}\n"
-                            f"📌 오늘 결론: {conclusion}"
-                        )
+                        msg = "\n".join(lines) + session_data_note(lines) + f"\n\n시장 분위기: {us_flow}\n📌 오늘 결론: {conclusion}"
                         await safe_send(bot, msg, disable_preview=True)
                         state.market_session_sent_dates[key] = now.date()
                         logging.info("한국장 1시간 전 브리핑 전송 완료")
 
-                # 🔔 한국장 마감: 15:30~17:00 (정각 우선 + 보정)
                 if is_korean_market_weekday(now) and in_send_window(now, 15, 30, 10):
                     key = "kr_close_1530"
                     if state.market_session_sent_dates.get(key) != now.date():
                         kospi = await get_yahoo_snapshot(session, "%5EKS11")
                         kosdaq = await get_yahoo_snapshot(session, "%5EKQ11")
                         usd_krw = await get_usd_krw(session)
+                        btc_text, _ = await btc_line(session)
 
                         kp = pct_or_zero(kospi)
                         kq = pct_or_zero(kosdaq)
@@ -1176,23 +1294,21 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                             else:
                                 feature = "지수 전반 약세"
                         else:
-                            feature = "데이터 일부 확인중. 환율과 미국 선물 확인 필요"
+                            feature = "데이터 지연. 환율·미국 선물 흐름 확인 필요"
+
+                        lines = ["🔔 [한국장 마감 정리]"]
+                        append_if_value(lines, "코스피", kospi)
+                        append_if_value(lines, "코스닥", kosdaq)
+                        if usd_krw:
+                            lines.append(f"달러/원: {usd_krw:,.0f}원")
+                        lines.append(btc_text)
 
                         conclusion = kr_close_conclusion(kp, kq, usd_krw or 0)
-                        msg = (
-                            "🔔 [한국장 마감 정리]\n"
-                            f"{snap_line('코스피', kospi)}\n"
-                            f"{snap_line('코스닥', kosdaq)}\n"
-                            f"달러/원: {usd_krw:,.0f}원\n\n" if usd_krw else "달러/원: 확인중\n\n"
-                        ) + (
-                            f"오늘 특징: {feature}\n"
-                            f"📌 오늘 결론: {conclusion}"
-                        )
+                        msg = "\n".join(lines) + session_data_note(lines) + f"\n\n오늘 특징: {feature}\n📌 오늘 결론: {conclusion}"
                         await safe_send(bot, msg, disable_preview=True)
                         state.market_session_sent_dates[key] = now.date()
                         logging.info("한국장 마감 브리핑 전송 완료")
 
-                # 🇺🇸 미국장 1시간 전: 21:30~22:30 (정각 우선 + 보정)
                 if is_us_market_premarket_day(now) and in_send_window(now, 21, 30, 10):
                     key = "us_pre_2130"
                     if state.market_session_sent_dates.get(key) != now.date():
@@ -1200,34 +1316,26 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         nq_fut = await get_yahoo_snapshot(session, "NQ%3DF")
                         dxy = await get_yahoo_snapshot(session, "DX-Y.NYB")
                         tnx = await get_yahoo_snapshot(session, "%5ETNX")
-                        btc = await get_binance_ticker_24h(session, "BTCUSDT")
-                        btc_line = "BTC: 확인중"
-                        btc_pct = 0.0
-                        if btc:
-                            btc_price = float(btc["lastPrice"])
-                            btc_pct = float(btc["priceChangePercent"])
-                            btc_line = f"BTC: {btc_price:,.0f} USDT ({fmt_pct(btc_pct)})"
+                        btc_text, btc_pct = await btc_line(session)
+
+                        lines = ["🇺🇸 [미국장 1시간 전]"]
+                        append_if_value(lines, "S&P500 선물", sp_fut)
+                        append_if_value(lines, "나스닥 선물", nq_fut)
+                        append_if_value(lines, "달러인덱스", dxy)
+                        append_if_value(lines, "10년물 금리", tnx)
+                        lines.append(btc_text)
 
                         conclusion = us_open_conclusion(
-                            pct_or_zero(sp_fut),
-                            pct_or_zero(nq_fut),
-                            pct_or_zero(dxy),
-                            pct_or_zero(tnx),
+                            pct_or_zero(sp_fut), pct_or_zero(nq_fut),
+                            pct_or_zero(dxy), pct_or_zero(tnx),
                         )
-                        msg = (
-                            "🇺🇸 [미국장 1시간 전]\n"
-                            f"{snap_line('S&P500 선물', sp_fut)}\n"
-                            f"{snap_line('나스닥 선물', nq_fut)}\n"
-                            f"{snap_line('달러인덱스', dxy)}\n"
-                            f"{snap_line('10년물 금리', tnx)}\n"
-                            f"{btc_line}\n\n"
-                            f"📌 오늘 결론: {conclusion}"
-                        )
+                        if len(lines) <= 2:
+                            conclusion = "미국 지수 데이터 지연. 지금은 BTC 가격 반응과 첫 30분 변동성 확인이 먼저."
+                        msg = "\n".join(lines) + session_data_note(lines) + f"\n\n📌 오늘 결론: {conclusion}"
                         await safe_send(bot, msg, disable_preview=True)
                         state.market_session_sent_dates[key] = now.date()
                         logging.info("미국장 1시간 전 브리핑 전송 완료")
 
-                # 🌙 미국장 마감: 05:00~07:00 (정각 우선 + 보정)
                 if is_us_market_close_day(now) and in_send_window(now, 5, 0, 10):
                     key = "us_close_0500"
                     if state.market_session_sent_dates.get(key) != now.date():
@@ -1236,25 +1344,20 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         dji = await get_yahoo_snapshot(session, "%5EDJI")
                         dxy = await get_yahoo_snapshot(session, "DX-Y.NYB")
                         tnx = await get_yahoo_snapshot(session, "%5ETNX")
-                        btc = await get_binance_ticker_24h(session, "BTCUSDT")
+                        btc_text, _ = await btc_line(session)
+
+                        lines = ["🌙 [미국장 마감 정리]"]
+                        append_if_value(lines, "S&P500", spx)
+                        append_if_value(lines, "나스닥", ixic)
+                        append_if_value(lines, "다우", dji)
+                        append_if_value(lines, "달러인덱스", dxy)
+                        append_if_value(lines, "10년물 금리", tnx)
+                        lines.append(btc_text)
 
                         conclusion = us_close_conclusion(pct_or_zero(spx), pct_or_zero(ixic), pct_or_zero(dji))
-                        btc_line = "BTC: 확인중"
-                        if btc:
-                            btc_price = float(btc["lastPrice"])
-                            btc_pct = float(btc["priceChangePercent"])
-                            btc_line = f"BTC: {btc_price:,.0f} USDT ({fmt_pct(btc_pct)})"
-
-                        msg = (
-                            "🌙 [미국장 마감 정리]\n"
-                            f"{snap_line('S&P500', spx)}\n"
-                            f"{snap_line('나스닥', ixic)}\n"
-                            f"{snap_line('다우', dji)}\n"
-                            f"{snap_line('달러인덱스', dxy)}\n"
-                            f"{snap_line('10년물 금리', tnx)}\n"
-                            f"{btc_line}\n\n"
-                            f"📌 오늘 결론: {conclusion}"
-                        )
+                        if len(lines) <= 2:
+                            conclusion = "미국장 데이터 지연. BTC와 한국장 선물 반응을 우선 확인."
+                        msg = "\n".join(lines) + session_data_note(lines) + f"\n\n📌 오늘 결론: {conclusion}"
                         await safe_send(bot, msg, disable_preview=True)
                         state.market_session_sent_dates[key] = now.date()
                         logging.info("미국장 마감 브리핑 전송 완료")
@@ -1264,7 +1367,6 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
 
             elapsed = (utc_now() - started).total_seconds()
             await asyncio.sleep(max(5, MARKET_SESSION_CHECK_SECONDS - int(elapsed)))
-
 
 def resolve_telegram_token() -> Tuple[str, str]:
     """Railway 변수명 실수 완화. 값은 노출하지 않고 요약만 로그한다."""
