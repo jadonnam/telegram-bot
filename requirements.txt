@@ -1,4 +1,4 @@
-python-telegram-bot
+python-telegram-bot==22.7
 aiohttp
 feedparser
 tzdata
