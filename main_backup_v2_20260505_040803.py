@@ -44,15 +44,10 @@ PRICE_MILESTONE_COOLDOWN = timedelta(hours=18)
 
 BTC_PRICE_MILESTONES = (60000, 70000, 75000, 80000, 85000, 90000, 100000)
 
-NEWS_DAILY_LIMIT = 4
-NEWS_MIN_INTERVAL = timedelta(minutes=45)
+NEWS_DAILY_LIMIT = 5
+NEWS_MIN_INTERVAL = timedelta(minutes=60)
 NEWS_URGENT_SCORE = 8
 NEWS_NORMAL_SCORE = 6
-# 뉴스 도배 방지: 한 번 RSS 체크마다 최대 1개만 전송
-NEWS_MAX_PER_SCAN = 1
-# 속보도 최소 간격 적용. 진짜 지정학 속보만 예외로 빠르게 통과.
-NEWS_URGENT_MIN_INTERVAL = timedelta(minutes=20)
-
 
 RSS_FEEDS = (
     "https://www.coindesk.com/arc/outboundfeeds/rss/",
@@ -599,25 +594,10 @@ def news_importance_score(title: str, summary: str) -> int:
 
 
 def is_forced_breaking_news(title: str, summary: str) -> bool:
-    # 지정학/전쟁/유가/군사 충격만 강제 속보 처리.
-    # 일반 보안뉴스의 attack 단어 하나로 속보 처리되는 문제 방지.
-    text = f"{title}
-{summary}".lower()
-
-    geo_terms = (
-        "iran", "israel", "hormuz", "uae", "warship", "navy", "tanker",
-        "missile", "strike", "explosion", "oil", "war",
-        "이란", "이스라엘", "호르무즈", "군함", "해군", "유조선",
-        "미사일", "피격", "폭발", "전쟁", "유가",
-    )
-    market_terms = (
-        "bitcoin", "btc", "crypto", "market", "oil", "dollar", "stock", "risk",
-        "비트코인", "코인", "시장", "유가", "달러", "주식", "위험자산",
-    )
-
-    has_geo = any(k in text for k in geo_terms)
-    has_market = any(k in text for k in market_terms)
-    return has_geo and has_market
+    text = f"{title}\n{summary}".lower()
+    has_breaking = any(k in text for k in BREAKING_FORCE_TERMS)
+    has_market = any(k in text for k in BREAKING_MARKET_CONTEXT_TERMS)
+    return has_breaking and (has_market or any(k in text for k in ("iran", "hormuz", "israel", "이란", "호르무즈", "이스라엘")))
 
 
 def normalized_news_score(title: str, summary: str) -> int:
@@ -640,22 +620,14 @@ def is_high_quality_news(title: str, summary: str) -> bool:
 def is_urgent_news(title: str, summary: str) -> bool:
     if is_forced_breaking_news(title, summary):
         return True
-
-    text = f"{title}
-{summary}".lower()
-
-    # 일반 거래소/소송/보안 기사까지 속보로 보내지 않게 제한
-    true_urgent = (
-        "sec approves", "sec rejects", "fomc", "cpi",
-        "hacked", "exploit", "freeze", "frozen", "seized",
-        "liquidation", "sell-off", "crash",
-        "승인", "거절", "해킹", "압수", "동결", "청산", "급락",
+    text = f"{title}\n{summary}".lower()
+    hard_urgent = (
+        "breaking", "urgent", "emergency", "sec approves", "sec rejects",
+        "hacked", "exploit", "seized", "freeze", "frozen",
+        "war", "missile", "attack", "tariff", "cpi", "fomc",
+        "속보", "긴급", "해킹", "승인", "거절", "압수", "전쟁", "공격", "미사일", "피격",
     )
-
-    if not any(k in text for k in true_urgent):
-        return False
-
-    return news_importance_score(title, summary) >= NEWS_URGENT_SCORE
+    return any(k in text for k in hard_urgent) and news_importance_score(title, summary) >= NEWS_URGENT_SCORE
 
 
 def news_importance_line(title: str, summary: str) -> str:
@@ -783,13 +755,10 @@ async def build_korean_news_message(session: aiohttp.ClientSession, title: str, 
 
     btc = await get_binance_ticker_24h(session, "BTCUSDT")
     btc_line = ""
-    if btc and btc.get("priceChangePercent") is not None:
-        try:
-            btc_pct = float(btc.get("priceChangePercent"))
-            flow = "상승 흐름" if btc_pct > 0.15 else "하락 압력" if btc_pct < -0.15 else "보합권"
-            btc_line = f"\n\n📊 현재 BTC: {fmt_pct(btc_pct)} ({flow})"
-        except Exception:
-            btc_line = ""
+    if btc:
+        btc_pct = float(btc.get("priceChangePercent", 0))
+        flow = "상승 흐름" if btc_pct > 0 else "하락 압력" if btc_pct < 0 else "보합권"
+        btc_line = f"\n\n📊 현재 BTC: {fmt_pct(btc_pct)} ({flow})"
 
     if is_urgent_news(title, summary):
         telegram_msg = (
@@ -1052,7 +1021,6 @@ async def news_monitor(bot: Bot, state: State) -> None:
     async with aiohttp.ClientSession() as session:
         while True:
             started = utc_now()
-            sent_this_scan = 0
             try:
                 kst = now_kst()
                 if state.news_daily_date != kst.date():
@@ -1061,43 +1029,33 @@ async def news_monitor(bot: Bot, state: State) -> None:
 
                 if state.news_daily_count < NEWS_DAILY_LIMIT:
                     for feed in RSS_FEEDS:
-                        if state.news_daily_count >= NEWS_DAILY_LIMIT or sent_this_scan >= NEWS_MAX_PER_SCAN:
+                        if state.news_daily_count >= NEWS_DAILY_LIMIT:
                             break
-
                         entries = await fetch_feed_entries(session, feed)
-
-                        # 높은 점수 먼저 보내되, 한 번에 1개만
-                        candidates = []
                         for e in entries[:20]:
+                            if state.news_daily_count >= NEWS_DAILY_LIMIT:
+                                break
+
                             title = (e.get("title") or "").strip()
                             link = (e.get("link") or "").strip()
                             summary = (e.get("summary") or "").strip()
                             published = (e.get("published") or "").strip()
+
                             if not title or not link:
+                                continue
+
+                            score = news_importance_score(title, summary)
+                            if not is_high_quality_news(title, summary):
+                                logging.info("뉴스 스킵 score=%s title=%s", score, clean_text(title, 80))
                                 continue
 
                             nid = news_id(title, link, published)
                             if state.has_news(nid):
                                 continue
 
-                            if not is_high_quality_news(title, summary):
-                                logging.info("뉴스 스킵 score=%s title=%s", news_importance_score(title, summary), clean_text(title, 80))
-                                continue
-
-                            score = normalized_news_score(title, summary)
-                            urgent = is_urgent_news(title, summary)
-                            candidates.append((urgent, score, title, summary, link, published, nid))
-
-                        candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
-
-                        for urgent, score, title, summary, link, published, nid in candidates:
-                            if state.news_daily_count >= NEWS_DAILY_LIMIT or sent_this_scan >= NEWS_MAX_PER_SCAN:
-                                break
-
                             now = utc_now()
-                            min_interval = NEWS_URGENT_MIN_INTERVAL if urgent else NEWS_MIN_INTERVAL
-                            if state.last_news_sent_at and (now - state.last_news_sent_at) < min_interval:
-                                logging.info("뉴스 간격 제한 스킵 urgent=%s title=%s", urgent, clean_text(title, 80))
+                            urgent = is_urgent_news(title, summary)
+                            if not urgent and state.last_news_sent_at and (now - state.last_news_sent_at) < NEWS_MIN_INTERVAL:
                                 continue
 
                             msg, threads_text = await build_korean_news_message(session, title, summary, link)
@@ -1108,9 +1066,6 @@ async def news_monitor(bot: Bot, state: State) -> None:
                             state.mark_news(nid)
                             state.last_news_sent_at = now
                             state.news_daily_count += 1
-                            sent_this_scan += 1
-                            break
-
             except Exception:
                 logging.exception("news_monitor 오류")
 
