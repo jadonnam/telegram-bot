@@ -1,12 +1,13 @@
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
 import time
 from collections import defaultdict, deque
 from datetime import date, datetime, timedelta, timezone
-from typing import Deque, Dict, Optional, Tuple
+from typing import Deque, Dict, Optional, Tuple, Any
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -15,101 +16,74 @@ import feedparser
 from telegram import Bot
 
 
-# ============================================================
-# JADONNAM MAIN.PY — 10만명방 기준 종합 안정 버전
-# ============================================================
+# =========================
+# BASIC CONFIG
+# =========================
 
 CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "@jadonnam")
+SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
 KST = ZoneInfo("Asia/Seoul")
 
-SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
-
-# 반복 주기
-MARKET_CHECK_SECONDS = 60
-NEWS_CHECK_SECONDS = 10 * 60
-FUTURES_FLOW_CHECK_SECONDS = 5 * 60
-FNG_CHECK_SECONDS = 10 * 60
+MARKET_CHECK_SECONDS = 5 * 60
+NEWS_CHECK_SECONDS = 15 * 60
+FUTURES_FLOW_CHECK_SECONDS = 15 * 60
+FNG_CHECK_SECONDS = 5 * 60
 KIMCHI_CHECK_SECONDS = 10 * 60
-WHALE_CHECK_SECONDS = 2 * 60
+WHALE_CHECK_SECONDS = 60
 BRIEFING_CHECK_SECONDS = 30
 MARKET_SESSION_CHECK_SECONDS = 30
 
-# 시그널 조건
 PRICE_CHANGE_THRESHOLD = 1.5
 VOLUME_SURGE_THRESHOLD = 4.0
 LIQUIDATION_VOLUME_THRESHOLD = 2.5
 WHALE_NOTIONAL_THRESHOLD = 3_000_000
-# 고급 수급 알파 감지
-ALPHA_FLOW_CHECK_SECONDS = 60
-ALPHA_SIGNAL_COOLDOWN = timedelta(minutes=20)
-ALPHA_BIG_TRADE_NOTIONAL = 1_000_000
-ALPHA_CVD_NOTIONAL_THRESHOLD = 8_000_000
-ALPHA_IMBALANCE_THRESHOLD = 0.68
-
 
 SIGNAL_COOLDOWN = timedelta(minutes=45)
-FUTURES_SIGNAL_COOLDOWN = timedelta(minutes=60)
-PRICE_MILESTONE_COOLDOWN = timedelta(hours=12)
+FUTURES_SIGNAL_COOLDOWN = timedelta(minutes=90)
+PRICE_MILESTONE_COOLDOWN = timedelta(hours=18)
 
-BTC_PRICE_MILESTONES = (60000, 70000, 75000, 78000, 80000, 85000, 90000, 100000)
+BTC_PRICE_MILESTONES = (60000, 70000, 75000, 80000, 85000, 90000, 100000)
 
-# 80K 같은 심리 가격대에서 위아래로 흔들릴 때 알림 도배 방지용 완충폭
-PRICE_MILESTONE_BUFFER_PCT = 0.15
-
-# 뉴스 제한 — 도배 방지
-NEWS_DAILY_LIMIT = 3
-NEWS_MAX_PER_SCAN = 1
+NEWS_DAILY_LIMIT = 5
 NEWS_MIN_INTERVAL = timedelta(minutes=60)
-NEWS_URGENT_MIN_INTERVAL = timedelta(minutes=30)
-
-NEWS_URGENT_SCORE = 9
-
-# 유사 뉴스 반복 방지
-NEWS_TITLE_SIMILARITY_BLOCK_HOURS = 24
-NEWS_RECENT_TITLE_LIMIT = 200
-NEWS_NORMAL_SCORE = 8
+NEWS_URGENT_SCORE = 8
+NEWS_NORMAL_SCORE = 6
 
 RSS_FEEDS = (
     "https://www.coindesk.com/arc/outboundfeeds/rss/",
     "https://cointelegraph.com/rss",
-    "https://news.google.com/rss/search?q=(bitcoin%20OR%20BTC%20OR%20ETF%20OR%20Fed%20OR%20CPI%20OR%20Iran%20OR%20Hormuz%20OR%20oil%20OR%20SEC%20OR%20hack)%20(crypto%20OR%20market)&hl=ko&gl=KR&ceid=KR:ko",
+    "https://news.google.com/rss/search?q=(Iran%20OR%20Hormuz%20OR%20UAE%20OR%20Israel%20OR%20missile%20OR%20warship%20OR%20tanker)%20(US%20Navy%20OR%20oil%20OR%20attack%20OR%20strike)&hl=ko&gl=KR&ceid=KR:ko",
 )
 
-# 통과 키워드 — 시장 영향 있는 것만
 NEWS_KEYWORDS = (
-    "bitcoin", "btc", "ethereum", "eth", "solana", "sol",
-    "spot bitcoin etf", "bitcoin etf", "btc etf", "etf inflow", "etf outflow",
+    "bitcoin", "btc", "ethereum", "eth", "solana", "sol", "etf",
     "fed", "fomc", "cpi", "inflation", "interest rate", "rate cut",
-    "sec approves", "sec rejects", "approval", "rejection", "regulation",
-    "hack", "exploit", "liquidation", "sell-off", "crash", "surge",
-    "iran", "israel", "hormuz", "oil", "war", "missile", "strike", "tanker", "warship",
-    "금리", "연준", "유가", "달러", "규제", "해킹", "전쟁", "승인", "거절",
-    "미사일", "피격", "호르무즈", "이란", "이스라엘", "청산", "급락",
+    "sec", "regulation", "lawsuit", "tariff", "trump", "dollar", "oil",
+    "hack", "exploit", "exchange", "binance", "coinbase",
+    "war", "missile", "attack", "hormuz", "iran", "israel", "tanker", "navy",
+    "금리", "유가", "달러", "연준", "규제", "해킹", "거래소",
+    "전쟁", "미사일", "공격", "호르무즈", "이란", "이스라엘", "군함", "유조선",
 )
 
-# 차단 키워드 — 10만명방 기준 불필요
 NEWS_BLOCK_KEYWORDS = (
-    "airdrop", "fork", "developer", "developers", "github", "testnet",
-    "protocol upgrade", "whitepaper", "podcast", "interview", "opinion",
-    "guide", "how to", "recap", "roundup", "daily crypto news",
+    "airdrop", "fork", "ecash", "developer", "developers", "github",
+    "testnet", "protocol upgrade", "whitepaper", "podcast", "interview",
+    "opinion", "guide", "how to", "recap", "daily crypto news",
     "market wrap", "price prediction", "sponsored", "press release",
-    "newsletter", "magazine", "op-ed",
+    "newsletter", "magazine",
 )
 
-# 거래소/소송 뉴스는 대부분 일반뉴스 이하. 해킹/동결/청산 아니면 컷
-LOW_VALUE_NEWS_TERMS = (
-    "lawsuit", "sues", "sue", "defamation", "custody fraud",
-    "parent company", "ceo", "interview",
-    "소송", "고소", "명예훼손", "대표", "CEO",
+BREAKING_FORCE_TERMS = (
+    "breaking", "urgent", "emergency",
+    "missile", "attack", "strike", "explosion", "warship", "navy", "tanker",
+    "iran", "israel", "hormuz", "uae", "oil", "war",
+    "속보", "긴급", "미사일", "피격", "공격", "폭발", "군함", "해군", "유조선",
+    "이란", "이스라엘", "호르무즈", "공역", "봉쇄", "전쟁", "유가",
 )
 
-TRUE_URGENT_TERMS = (
-    "sec approves", "sec rejects", "fomc", "cpi",
-    "hacked", "exploit", "freeze", "frozen", "seized",
-    "liquidation", "sell-off", "crash",
-    "missile", "strike", "warship", "hormuz", "tanker", "iran", "israel",
-    "승인", "거절", "해킹", "압수", "동결", "청산", "급락",
-    "미사일", "피격", "군함", "호르무즈", "이란", "이스라엘", "유조선",
+BREAKING_MARKET_CONTEXT_TERMS = (
+    "bitcoin", "btc", "crypto", "market", "oil", "dollar", "stock", "risk",
+    "비트코인", "코인", "시장", "유가", "달러", "주식", "위험자산",
 )
 
 THREADS_AUTO_POST = os.getenv("THREADS_AUTO_POST", "false").lower() == "true"
@@ -123,6 +97,10 @@ REQUEST_HEADERS = {
 }
 
 
+# =========================
+# STATE
+# =========================
+
 class State:
     def __init__(self) -> None:
         self.price_history: Dict[str, Deque[Tuple[datetime, float]]] = defaultdict(deque)
@@ -133,14 +111,12 @@ class State:
         self.news_daily_date: Optional[date] = None
         self.news_daily_count = 0
         self.last_news_sent_at: Optional[datetime] = None
-        self.news_recent_titles: Deque[Tuple[datetime, str]] = deque(maxlen=NEWS_RECENT_TITLE_LIMIT)
 
         self.briefing_sent_dates: Dict[str, date] = {}
         self.market_session_sent_dates: Dict[str, date] = {}
 
         self.last_fng_zone = "normal"
         self.last_kimchi_zone = "normal"
-
         self.futures_oi_cache: Dict[str, float] = {}
         self.futures_last_signal: Dict[str, datetime] = {}
 
@@ -149,9 +125,6 @@ class State:
 
         self.whale_seen_ids: Deque[str] = deque(maxlen=8000)
         self.whale_seen_set = set()
-        self.alpha_seen_ids: Deque[str] = deque(maxlen=10000)
-        self.alpha_seen_set = set()
-
 
     def is_on_cooldown(self, signal_key: str, now: datetime) -> bool:
         expires_at = self.cooldowns.get(signal_key)
@@ -160,17 +133,17 @@ class State:
     def touch_cooldown(self, signal_key: str, now: datetime) -> None:
         self.cooldowns[signal_key] = now + SIGNAL_COOLDOWN
 
-    def has_news(self, news_hash: str) -> bool:
-        return news_hash in self.news_seen_set
+    def has_news(self, news_id: str) -> bool:
+        return news_id in self.news_seen_set
 
-    def mark_news(self, news_hash: str) -> None:
-        if news_hash in self.news_seen_set:
+    def mark_news(self, news_id: str) -> None:
+        if news_id in self.news_seen_set:
             return
         if len(self.news_seen_ids) == self.news_seen_ids.maxlen:
             old = self.news_seen_ids.popleft()
             self.news_seen_set.discard(old)
-        self.news_seen_ids.append(news_hash)
-        self.news_seen_set.add(news_hash)
+        self.news_seen_ids.append(news_id)
+        self.news_seen_set.add(news_id)
 
     def has_whale_trade(self, trade_id: str) -> bool:
         return trade_id in self.whale_seen_set
@@ -184,18 +157,10 @@ class State:
         self.whale_seen_ids.append(trade_id)
         self.whale_seen_set.add(trade_id)
 
-    def has_alpha_trade(self, trade_id: str) -> bool:
-        return trade_id in self.alpha_seen_set
 
-    def mark_alpha_trade(self, trade_id: str) -> None:
-        if trade_id in self.alpha_seen_set:
-            return
-        if len(self.alpha_seen_ids) == self.alpha_seen_ids.maxlen:
-            old = self.alpha_seen_ids.popleft()
-            self.alpha_seen_set.discard(old)
-        self.alpha_seen_ids.append(trade_id)
-        self.alpha_seen_set.add(trade_id)
-
+# =========================
+# UTIL
+# =========================
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -205,44 +170,9 @@ def now_kst() -> datetime:
     return datetime.now(KST)
 
 
-
-def move_icon(value: float) -> str:
-    if value > 0.15:
-        return "🟢"
-    if value < -0.15:
-        return "🔴"
-    return "⚪"
-
-
-def fmt_market_value(name: str, snap, digits: int = 2) -> str:
-    if not snap:
-        return ""
-    price, pct = snap
-    return f"{move_icon(pct)} {name}: {price:,.{digits}f} ({fmt_pct(pct)})"
-
-
-def fmt_btc_line(price: float, pct: float) -> str:
-    return f"{move_icon(pct)} BTC: {price:,.0f} USDT ({fmt_pct(pct)})"
-
-
-def section_bar(title: str) -> str:
-    return f"━━━━━━━━━━━━━━\n{title}\n━━━━━━━━━━━━━━"
-
-
-def sentiment_label(*pcts: float) -> str:
-    vals = [p for p in pcts if p is not None]
-    if not vals:
-        return "⚪ 데이터 확인 중"
-    avg = sum(vals) / len(vals)
-    if avg >= 0.35:
-        return "🟢 위험선호 우위"
-    if avg <= -0.35:
-        return "🔴 리스크오프 우위"
-    return "🟡 혼조"
-
 def fmt_pct(value: float) -> str:
     sign = "+" if value >= 0 else ""
-    return f"{sign}{value:.2f}%"
+    return f"{sign}{value:.1f}%"
 
 
 def format_price_level(level: float) -> str:
@@ -262,9 +192,22 @@ def news_id(title: str, link: str, published: str) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def is_price_milestone_on_cooldown(state: State, key: str, now: datetime) -> bool:
+    expires_at = state.price_milestone_cooldowns.get(key)
+    return bool(expires_at and expires_at > now)
+
+
+def touch_price_milestone(state: State, key: str, now: datetime) -> None:
+    state.price_milestone_cooldowns[key] = now + PRICE_MILESTONE_COOLDOWN
+
+
+async def send_message(bot: Bot, text: str, disable_preview: bool = False) -> None:
+    await bot.send_message(chat_id=CHANNEL_ID, text=text, disable_web_page_preview=disable_preview)
+
+
 async def safe_send(bot: Bot, text: str, disable_preview: bool = False) -> None:
     try:
-        await bot.send_message(chat_id=CHANNEL_ID, text=text, disable_web_page_preview=disable_preview)
+        await send_message(bot, text, disable_preview=disable_preview)
     except Exception:
         logging.exception("Telegram 전송 실패 chat_id=%s", CHANNEL_ID)
 
@@ -293,9 +236,9 @@ async def fetch_text(session: aiohttp.ClientSession, url: str):
         return None
 
 
-# ============================================================
-# MARKET DATA — Binance 451 방지: Bybit → OKX → Binance
-# ============================================================
+# =========================
+# MARKET DATA: BYBIT → OKX → BINANCE
+# =========================
 
 async def get_market_ticker(session: aiohttp.ClientSession, symbol: str) -> Optional[dict]:
     # 1) Bybit
@@ -317,22 +260,23 @@ async def get_market_ticker(session: aiohttp.ClientSession, symbol: str) -> Opti
 
     # 2) OKX
     okx_symbol = symbol.replace("USDT", "-USDT")
-    data = await fetch_json(session, "https://www.okx.com/api/v5/market/ticker", {"instId": okx_symbol})
+    data = await fetch_json(
+        session,
+        "https://www.okx.com/api/v5/market/ticker",
+        {"instId": okx_symbol},
+    )
     try:
         item = data["data"][0]
-        last = float(item["last"])
-        open_24h = float(item.get("open24h") or 0)
-        pct = ((last - open_24h) / open_24h) * 100 if open_24h > 0 else 0.0
         return {
-            "lastPrice": last,
-            "priceChangePercent": pct,
+            "lastPrice": float(item["last"]),
+            "priceChangePercent": float(item.get("chg24h", 0)) * 100,
             "volume24h": float(item.get("volCcy24h", 0) or 0),
             "source": "OKX",
         }
     except Exception:
         pass
 
-    # 3) Binance fallback
+    # 3) Binance last fallback
     data = await fetch_json(session, "https://api.binance.com/api/v3/ticker/24hr", {"symbol": symbol})
     try:
         return {
@@ -345,7 +289,7 @@ async def get_market_ticker(session: aiohttp.ClientSession, symbol: str) -> Opti
         return None
 
 
-# 기존 함수명 유지
+# 기존 함수명 유지용 aliases
 async def get_binance_ticker_24h(session: aiohttp.ClientSession, symbol: str) -> Optional[dict]:
     return await get_market_ticker(session, symbol)
 
@@ -356,7 +300,7 @@ async def get_binance_price(session: aiohttp.ClientSession, symbol: str) -> Opti
 
 
 async def get_recent_klines(session: aiohttp.ClientSession, symbol: str) -> Optional[list]:
-    # Bybit
+    # Bybit first
     data = await fetch_json(
         session,
         "https://api.bybit.com/v5/market/kline",
@@ -505,15 +449,14 @@ async def get_kimchi_premium(session: aiohttp.ClientSession) -> Optional[Tuple[f
     return premium, upbit_krw, global_usdt
 
 
-# ============================================================
+# =========================
 # SIGNAL HELPERS
-# ============================================================
+# =========================
 
 def get_price_15m_ago(history: Deque[Tuple[datetime, float]], now: datetime) -> Optional[float]:
     target = now - timedelta(minutes=15)
     while history and history[0][0] < now - timedelta(hours=3):
         history.popleft()
-
     candidate = None
     for ts, price in history:
         if ts <= target:
@@ -523,28 +466,16 @@ def get_price_15m_ago(history: Deque[Tuple[datetime, float]], now: datetime) -> 
     return candidate
 
 
-def is_price_milestone_on_cooldown(state: State, key: str, now: datetime) -> bool:
-    expires_at = state.price_milestone_cooldowns.get(key)
-    return bool(expires_at and expires_at > now)
-
-
-def touch_price_milestone(state: State, key: str, now: datetime) -> None:
-    state.price_milestone_cooldowns[key] = now + PRICE_MILESTONE_COOLDOWN
-
-
-
 async def maybe_send_price_milestone_alert(bot: Bot, state: State, symbol: str, prev_price: Optional[float], price: float, now: datetime) -> None:
     if symbol != "BTCUSDT" or prev_price is None or prev_price <= 0:
         state.last_market_price[symbol] = price
         return
 
     for level in BTC_PRICE_MILESTONES:
-        buffer = level * (PRICE_MILESTONE_BUFFER_PCT / 100)
-
         direction = None
-        if prev_price < level and price >= level + buffer:
+        if prev_price < level <= price:
             direction = "breakout"
-        elif prev_price > level and price <= level - buffer:
+        elif prev_price > level >= price:
             direction = "breakdown"
 
         if not direction:
@@ -555,31 +486,38 @@ async def maybe_send_price_milestone_alert(bot: Bot, state: State, symbol: str, 
             continue
 
         level_text = format_price_level(level)
-
         if direction == "breakout":
-            msg = (
-                f"🚨 [BTC 핵심 구간 돌파]\n"
-                f"기준가: {level_text} 달러\n"
-                f"현재가: {price:,.0f} USDT\n\n"
-                f"관찰: 심리 저항선을 위로 넘긴 구간.\n"
-                f"리스크: 돌파 직후 위꼬리/휩쏘 가능성.\n"
-                f"대응: {level_text} 위에서 15~30분 버티면 추세 유지로 판단."
-)
+            if level in (80000, 90000):
+                msg = (
+                    f"🚨🚨 [메가 돌파]\n"
+                    f"BTC {level_text} 달러 돌파\n\n"
+                    f"시장 심리가 바뀌는 핵심 구간.\n"
+                    f"FOMO 매수세가 붙을 수 있는 자리.\n\n"
+                    f"📌 지금 핵심은 {level_text} 위에서 버티는지 확인."
+                )
+            else:
+                msg = (
+                    f"🚨 [핵심 돌파]\n"
+                    f"BTC {level_text} 달러 돌파\n\n"
+                    f"신규 매수세가 붙을 수 있는 구간.\n\n"
+                    f"📌 지금 핵심은 {level_text} 위에서 버티는지 확인."
+                )
         else:
-            msg = (
-                f"⚠️ [BTC 핵심 구간 이탈]
-"
-                f"기준가: {level_text} 달러
-"
-                f"현재가: {price:,.0f} USDT
-
-"
-                f"관찰: 심리 지지선이 깨진 구간.
-"
-                f"리스크: 단기 청산 물량과 변동성 확대.
-"
-                f"대응: {level_text} 빠른 회복 실패 시 추가 눌림 주의."
-            )
+            if level in (80000, 90000):
+                msg = (
+                    f"⚠️⚠️ [메가 이탈]\n"
+                    f"BTC {level_text} 달러 붕괴\n\n"
+                    f"롱 청산이 커질 수 있는 자리.\n"
+                    f"반등 실패 시 추가 하락 열림.\n\n"
+                    f"📌 지금 핵심은 {level_text} 회복 여부."
+                )
+            else:
+                msg = (
+                    f"⚠️ [핵심 이탈]\n"
+                    f"BTC {level_text} 달러 이탈\n\n"
+                    f"단기 손절/청산 물량이 나올 수 있는 구간.\n\n"
+                    f"📌 지금 핵심은 {level_text} 회복 여부."
+                )
 
         await safe_send(bot, msg)
         touch_price_milestone(state, key, now)
@@ -589,7 +527,6 @@ async def maybe_send_price_milestone_alert(bot: Bot, state: State, symbol: str, 
 
 def futures_signal_comment(symbol: str, funding_pct: float, oi_change_pct: float, imbalance: float) -> Optional[str]:
     coin = symbol.replace("USDT", "")
-
     if funding_pct >= 0.05 and oi_change_pct >= 3:
         return f"{coin} 롱 쏠림 강함. 올라가도 추격보다 눌림 확인이 더 안전한 구간."
     if funding_pct <= -0.05 and oi_change_pct >= 3:
@@ -629,64 +566,38 @@ def fear_greed_zone(value: int) -> str:
     return "normal"
 
 
-# ============================================================
-# NEWS FILTER — 10만명방 기준
-# ============================================================
-
+# =========================
+# NEWS
+# =========================
 
 def news_importance_score(title: str, summary: str) -> int:
-    text = f"{title}
-{summary}".lower()
+    text = f"{title}\n{summary}".lower()
     score = 0
 
-    tier_critical = (
+    tier_1 = (
         "spot bitcoin etf", "bitcoin etf", "btc etf", "etf inflow", "etf outflow",
-        "sec approves", "sec rejects", "fomc", "cpi", "rate cut", "interest rate",
-        "liquidation", "sell-off", "crash", "hacked", "exploit",
-        "iran", "israel", "hormuz", "missile", "strike", "warship", "tanker", "oil",
-        "비트코인 etf", "승인", "거절", "금리", "연준", "청산", "급락",
-        "해킹", "이란", "이스라엘", "호르무즈", "미사일", "피격", "유가",
+        "fed", "fomc", "cpi", "inflation", "interest rate", "rate cut",
+        "sec", "lawsuit", "approval", "rejection", "regulation",
+        "hack", "exploit", "binance", "coinbase", "exchange",
+        "trump", "tariff", "war", "ukraine", "iran", "israel", "oil", "dollar",
+        "liquidation", "sell-off", "crash", "surge", "missile", "attack", "hormuz",
+        "금리", "연준", "유가", "달러", "규제", "해킹", "거래소", "전쟁", "승인", "거절",
+        "미사일", "피격", "호르무즈", "군함", "유조선",
     )
-    tier_good = (
-        "bitcoin", "btc", "ethereum", "eth", "solana", "sol",
-        "fed", "inflation", "regulation", "sec", "dollar", "market",
-        "비트코인", "이더리움", "솔라나", "규제", "달러", "시장",
-    )
+    tier_2 = ("bitcoin", "btc", "ethereum", "eth", "solana", "sol", "price", "rally", "drop", "market", "volume", "whale")
+    low_quality = NEWS_BLOCK_KEYWORDS + ("op-ed", "opinion", "guide", "explainer", "roundup", "daily recap", "prediction", "rumor")
 
-    score += sum(4 for k in tier_critical if k in text)
-    score += sum(1 for k in tier_good if k in text)
-    score -= sum(5 for k in NEWS_BLOCK_KEYWORDS if k in text)
-
-    low_value = (
-        "lawsuit", "sues", "sue", "custody fraud", "parent company", "ceo",
-        "withdrawal lock", "aml proposal", "reporting rule",
-        "소송", "고소", "보관 사기", "대표", "출금 잠금", "aml", "보고 규칙",
-    )
-    if any(k in text for k in low_value):
-        score -= 8
-
-    if any(k in text for k in ("exchange", "binance", "coinbase", "kraken", "거래소", "바이낸스", "코인베이스")):
-        if not any(k in text for k in ("hack", "exploit", "freeze", "frozen", "liquidation", "sec", "regulation", "해킹", "동결", "청산", "규제", "승인", "거절")):
-            score -= 7
-
+    score += sum(3 for k in tier_1 if k in text)
+    score += sum(1 for k in tier_2 if k in text)
+    score -= sum(4 for k in low_quality if k in text)
     return score
 
 
 def is_forced_breaking_news(title: str, summary: str) -> bool:
     text = f"{title}\n{summary}".lower()
-
-    geo_terms = (
-        "iran", "israel", "hormuz", "warship", "navy", "tanker",
-        "missile", "strike", "explosion", "oil", "war",
-        "이란", "이스라엘", "호르무즈", "군함", "해군", "유조선",
-        "미사일", "피격", "폭발", "전쟁", "유가",
-    )
-    market_terms = (
-        "bitcoin", "btc", "crypto", "market", "oil", "dollar", "stock", "risk",
-        "비트코인", "코인", "시장", "유가", "달러", "주식", "위험자산",
-    )
-
-    return any(k in text for k in geo_terms) and any(k in text for k in market_terms)
+    has_breaking = any(k in text for k in BREAKING_FORCE_TERMS)
+    has_market = any(k in text for k in BREAKING_MARKET_CONTEXT_TERMS)
+    return has_breaking and (has_market or any(k in text for k in ("iran", "hormuz", "israel", "이란", "호르무즈", "이스라엘")))
 
 
 def normalized_news_score(title: str, summary: str) -> int:
@@ -695,70 +606,44 @@ def normalized_news_score(title: str, summary: str) -> int:
     return max(0, min(10, news_importance_score(title, summary)))
 
 
-
 def is_high_quality_news(title: str, summary: str) -> bool:
-    text = f"{title}
-{summary}".lower()
-
+    text = f"{title}\n{summary}".lower()
     if is_forced_breaking_news(title, summary):
         return True
-
     if any(k in text for k in NEWS_BLOCK_KEYWORDS):
         return False
-
     if not any(k in text for k in NEWS_KEYWORDS):
         return False
-
-    low_value = (
-        "lawsuit", "sues", "sue", "custody fraud", "parent company", "ceo",
-        "withdrawal lock", "aml proposal", "reporting rule",
-        "소송", "고소", "보관 사기", "대표", "출금 잠금", "aml", "보고 규칙",
-    )
-    if any(k in text for k in low_value):
-        if not any(k in text for k in ("bitcoin etf", "sec approves", "sec rejects", "hack", "exploit", "liquidation", "해킹", "청산", "승인", "거절")):
-            return False
-
     return news_importance_score(title, summary) >= NEWS_NORMAL_SCORE
-
 
 
 def is_urgent_news(title: str, summary: str) -> bool:
     if is_forced_breaking_news(title, summary):
         return True
-
-    text = f"{title}
-{summary}".lower()
-
-    true_urgent = (
-        "sec approves", "sec rejects", "fomc", "cpi",
-        "hacked", "exploit", "freeze", "frozen", "seized",
-        "liquidation", "sell-off", "crash",
-        "missile", "strike", "warship", "hormuz", "tanker", "iran", "israel",
-        "승인", "거절", "해킹", "압수", "동결", "청산", "급락",
-        "미사일", "피격", "군함", "호르무즈", "이란", "이스라엘", "유조선",
+    text = f"{title}\n{summary}".lower()
+    hard_urgent = (
+        "breaking", "urgent", "emergency", "sec approves", "sec rejects",
+        "hacked", "exploit", "seized", "freeze", "frozen",
+        "war", "missile", "attack", "tariff", "cpi", "fomc",
+        "속보", "긴급", "해킹", "승인", "거절", "압수", "전쟁", "공격", "미사일", "피격",
     )
-
-    if not any(k in text for k in true_urgent):
-        return False
-
-    return news_importance_score(title, summary) >= NEWS_URGENT_SCORE
+    return any(k in text for k in hard_urgent) and news_importance_score(title, summary) >= NEWS_URGENT_SCORE
 
 
 def news_importance_line(title: str, summary: str) -> str:
     text = f"{title}\n{summary}".lower()
-
-    if any(k in text for k in ("etf", "sec", "regulation", "approval", "rejection", "규제", "승인", "거절")):
+    if any(k in text for k in ("etf", "sec", "regulation", "lawsuit", "approval", "rejection", "규제", "승인", "거절")):
         return "시장 해석: ETF·규제 이슈라 비트코인 수급에 직접 영향 줄 수 있음."
     if any(k in text for k in ("fed", "fomc", "cpi", "inflation", "interest rate", "rate cut", "금리", "연준")):
         return "시장 해석: 금리 기대가 흔들리면 코인·주식이 같이 움직일 수 있음."
     if any(k in text for k in ("hack", "exploit", "hacked", "해킹")):
         return "시장 해석: 해킹 이슈는 단기 투자심리를 바로 식힐 수 있음."
-    if any(k in text for k in ("liquidation", "sell-off", "crash", "청산", "급락")):
-        return "시장 해석: 청산·급락 이슈라 단기 변동성이 커질 수 있음."
+    if any(k in text for k in ("exchange", "binance", "coinbase", "거래소")):
+        return "시장 해석: 거래소 이슈는 수급과 신뢰도에 바로 연결됨."
     if any(k in text for k in ("trump", "tariff", "dollar", "oil", "war", "ukraine", "iran", "israel", "유가", "달러", "전쟁", "호르무즈", "이란")):
         return "시장 해석: 거시·지정학 이슈라 유가·달러·위험자산 분위기를 같이 흔들 수 있음."
-    if any(k in text for k in ("exchange", "binance", "coinbase", "거래소")):
-        return "시장 해석: 거래소 이슈는 신뢰도와 단기 심리에 영향 줄 수 있음."
+    if any(k in text for k in ("liquidation", "sell-off", "whale", "volume")):
+        return "시장 해석: 청산·거래량 이슈라 단기 변동성이 커질 수 있음."
     return "시장 해석: 방향보다 시장 반응까지 같이 확인해야 하는 뉴스."
 
 
@@ -768,7 +653,6 @@ async def translate_to_korean(session: aiohttp.ClientSession, text: str) -> str:
         return ""
     if re.search(r"[가-힣]", text):
         return text
-
     data = await fetch_json(
         session,
         "https://translate.googleapis.com/translate_a/single",
@@ -863,51 +747,46 @@ async def publish_to_threads(session: aiohttp.ClientSession, text: str) -> None:
         logging.exception("Threads 자동 업로드 오류")
 
 
-
 async def build_korean_news_message(session: aiohttp.ClientSession, title: str, summary: str, link: str) -> Tuple[str, str]:
     title_ko = await translate_to_korean(session, title)
     source = source_name_from_link(link)
     score = normalized_news_score(title, summary)
     line = news_importance_line(title, summary)
 
+    btc = await get_binance_ticker_24h(session, "BTCUSDT")
     btc_line = ""
-    btc = await get_market_ticker(session, "BTCUSDT")
     if btc:
-        try:
-            btc_price = float(btc["lastPrice"])
-            btc_pct = float(btc["priceChangePercent"])
-            flow = "상승 흐름" if btc_pct > 0.15 else "하락 압력" if btc_pct < -0.15 else "보합권"
-            btc_line = f"
-
-📊 현재 BTC: {btc_price:,.0f} USDT ({fmt_pct(btc_pct)}, {flow})"
-        except Exception:
-            btc_line = ""
+        btc_pct = float(btc.get("priceChangePercent", 0))
+        flow = "상승 흐름" if btc_pct > 0 else "하락 압력" if btc_pct < 0 else "보합권"
+        btc_line = f"\n\n📊 현재 BTC: {fmt_pct(btc_pct)} ({flow})"
 
     if is_urgent_news(title, summary):
-        tag = f"🚨 [속보 · 중요도 {score}/10]"
+        telegram_msg = (
+            f"🚨 [속보 · 중요도 {score}/10]\n"
+            f"{title_ko}\n\n"
+            f"{line}"
+            f"{btc_line}\n\n"
+            f"출처: {source}\n"
+            f"{link}"
+        )
     elif score >= 8:
-        tag = f"🔥 [핵심뉴스 · 중요도 {score}/10]"
+        telegram_msg = (
+            f"🔥 [핵심뉴스 · 중요도 {score}/10]\n"
+            f"{title_ko}\n\n"
+            f"{line}"
+            f"{btc_line}\n\n"
+            f"출처: {source}\n"
+            f"{link}"
+        )
     else:
-        tag = f"📰 [뉴스 · 중요도 {score}/10]"
-
-    telegram_msg = (
-        f"{tag}
-"
-        f"{title_ko}
-
-"
-        f"관찰: {line.replace('시장 해석: ', '')}
-"
-        f"리스크: 뉴스 직후 과한 추격은 변동성에 휘말릴 수 있음.
-"
-        f"대응: BTC 가격 반응과 거래량 동반 여부 확인."
-        f"{btc_line}
-
-"
-        f"출처: {source}
-"
-        f"{link}"
-    )
+        telegram_msg = (
+            f"📰 [뉴스 · 중요도 {score}/10]\n"
+            f"{title_ko}\n\n"
+            f"{line}"
+            f"{btc_line}\n\n"
+            f"출처: {source}\n"
+            f"{link}"
+        )
 
     return telegram_msg, build_threads_text(title_ko, title, summary)
 
@@ -920,60 +799,9 @@ async def fetch_feed_entries(session: aiohttp.ClientSession, url: str) -> list:
     return parsed.entries or []
 
 
-
-def normalize_news_url(link: str) -> str:
-    link = (link or "").strip()
-    link = re.sub(r"[?&](utm_[^=]+|utm_source|utm_medium|utm_campaign|utm_term|utm_content)=[^&]+", "", link)
-    link = re.sub(r"[?&]output=amp", "", link)
-    link = link.split("#")[0]
-    return link.rstrip("/")
-
-
-def normalize_title_for_dedup(title: str) -> str:
-    title = clean_text(title, limit=300).lower()
-    title = re.sub(r"[^a-z0-9가-힣\s]", " ", title)
-    stop = {
-        "the", "a", "an", "to", "for", "of", "and", "in", "on", "with", "as",
-        "is", "are", "was", "were", "report", "says", "said", "amid",
-        "news", "crypto", "cryptocurrency"
-    }
-    words = [w for w in title.split() if len(w) >= 2 and w not in stop]
-    return " ".join(words[:18])
-
-
-def title_similarity(a: str, b: str) -> float:
-    sa = set(normalize_title_for_dedup(a).split())
-    sb = set(normalize_title_for_dedup(b).split())
-    if not sa or not sb:
-        return 0.0
-    return len(sa & sb) / max(1, len(sa | sb))
-
-
-def is_duplicate_or_similar_news(state: State, title: str, link: str, now: datetime) -> bool:
-    normalized_url_hash = hashlib.sha256(normalize_news_url(link).encode("utf-8")).hexdigest()
-    if state.has_news(normalized_url_hash):
-        return True
-
-    cutoff = now - timedelta(hours=NEWS_TITLE_SIMILARITY_BLOCK_HOURS)
-    while state.news_recent_titles and state.news_recent_titles[0][0] < cutoff:
-        state.news_recent_titles.popleft()
-
-    for _, old_title in state.news_recent_titles:
-        if title_similarity(title, old_title) >= 0.55:
-            return True
-
-    return False
-
-
-def mark_news_sent_strict(state: State, title: str, link: str, published: str, now: datetime) -> None:
-    state.mark_news(news_id(title, link, published))
-    state.mark_news(hashlib.sha256(normalize_news_url(link).encode("utf-8")).hexdigest())
-    state.news_recent_titles.append((now, title))
-
-
-# ============================================================
+# =========================
 # MONITORS
-# ============================================================
+# =========================
 
 async def market_monitor(bot: Bot, state: State) -> None:
     async with aiohttp.ClientSession() as session:
@@ -982,7 +810,7 @@ async def market_monitor(bot: Bot, state: State) -> None:
             try:
                 for symbol in SYMBOLS:
                     now = utc_now()
-                    ticker = await get_market_ticker(session, symbol)
+                    ticker = await get_binance_ticker_24h(session, symbol)
                     if not ticker:
                         continue
 
@@ -1189,12 +1017,10 @@ async def kimchi_monitor(bot: Bot, state: State) -> None:
             await asyncio.sleep(max(5, KIMCHI_CHECK_SECONDS - int(elapsed)))
 
 
-
 async def news_monitor(bot: Bot, state: State) -> None:
     async with aiohttp.ClientSession() as session:
         while True:
             started = utc_now()
-            sent_this_scan = 0
             try:
                 kst = now_kst()
                 if state.news_daily_date != kst.date():
@@ -1203,45 +1029,33 @@ async def news_monitor(bot: Bot, state: State) -> None:
 
                 if state.news_daily_count < NEWS_DAILY_LIMIT:
                     for feed in RSS_FEEDS:
-                        if state.news_daily_count >= NEWS_DAILY_LIMIT or sent_this_scan >= NEWS_MAX_PER_SCAN:
+                        if state.news_daily_count >= NEWS_DAILY_LIMIT:
                             break
-
                         entries = await fetch_feed_entries(session, feed)
-                        candidates = []
-
                         for e in entries[:20]:
+                            if state.news_daily_count >= NEWS_DAILY_LIMIT:
+                                break
+
                             title = (e.get("title") or "").strip()
                             link = (e.get("link") or "").strip()
                             summary = (e.get("summary") or "").strip()
                             published = (e.get("published") or "").strip()
+
                             if not title or not link:
                                 continue
 
-                            nid = news_id(title, link, published)
-                            now = utc_now()
-
-                            if state.has_news(nid) or is_duplicate_or_similar_news(state, title, link, now):
-                                logging.info("뉴스 중복/유사 스킵 title=%s", clean_text(title, 80))
-                                continue
-
+                            score = news_importance_score(title, summary)
                             if not is_high_quality_news(title, summary):
-                                logging.info("뉴스 스킵 score=%s title=%s", news_importance_score(title, summary), clean_text(title, 80))
+                                logging.info("뉴스 스킵 score=%s title=%s", score, clean_text(title, 80))
                                 continue
 
-                            score = normalized_news_score(title, summary)
-                            urgent = is_urgent_news(title, summary)
-                            candidates.append((urgent, score, title, summary, link, published, nid))
-
-                        candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
-
-                        for urgent, score, title, summary, link, published, nid in candidates:
-                            if state.news_daily_count >= NEWS_DAILY_LIMIT or sent_this_scan >= NEWS_MAX_PER_SCAN:
-                                break
+                            nid = news_id(title, link, published)
+                            if state.has_news(nid):
+                                continue
 
                             now = utc_now()
-                            min_interval = NEWS_URGENT_MIN_INTERVAL if urgent else NEWS_MIN_INTERVAL
-                            if state.last_news_sent_at and (now - state.last_news_sent_at) < min_interval:
-                                logging.info("뉴스 간격 제한 스킵 urgent=%s title=%s", urgent, clean_text(title, 80))
+                            urgent = is_urgent_news(title, summary)
+                            if not urgent and state.last_news_sent_at and (now - state.last_news_sent_at) < NEWS_MIN_INTERVAL:
                                 continue
 
                             msg, threads_text = await build_korean_news_message(session, title, summary, link)
@@ -1249,12 +1063,9 @@ async def news_monitor(bot: Bot, state: State) -> None:
                             await publish_to_threads(session, threads_text)
 
                             logging.info("뉴스 전송 완료 score=%s urgent=%s title=%s", score, urgent, clean_text(title, 80))
-                            mark_news_sent_strict(state, title, link, published, now)
+                            state.mark_news(nid)
                             state.last_news_sent_at = now
                             state.news_daily_count += 1
-                            sent_this_scan += 1
-                            break
-
             except Exception:
                 logging.exception("news_monitor 오류")
 
@@ -1262,9 +1073,9 @@ async def news_monitor(bot: Bot, state: State) -> None:
             await asyncio.sleep(max(5, NEWS_CHECK_SECONDS - int(elapsed)))
 
 
-# ============================================================
+# =========================
 # BRIEFINGS
-# ============================================================
+# =========================
 
 def is_korean_market_weekday(now: datetime) -> bool:
     return now.weekday() < 5
@@ -1278,16 +1089,22 @@ def is_us_market_close_day(now: datetime) -> bool:
     return 1 <= now.weekday() <= 5
 
 
-
 def market_direction_label(*pcts: float) -> str:
-    return sentiment_label(*pcts)
+    valid = [p for p in pcts if p is not None]
+    if not valid:
+        return "방향성 확인 필요"
+    avg = sum(valid) / len(valid)
+    if avg >= 0.35:
+        return "위험선호 우위"
+    if avg <= -0.35:
+        return "리스크오프 우위"
+    return "혼조"
 
 
 def append_if_value(lines: list[str], name: str, snap: Optional[Tuple[float, float]], digits: int = 2) -> None:
     if snap:
-        line = fmt_market_value(name, snap, digits)
-        if line:
-            lines.append(line)
+        price, pct = snap
+        lines.append(f"{name}: {price:,.{digits}f} ({fmt_pct(pct)})")
 
 
 def session_data_note(lines: list[str], required_min: int = 2) -> str:
@@ -1335,21 +1152,22 @@ def us_close_conclusion(sp_pct: float, nq_pct: float, dji_pct: float) -> str:
     return "혼조 마감. 한국장은 환율과 선물 흐름이 방향을 정할 가능성."
 
 
-
 async def market_session_scheduler(bot: Bot, state: State) -> None:
-    def is_exact_time(now: datetime, hour: int, minute: int) -> bool:
-        return now.hour == hour and now.minute == minute
+    def in_send_window(now: datetime, hour: int, minute: int, window_minutes: int = 10) -> bool:
+        start = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        end = start + timedelta(minutes=window_minutes)
+        return start <= now < end
 
     def pct_or_zero(snap: Optional[Tuple[float, float]]) -> float:
         return float(snap[1]) if snap else 0.0
 
     async def btc_line(session: aiohttp.ClientSession) -> Tuple[str, float]:
-        btc = await get_market_ticker(session, "BTCUSDT")
+        btc = await get_binance_ticker_24h(session, "BTCUSDT")
         if not btc:
-            return "⚪ BTC: 데이터 지연", 0.0
+            return "BTC: 데이터 지연", 0.0
         price = float(btc["lastPrice"])
         pct = float(btc["priceChangePercent"])
-        return fmt_btc_line(price, pct), pct
+        return f"BTC: {price:,.0f} USDT ({fmt_pct(pct)})", pct
 
     async with aiohttp.ClientSession() as session:
         while True:
@@ -1357,7 +1175,7 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
             try:
                 now = now_kst()
 
-                if is_korean_market_weekday(now) and is_exact_time(now, 8, 0):
+                if is_korean_market_weekday(now) and in_send_window(now, 8, 0, 10):
                     key = "kr_pre_0800"
                     if state.market_session_sent_dates.get(key) != now.date():
                         kospi = await get_yahoo_snapshot(session, "%5EKS11")
@@ -1367,63 +1185,55 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         nq_fut = await get_yahoo_snapshot(session, "NQ%3DF")
                         btc_text, _ = await btc_line(session)
 
-                        lines = [section_bar("🇰🇷 한국장 1시간 전")]
+                        lines = ["🇰🇷 [한국장 1시간 전]"]
                         append_if_value(lines, "코스피", kospi)
                         append_if_value(lines, "코스닥", kosdaq)
                         if usd_krw:
-                            lines.append(f"💵 달러/원: {usd_krw:,.2f}원")
+                            lines.append(f"달러/원: {usd_krw:,.2f}원")
                         append_if_value(lines, "S&P500 선물", sp_fut)
                         append_if_value(lines, "나스닥 선물", nq_fut)
                         lines.append(btc_text)
 
-                        mood = market_direction_label(pct_or_zero(sp_fut), pct_or_zero(nq_fut), pct_or_zero(kospi), pct_or_zero(kosdaq))
+                        us_flow = market_direction_label(pct_or_zero(sp_fut), pct_or_zero(nq_fut))
                         conclusion = kr_open_conclusion(pct_or_zero(kospi), pct_or_zero(kosdaq), pct_or_zero(sp_fut), pct_or_zero(nq_fut), usd_krw or 0)
-                        msg = "
-".join(lines) + session_data_note(lines) + f"
-
-🧭 시장 분위기: {mood}
-📌 오늘 결론: {conclusion}"
+                        msg = "\n".join(lines) + session_data_note(lines) + f"\n\n시장 분위기: {us_flow}\n📌 오늘 결론: {conclusion}"
                         await safe_send(bot, msg, disable_preview=True)
                         state.market_session_sent_dates[key] = now.date()
 
-                if is_korean_market_weekday(now) and is_exact_time(now, 15, 30):
+                if is_korean_market_weekday(now) and in_send_window(now, 15, 30, 10):
                     key = "kr_close_1530"
                     if state.market_session_sent_dates.get(key) != now.date():
                         kospi = await get_yahoo_snapshot(session, "%5EKS11")
                         kosdaq = await get_yahoo_snapshot(session, "%5EKQ11")
                         usd_krw = await get_usd_krw(session)
                         btc_text, _ = await btc_line(session)
-
                         kp, kq = pct_or_zero(kospi), pct_or_zero(kosdaq)
+
                         if kospi and kosdaq:
                             if kp >= 0 and kq >= 0:
-                                feature = "🟢 지수 동반 강세"
+                                feature = "지수 동반 강세"
                             elif kp >= 0 > kq:
-                                feature = "🟡 대형주 상대강세, 중소형주 약세"
+                                feature = "대형주 상대강세, 중소형주 약세"
                             elif kp < 0 <= kq:
-                                feature = "🟡 종목장 성격 강화"
+                                feature = "종목장 성격 강화"
                             else:
-                                feature = "🔴 지수 전반 약세"
+                                feature = "지수 전반 약세"
                         else:
-                            feature = "⚪ 데이터 지연. 환율·미국 선물 흐름 확인 필요"
+                            feature = "데이터 지연. 환율·미국 선물 흐름 확인 필요"
 
-                        lines = [section_bar("🔔 한국장 마감 정리")]
+                        lines = ["🔔 [한국장 마감 정리]"]
                         append_if_value(lines, "코스피", kospi)
                         append_if_value(lines, "코스닥", kosdaq)
                         if usd_krw:
-                            lines.append(f"💵 달러/원: {usd_krw:,.0f}원")
+                            lines.append(f"달러/원: {usd_krw:,.0f}원")
                         lines.append(btc_text)
 
                         conclusion = kr_close_conclusion(kp, kq, usd_krw or 0)
-                        msg = "
-".join(lines) + session_data_note(lines) + f"
-
-📍 오늘 특징: {feature}
-📌 오늘 결론: {conclusion}"
+                        msg = "\n".join(lines) + session_data_note(lines) + f"\n\n오늘 특징: {feature}\n📌 오늘 결론: {conclusion}"
                         await safe_send(bot, msg, disable_preview=True)
                         state.market_session_sent_dates[key] = now.date()
 
-                if is_us_market_premarket_day(now) and is_exact_time(now, 21, 30):
+                if is_us_market_premarket_day(now) and in_send_window(now, 21, 30, 10):
                     key = "us_pre_2130"
                     if state.market_session_sent_dates.get(key) != now.date():
                         sp_fut = await get_yahoo_snapshot(session, "ES%3DF")
@@ -1432,24 +1242,19 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         tnx = await get_yahoo_snapshot(session, "%5ETNX")
                         btc_text, _ = await btc_line(session)
 
-                        lines = [section_bar("🇺🇸 미국장 1시간 전")]
+                        lines = ["🇺🇸 [미국장 1시간 전]"]
                         append_if_value(lines, "S&P500 선물", sp_fut)
                         append_if_value(lines, "나스닥 선물", nq_fut)
                         append_if_value(lines, "달러인덱스", dxy)
                         append_if_value(lines, "10년물 금리", tnx)
                         lines.append(btc_text)
 
-                        mood = market_direction_label(pct_or_zero(sp_fut), pct_or_zero(nq_fut))
                         conclusion = us_open_conclusion(pct_or_zero(sp_fut), pct_or_zero(nq_fut), pct_or_zero(dxy), pct_or_zero(tnx))
-                        msg = "
-".join(lines) + session_data_note(lines) + f"
-
-🧭 시장 분위기: {mood}
-📌 오늘 결론: {conclusion}"
+                        msg = "\n".join(lines) + session_data_note(lines) + f"\n\n📌 오늘 결론: {conclusion}"
                         await safe_send(bot, msg, disable_preview=True)
                         state.market_session_sent_dates[key] = now.date()
 
-                if is_us_market_close_day(now) and is_exact_time(now, 5, 0):
+                if is_us_market_close_day(now) and in_send_window(now, 5, 0, 10):
                     key = "us_close_0500"
                     if state.market_session_sent_dates.get(key) != now.date():
                         spx = await get_yahoo_snapshot(session, "%5EGSPC")
@@ -1459,7 +1264,7 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         tnx = await get_yahoo_snapshot(session, "%5ETNX")
                         btc_text, _ = await btc_line(session)
 
-                        lines = [section_bar("🌙 미국장 마감 정리")]
+                        lines = ["🌙 [미국장 마감 정리]"]
                         append_if_value(lines, "S&P500", spx)
                         append_if_value(lines, "나스닥", ixic)
                         append_if_value(lines, "다우", dji)
@@ -1467,13 +1272,8 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         append_if_value(lines, "10년물 금리", tnx)
                         lines.append(btc_text)
 
-                        mood = market_direction_label(pct_or_zero(spx), pct_or_zero(ixic), pct_or_zero(dji))
                         conclusion = us_close_conclusion(pct_or_zero(spx), pct_or_zero(ixic), pct_or_zero(dji))
-                        msg = "
-".join(lines) + session_data_note(lines) + f"
-
-🧭 마감 분위기: {mood}
-📌 오늘 결론: {conclusion}"
+                        msg = "\n".join(lines) + session_data_note(lines) + f"\n\n📌 오늘 결론: {conclusion}"
                         await safe_send(bot, msg, disable_preview=True)
                         state.market_session_sent_dates[key] = now.date()
 
@@ -1495,10 +1295,9 @@ async def briefing_scheduler(bot: Bot, state: State) -> None:
                     if now.hour == hour and now.minute == 0:
                         if state.briefing_sent_dates.get(slot_key) == now.date():
                             continue
-
                         tickers = {}
                         for symbol in SYMBOLS:
-                            t = await get_market_ticker(session, symbol)
+                            t = await get_binance_ticker_24h(session, symbol)
                             if t:
                                 tickers[symbol] = (float(t["lastPrice"]), float(t["priceChangePercent"]))
                         if len(tickers) < 1:
@@ -1535,9 +1334,9 @@ async def briefing_scheduler(bot: Bot, state: State) -> None:
             await asyncio.sleep(max(5, BRIEFING_CHECK_SECONDS - int(elapsed)))
 
 
-# ============================================================
-# RUNTIME
-# ============================================================
+# =========================
+# SERVER / RUNTIME
+# =========================
 
 def resolve_telegram_token() -> Tuple[str, str]:
     keys = ("TELEGRAM_TOKEN", "BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "TG_BOT_TOKEN")
@@ -1594,7 +1393,6 @@ async def run_forever() -> None:
         asyncio.create_task(whale_monitor(bot, state)),
         asyncio.create_task(news_monitor(bot, state)),
         asyncio.create_task(futures_flow_monitor(bot, state)),
-        asyncio.create_task(alpha_flow_monitor(bot, state)),
         asyncio.create_task(market_session_scheduler(bot, state)),
     ]
 
