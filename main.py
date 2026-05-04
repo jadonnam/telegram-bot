@@ -558,19 +558,13 @@ async def maybe_send_price_milestone_alert(bot: Bot, state: State, symbol: str, 
 
         if direction == "breakout":
             msg = (
-                f"🚨 [BTC 핵심 구간 돌파]
-"
-                f"기준가: {level_text} 달러
-"
-                f"현재가: {price:,.0f} USDT
-
-"
-                f"관찰: 심리 저항선을 위로 넘긴 구간.
-"
-                f"리스크: 돌파 직후 위꼬리/휩쏘 가능성.
-"
+                f"🚨 [BTC 핵심 구간 돌파]\n"
+                f"기준가: {level_text} 달러\n"
+                f"현재가: {price:,.0f} USDT\n\n"
+                f"관찰: 심리 저항선을 위로 넘긴 구간.\n"
+                f"리스크: 돌파 직후 위꼬리/휩쏘 가능성.\n"
                 f"대응: {level_text} 위에서 15~30분 버티면 추세 유지로 판단."
-            )
+)
         else:
             msg = (
                 f"⚠️ [BTC 핵심 구간 이탈]
