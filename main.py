@@ -7,7 +7,7 @@ import re
 import time
 from collections import defaultdict, deque
 from datetime import date, datetime, timedelta, timezone
-from typing import Deque, Dict, Optional, Tuple, Any
+from typing import Deque, Dict, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -46,13 +46,10 @@ BTC_PRICE_MILESTONES = (60000, 70000, 75000, 80000, 85000, 90000, 100000)
 
 NEWS_DAILY_LIMIT = 4
 NEWS_MIN_INTERVAL = timedelta(minutes=45)
+NEWS_URGENT_MIN_INTERVAL = timedelta(minutes=20)
+NEWS_MAX_PER_SCAN = 1
 NEWS_URGENT_SCORE = 8
 NEWS_NORMAL_SCORE = 6
-# 뉴스 도배 방지: 한 번 RSS 체크마다 최대 1개만 전송
-NEWS_MAX_PER_SCAN = 1
-# 속보도 최소 간격 적용. 진짜 지정학 속보만 예외로 빠르게 통과.
-NEWS_URGENT_MIN_INTERVAL = timedelta(minutes=20)
-
 
 RSS_FEEDS = (
     "https://www.coindesk.com/arc/outboundfeeds/rss/",
@@ -79,10 +76,9 @@ NEWS_BLOCK_KEYWORDS = (
 )
 
 BREAKING_FORCE_TERMS = (
-    "breaking", "urgent", "emergency",
-    "missile", "attack", "strike", "explosion", "warship", "navy", "tanker",
+    "missile", "strike", "explosion", "warship", "navy", "tanker",
     "iran", "israel", "hormuz", "uae", "oil", "war",
-    "속보", "긴급", "미사일", "피격", "공격", "폭발", "군함", "해군", "유조선",
+    "미사일", "피격", "폭발", "군함", "해군", "유조선",
     "이란", "이스라엘", "호르무즈", "공역", "봉쇄", "전쟁", "유가",
 )
 
@@ -138,17 +134,17 @@ class State:
     def touch_cooldown(self, signal_key: str, now: datetime) -> None:
         self.cooldowns[signal_key] = now + SIGNAL_COOLDOWN
 
-    def has_news(self, news_id: str) -> bool:
-        return news_id in self.news_seen_set
+    def has_news(self, news_hash: str) -> bool:
+        return news_hash in self.news_seen_set
 
-    def mark_news(self, news_id: str) -> None:
-        if news_id in self.news_seen_set:
+    def mark_news(self, news_hash: str) -> None:
+        if news_hash in self.news_seen_set:
             return
         if len(self.news_seen_ids) == self.news_seen_ids.maxlen:
             old = self.news_seen_ids.popleft()
             self.news_seen_set.discard(old)
-        self.news_seen_ids.append(news_id)
-        self.news_seen_set.add(news_id)
+        self.news_seen_ids.append(news_hash)
+        self.news_seen_set.add(news_hash)
 
     def has_whale_trade(self, trade_id: str) -> bool:
         return trade_id in self.whale_seen_set
@@ -246,7 +242,6 @@ async def fetch_text(session: aiohttp.ClientSession, url: str):
 # =========================
 
 async def get_market_ticker(session: aiohttp.ClientSession, symbol: str) -> Optional[dict]:
-    # 1) Bybit
     data = await fetch_json(
         session,
         "https://api.bybit.com/v5/market/tickers",
@@ -263,7 +258,6 @@ async def get_market_ticker(session: aiohttp.ClientSession, symbol: str) -> Opti
     except Exception:
         pass
 
-    # 2) OKX
     okx_symbol = symbol.replace("USDT", "-USDT")
     data = await fetch_json(
         session,
@@ -281,7 +275,6 @@ async def get_market_ticker(session: aiohttp.ClientSession, symbol: str) -> Opti
     except Exception:
         pass
 
-    # 3) Binance last fallback
     data = await fetch_json(session, "https://api.binance.com/api/v3/ticker/24hr", {"symbol": symbol})
     try:
         return {
@@ -294,7 +287,6 @@ async def get_market_ticker(session: aiohttp.ClientSession, symbol: str) -> Opti
         return None
 
 
-# 기존 함수명 유지용 aliases
 async def get_binance_ticker_24h(session: aiohttp.ClientSession, symbol: str) -> Optional[dict]:
     return await get_market_ticker(session, symbol)
 
@@ -305,7 +297,6 @@ async def get_binance_price(session: aiohttp.ClientSession, symbol: str) -> Opti
 
 
 async def get_recent_klines(session: aiohttp.ClientSession, symbol: str) -> Optional[list]:
-    # Bybit first
     data = await fetch_json(
         session,
         "https://api.bybit.com/v5/market/kline",
@@ -323,7 +314,6 @@ async def get_recent_klines(session: aiohttp.ClientSession, symbol: str) -> Opti
     except Exception:
         pass
 
-    # Binance fallback
     return await fetch_json(
         session,
         "https://api.binance.com/api/v3/klines",
@@ -599,10 +589,7 @@ def news_importance_score(title: str, summary: str) -> int:
 
 
 def is_forced_breaking_news(title: str, summary: str) -> bool:
-    # 지정학/전쟁/유가/군사 충격만 강제 속보 처리.
-    # 일반 보안뉴스의 attack 단어 하나로 속보 처리되는 문제 방지.
-    text = f"{title}
-{summary}".lower()
+    text = f"{title}\n{summary}".lower()
 
     geo_terms = (
         "iran", "israel", "hormuz", "uae", "warship", "navy", "tanker",
@@ -615,9 +602,7 @@ def is_forced_breaking_news(title: str, summary: str) -> bool:
         "비트코인", "코인", "시장", "유가", "달러", "주식", "위험자산",
     )
 
-    has_geo = any(k in text for k in geo_terms)
-    has_market = any(k in text for k in market_terms)
-    return has_geo and has_market
+    return any(k in text for k in geo_terms) and any(k in text for k in market_terms)
 
 
 def normalized_news_score(title: str, summary: str) -> int:
@@ -641,10 +626,7 @@ def is_urgent_news(title: str, summary: str) -> bool:
     if is_forced_breaking_news(title, summary):
         return True
 
-    text = f"{title}
-{summary}".lower()
-
-    # 일반 거래소/소송/보안 기사까지 속보로 보내지 않게 제한
+    text = f"{title}\n{summary}".lower()
     true_urgent = (
         "sec approves", "sec rejects", "fomc", "cpi",
         "hacked", "exploit", "freeze", "frozen", "seized",
@@ -1065,8 +1047,6 @@ async def news_monitor(bot: Bot, state: State) -> None:
                             break
 
                         entries = await fetch_feed_entries(session, feed)
-
-                        # 높은 점수 먼저 보내되, 한 번에 1개만
                         candidates = []
                         for e in entries[:20]:
                             title = (e.get("title") or "").strip()
