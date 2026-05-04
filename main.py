@@ -42,10 +42,10 @@ FUTURES_SIGNAL_COOLDOWN = timedelta(minutes=90)
 BTC_PRICE_MILESTONES = (60000, 70000, 75000, 80000, 85000, 90000, 100000)
 PRICE_MILESTONE_COOLDOWN = timedelta(hours=18)
 
-NEWS_DAILY_LIMIT = 3
-NEWS_MIN_INTERVAL = timedelta(minutes=90)
-NEWS_URGENT_SCORE = 11
-NEWS_NORMAL_SCORE = 8
+NEWS_DAILY_LIMIT = 5
+NEWS_MIN_INTERVAL = timedelta(minutes=60)
+NEWS_URGENT_SCORE = 9
+NEWS_NORMAL_SCORE = 6
 NEWS_BLOCK_HOURS = None  # 미국장 시간대도 뉴스 전송: 새벽 1~7시 차단 해제
 
 RSS_FEEDS = (
@@ -280,7 +280,7 @@ def news_importance_score(title: str, summary: str) -> int:
     )
     low_quality = NEWS_BLOCK_KEYWORDS + (
         "op-ed", "opinion", "analysis: ", "guide", "explainer",
-        "what happened", "roundup", "daily", "prediction", "rumor",
+        "what happened in crypto today", "roundup", "daily recap", "prediction", "rumor",
     )
 
     score += sum(3 for k in tier_1 if k in text)
@@ -970,7 +970,9 @@ async def news_monitor(bot: Bot, state: State) -> None:
 
                             if not title or not link:
                                 continue
+                            score = news_importance_score(title, summary)
                             if not is_high_quality_news(title, summary):
+                                logging.info("뉴스 스킵 score=%s title=%s", score, clean_text(title, 80))
                                 continue
 
                             nid = news_id(title, link, published)
@@ -989,6 +991,7 @@ async def news_monitor(bot: Bot, state: State) -> None:
                             msg = await build_korean_news_message(session, title, summary, link)
                             # 링크 미리보기 켬: 텔레그램에서 기사 썸네일/사진이 다시 보이게 함
                             await safe_send(bot, msg, disable_preview=False)
+                            logging.info("뉴스 전송 완료 score=%s urgent=%s title=%s", score, urgent, clean_text(title, 80))
                             state.mark_news(nid)
                             state.last_news_sent_at = now
                             state.news_daily_count += 1
@@ -1000,26 +1003,14 @@ async def news_monitor(bot: Bot, state: State) -> None:
 
 
 async def referral_scheduler(bot: Bot, state: State) -> None:
-    async with aiohttp.ClientSession():
-        while True:
-            started = utc_now()
-            try:
-                now = now_kst()
-                if now.weekday() in (0, 3) and now.hour == 18 and now.minute == 0:
-                    key = f"{now.weekday()}-18"
-                    if state.referral_sent_dates.get(key) != now.date():
-                        msg = (
-                            "💡 이 채널에서 쓰는 거래소\n"
-                            "수수료 할인 + 자동매매 봇 세팅 지원\n"
-                            "👉 linktr.ee/jadonnam"
-                        )
-                        await safe_send(bot, msg)
-                        state.referral_sent_dates[key] = now.date()
-            except Exception:
-                pass
+    """광고성 정기 메시지 비활성화.
 
-            elapsed = (utc_now() - started).total_seconds()
-            await asyncio.sleep(max(5, REFERRAL_CHECK_SECONDS - int(elapsed)))
+    링크트리/거래소 가입 유도 문구는 정보방 신뢰도를 떨어뜨릴 수 있어
+    run_forever에서도 실행하지 않는다. 필요하면 나중에 CONTACT_HANDLE 기반으로
+    사람이 직접 문의받는 방식만 별도 추가한다.
+    """
+    while True:
+        await asyncio.sleep(3600)
 
 
 def is_korean_market_weekday(now: datetime) -> bool:
@@ -1100,19 +1091,19 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
     """
     10만명 정보방 운영용 고정 브리핑.
     핵심 원칙:
-    - 정해진 시간대에 조건 없이 하루 1회 발송
+    - 정해진 시간에 가깝게 하루 1회 발송
     - API 일부 실패해도 '확인중'으로 보내고 조용히 씹지 않음
-    - Railway 루프 딜레이 대비: 정해진 시간부터 5분 보정 구간 안에서 하루 1회 발송
+    - 10분 전송창만 사용: 사람들에게 '이 시간에 올라온다'는 습관을 만들기 위함
 
     발송 시간대(KST):
-    - 한국장 1시간 전: 08:00~08:05, 월~금
-    - 한국장 마감 정리: 15:30~15:35, 월~금
-    - 미국장 1시간 전: 21:30~21:35, 월~금
-    - 미국장 마감 정리: 05:00~05:05, 화~토
+    - 한국장 1시간 전: 08:00~08:10, 월~금
+    - 한국장 마감 정리: 15:30~15:40, 월~금
+    - 미국장 1시간 전: 21:30~21:40, 월~금
+    - 미국장 마감 정리: 05:00~05:10, 화~토
     """
 
-    def in_exact_window(now: datetime, hour: int, minute: int, window_minutes: int = 5) -> bool:
-        """정해진 시각에 맞춰 보내되, Railway 루프 지연 방지를 위해 5분만 보정."""
+    def in_send_window(now: datetime, hour: int, minute: int, window_minutes: int = 10) -> bool:
+        """정해진 시각부터 window_minutes 안에서만 전송. 기본 10분."""
         start = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         end = start + timedelta(minutes=window_minutes)
         return start <= now < end
@@ -1132,8 +1123,8 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
             try:
                 now = now_kst()
 
-                # 🇰🇷 한국장 1시간 전: 08:00~08:05
-                if is_korean_market_weekday(now) and in_exact_window(now, 8, 0):
+                # 🇰🇷 한국장 1시간 전: 08:00~09:00 (정각 우선 + 보정)
+                if is_korean_market_weekday(now) and in_send_window(now, 8, 0, 10):
                     key = "kr_pre_0800"
                     if state.market_session_sent_dates.get(key) != now.date():
                         kospi = await get_yahoo_snapshot(session, "%5EKS11")
@@ -1165,8 +1156,8 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         state.market_session_sent_dates[key] = now.date()
                         logging.info("한국장 1시간 전 브리핑 전송 완료")
 
-                # 🔔 한국장 마감: 15:30~15:35
-                if is_korean_market_weekday(now) and in_exact_window(now, 15, 30):
+                # 🔔 한국장 마감: 15:30~17:00 (정각 우선 + 보정)
+                if is_korean_market_weekday(now) and in_send_window(now, 15, 30, 10):
                     key = "kr_close_1530"
                     if state.market_session_sent_dates.get(key) != now.date():
                         kospi = await get_yahoo_snapshot(session, "%5EKS11")
@@ -1201,8 +1192,8 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         state.market_session_sent_dates[key] = now.date()
                         logging.info("한국장 마감 브리핑 전송 완료")
 
-                # 🇺🇸 미국장 1시간 전: 21:30~21:35
-                if is_us_market_premarket_day(now) and in_exact_window(now, 21, 30):
+                # 🇺🇸 미국장 1시간 전: 21:30~22:30 (정각 우선 + 보정)
+                if is_us_market_premarket_day(now) and in_send_window(now, 21, 30, 10):
                     key = "us_pre_2130"
                     if state.market_session_sent_dates.get(key) != now.date():
                         sp_fut = await get_yahoo_snapshot(session, "ES%3DF")
@@ -1236,8 +1227,8 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         state.market_session_sent_dates[key] = now.date()
                         logging.info("미국장 1시간 전 브리핑 전송 완료")
 
-                # 🌙 미국장 마감: 05:00~05:05
-                if is_us_market_close_day(now) and in_exact_window(now, 5, 0):
+                # 🌙 미국장 마감: 05:00~07:00 (정각 우선 + 보정)
+                if is_us_market_close_day(now) and in_send_window(now, 5, 0, 10):
                     key = "us_close_0500"
                     if state.market_session_sent_dates.get(key) != now.date():
                         spx = await get_yahoo_snapshot(session, "%5EGSPC")
@@ -1337,7 +1328,6 @@ async def run_forever() -> None:
         asyncio.create_task(whale_monitor(bot, state)),
         asyncio.create_task(news_monitor(bot, state)),
         asyncio.create_task(futures_flow_monitor(bot, state)),
-        asyncio.create_task(referral_scheduler(bot, state)),
         asyncio.create_task(market_session_scheduler(bot, state)),
     ]
     port = os.getenv("PORT")
