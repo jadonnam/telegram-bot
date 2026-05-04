@@ -37,6 +37,11 @@ WHALE_NOTIONAL_THRESHOLD = 3_000_000
 SIGNAL_COOLDOWN = timedelta(minutes=45)
 FUTURES_SIGNAL_COOLDOWN = timedelta(minutes=90)
 
+# --- 핵심 가격대 돌파/이탈 알림 ---
+# 10만명 방 기준: 단순 변동률보다 80K, 90K 같은 심리적 가격대가 더 중요함.
+BTC_PRICE_MILESTONES = (60000, 70000, 75000, 80000, 85000, 90000, 100000)
+PRICE_MILESTONE_COOLDOWN = timedelta(hours=18)
+
 NEWS_DAILY_LIMIT = 3
 NEWS_MIN_INTERVAL = timedelta(minutes=90)
 NEWS_URGENT_SCORE = 11
@@ -134,6 +139,10 @@ class State:
         self.futures_oi_cache: Dict[str, float] = {}
         self.futures_last_signal: Dict[str, datetime] = {}
 
+        # 가격대 돌파/이탈 감지용
+        self.last_market_price: Dict[str, float] = {}
+        self.price_milestone_cooldowns: Dict[str, datetime] = {}
+
         self.whale_seen_ids: Deque[int] = deque(maxlen=8000)
         self.whale_seen_set = set()
 
@@ -180,6 +189,65 @@ def now_kst() -> datetime:
 def fmt_pct(value: float) -> str:
     sign = "+" if value >= 0 else ""
     return f"{sign}{value:.1f}%"
+
+
+def format_price_level(level: float) -> str:
+    if level >= 1000:
+        return f"{level / 1000:.0f}K"
+    return f"{level:,.0f}"
+
+
+def is_price_milestone_on_cooldown(state: State, key: str, now: datetime) -> bool:
+    expires_at = state.price_milestone_cooldowns.get(key)
+    return bool(expires_at and expires_at > now)
+
+
+def touch_price_milestone(state: State, key: str, now: datetime) -> None:
+    state.price_milestone_cooldowns[key] = now + PRICE_MILESTONE_COOLDOWN
+
+
+async def maybe_send_price_milestone_alert(bot: Bot, state: State, symbol: str, prev_price: Optional[float], price: float, now: datetime) -> None:
+    # 현재는 BTC 핵심 구간만 보냄. ETH/SOL까지 켜면 알림 피로가 커짐.
+    if symbol != "BTCUSDT" or prev_price is None or prev_price <= 0:
+        state.last_market_price[symbol] = price
+        return
+
+    for level in BTC_PRICE_MILESTONES:
+        direction = None
+        if prev_price < level <= price:
+            direction = "breakout"
+        elif prev_price > level >= price:
+            direction = "breakdown"
+
+        if not direction:
+            continue
+
+        key = f"milestone:{symbol}:{level}:{direction}"
+        if is_price_milestone_on_cooldown(state, key, now):
+            continue
+
+        level_text = format_price_level(level)
+        if direction == "breakout":
+            msg = (
+                f"🚨 [핵심 돌파]\n"
+                f"BTC {level_text} 달러 돌파\n\n"
+                f"심리 저항 구간을 넘은 자리.\n"
+                f"신규 매수세가 붙을 수 있는 구간.\n\n"
+                f"📌 지금 핵심은 {level_text} 위에서 버티는지 확인."
+            )
+        else:
+            msg = (
+                f"⚠️ [핵심 이탈]\n"
+                f"BTC {level_text} 달러 이탈\n\n"
+                f"심리 지지선이 깨진 자리.\n"
+                f"단기 손절/청산 물량이 나올 수 있는 구간.\n\n"
+                f"📌 지금 핵심은 {level_text} 회복 여부."
+            )
+
+        await safe_send(bot, msg)
+        touch_price_milestone(state, key, now)
+
+    state.last_market_price[symbol] = price
 
 
 def news_id(title: str, link: str, published: str) -> str:
@@ -639,6 +707,9 @@ async def market_monitor(bot: Bot, state: State) -> None:
                     if not ticker:
                         continue
                     price = float(ticker["lastPrice"])
+                    prev_market_price = state.last_market_price.get(symbol)
+                    await maybe_send_price_milestone_alert(bot, state, symbol, prev_market_price, price, now)
+
                     history = state.price_history[symbol]
                     history.append((now, price))
 
@@ -1027,20 +1098,41 @@ def us_close_conclusion(sp_pct: float, nq_pct: float, dji_pct: float) -> str:
 
 async def market_session_scheduler(bot: Bot, state: State) -> None:
     """
-    10만명 정보방 운영용 시장 브리핑.
-    - 한국장 시작 1시간 전: 08:00~08:15, 월~금 1회
-    - 한국장 마감: 15:30~15:45, 월~금 1회
-    - 미국장 시작 1시간 전: 21:30~21:45, 월~금 1회 (미국 서머타임 기준)
-    - 미국장 마감: 05:00~05:15, 화~토 1회 (미국 서머타임 기준)
+    10만명 정보방 운영용 고정 브리핑.
+    핵심 원칙:
+    - 정해진 시간대에 조건 없이 하루 1회 발송
+    - API 일부 실패해도 '확인중'으로 보내고 조용히 씹지 않음
+    - Railway 루프 딜레이/재시작 대비: 넓은 보정 구간 사용
+
+    발송 시간대(KST):
+    - 한국장 1시간 전: 08:00~09:00, 월~금
+    - 한국장 마감 정리: 15:30~17:00, 월~금
+    - 미국장 1시간 전: 21:30~22:30, 월~금
+    - 미국장 마감 정리: 05:00~07:00, 화~토
     """
+
+    def in_range(now: datetime, hour: int, minute: int, end_hour: int, end_minute: int) -> bool:
+        start = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        end = now.replace(hour=end_hour, minute=end_minute, second=0, microsecond=0)
+        return start <= now < end
+
+    def snap_line(name: str, snap: Optional[Tuple[float, float]], digits: int = 2) -> str:
+        if not snap:
+            return f"{name}: 확인중"
+        price, pct = snap
+        return f"{name}: {price:,.{digits}f} ({fmt_pct(pct)})"
+
+    def pct_or_zero(snap: Optional[Tuple[float, float]]) -> float:
+        return float(snap[1]) if snap else 0.0
+
     async with aiohttp.ClientSession() as session:
         while True:
             started = utc_now()
             try:
                 now = now_kst()
 
-                # 🇰🇷 한국장 시작 1시간 전: 08:00
-                if is_korean_market_weekday(now) and in_window(now, 8, 0, 15):
+                # 🇰🇷 한국장 1시간 전: 08:00~09:00
+                if is_korean_market_weekday(now) and in_range(now, 8, 0, 9, 0):
                     key = "kr_pre_0800"
                     if state.market_session_sent_dates.get(key) != now.date():
                         kospi = await get_yahoo_snapshot(session, "%5EKS11")
@@ -1048,52 +1140,68 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         usd_krw = await get_usd_krw(session)
                         sp_fut = await get_yahoo_snapshot(session, "ES%3DF")
                         nq_fut = await get_yahoo_snapshot(session, "NQ%3DF")
-                        if kospi and kosdaq and usd_krw and sp_fut and nq_fut:
-                            us_flow = market_direction_label(sp_fut[1], nq_fut[1])
-                            conclusion = kr_open_conclusion(kospi[1], kosdaq[1], sp_fut[1], nq_fut[1], usd_krw)
-                            msg = (
-                                "🇰🇷 [한국장 1시간 전]\n"
-                                f"코스피 {kospi[0]:,.2f} ({fmt_pct(kospi[1])})\n"
-                                f"코스닥 {kosdaq[0]:,.2f} ({fmt_pct(kosdaq[1])})\n"
-                                f"달러/원 {usd_krw:,.2f}원\n"
-                                f"S&P500 선물 {fmt_pct(sp_fut[1])}\n"
-                                f"나스닥 선물 {fmt_pct(nq_fut[1])}\n\n"
-                                f"시장 분위기: {us_flow}\n"
-                                f"📌 오늘 결론: {conclusion}"
-                            )
-                            await safe_send(bot, msg, disable_preview=True)
-                            state.market_session_sent_dates[key] = now.date()
 
-                # 🔔 한국장 마감: 15:30
-                if is_korean_market_weekday(now) and in_window(now, 15, 30, 15):
+                        us_flow = market_direction_label(pct_or_zero(sp_fut), pct_or_zero(nq_fut))
+                        conclusion = kr_open_conclusion(
+                            pct_or_zero(kospi),
+                            pct_or_zero(kosdaq),
+                            pct_or_zero(sp_fut),
+                            pct_or_zero(nq_fut),
+                            usd_krw or 0,
+                        )
+                        msg = (
+                            "🇰🇷 [한국장 1시간 전]\n"
+                            f"{snap_line('코스피', kospi)}\n"
+                            f"{snap_line('코스닥', kosdaq)}\n"
+                            f"달러/원: {usd_krw:,.2f}원\n" if usd_krw else "달러/원: 확인중\n"
+                        ) + (
+                            f"{snap_line('S&P500 선물', sp_fut)}\n"
+                            f"{snap_line('나스닥 선물', nq_fut)}\n\n"
+                            f"시장 분위기: {us_flow}\n"
+                            f"📌 오늘 결론: {conclusion}"
+                        )
+                        await safe_send(bot, msg, disable_preview=True)
+                        state.market_session_sent_dates[key] = now.date()
+                        logging.info("한국장 1시간 전 브리핑 전송 완료")
+
+                # 🔔 한국장 마감: 15:30~17:00
+                if is_korean_market_weekday(now) and in_range(now, 15, 30, 17, 0):
                     key = "kr_close_1530"
                     if state.market_session_sent_dates.get(key) != now.date():
                         kospi = await get_yahoo_snapshot(session, "%5EKS11")
                         kosdaq = await get_yahoo_snapshot(session, "%5EKQ11")
                         usd_krw = await get_usd_krw(session)
-                        if kospi and kosdaq and usd_krw:
-                            if kospi[1] >= 0 and kosdaq[1] >= 0:
+
+                        kp = pct_or_zero(kospi)
+                        kq = pct_or_zero(kosdaq)
+                        if kospi and kosdaq:
+                            if kp >= 0 and kq >= 0:
                                 feature = "지수 동반 강세"
-                            elif kospi[1] >= 0 > kosdaq[1]:
+                            elif kp >= 0 > kq:
                                 feature = "대형주 상대강세, 중소형주 약세"
-                            elif kospi[1] < 0 <= kosdaq[1]:
+                            elif kp < 0 <= kq:
                                 feature = "종목장 성격 강화"
                             else:
                                 feature = "지수 전반 약세"
-                            conclusion = kr_close_conclusion(kospi[1], kosdaq[1], usd_krw)
-                            msg = (
-                                "🔔 [한국장 마감]\n"
-                                f"코스피 {kospi[0]:,.2f} ({fmt_pct(kospi[1])})\n"
-                                f"코스닥 {kosdaq[0]:,.2f} ({fmt_pct(kosdaq[1])})\n"
-                                f"달러/원 {usd_krw:,.0f}원\n\n"
-                                f"오늘 특징: {feature}\n"
-                                f"📌 오늘 결론: {conclusion}"
-                            )
-                            await safe_send(bot, msg, disable_preview=True)
-                            state.market_session_sent_dates[key] = now.date()
+                        else:
+                            feature = "데이터 일부 확인중. 환율과 미국 선물 확인 필요"
 
-                # 🇺🇸 미국장 시작 1시간 전: 21:30 (서머타임 기준)
-                if is_us_market_premarket_day(now) and in_window(now, 21, 30, 15):
+                        conclusion = kr_close_conclusion(kp, kq, usd_krw or 0)
+                        msg = (
+                            "🔔 [한국장 마감 정리]\n"
+                            f"{snap_line('코스피', kospi)}\n"
+                            f"{snap_line('코스닥', kosdaq)}\n"
+                            f"달러/원: {usd_krw:,.0f}원\n\n" if usd_krw else "달러/원: 확인중\n\n"
+                        ) + (
+                            f"오늘 특징: {feature}\n"
+                            f"📌 오늘 결론: {conclusion}"
+                        )
+                        await safe_send(bot, msg, disable_preview=True)
+                        state.market_session_sent_dates[key] = now.date()
+                        logging.info("한국장 마감 브리핑 전송 완료")
+
+                # 🇺🇸 미국장 1시간 전: 21:30~22:30
+                if is_us_market_premarket_day(now) and in_range(now, 21, 30, 22, 30):
                     key = "us_pre_2130"
                     if state.market_session_sent_dates.get(key) != now.date():
                         sp_fut = await get_yahoo_snapshot(session, "ES%3DF")
@@ -1101,24 +1209,34 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         dxy = await get_yahoo_snapshot(session, "DX-Y.NYB")
                         tnx = await get_yahoo_snapshot(session, "%5ETNX")
                         btc = await get_binance_ticker_24h(session, "BTCUSDT")
-                        if sp_fut and nq_fut and dxy and tnx and btc:
+                        btc_line = "BTC: 확인중"
+                        btc_pct = 0.0
+                        if btc:
                             btc_price = float(btc["lastPrice"])
                             btc_pct = float(btc["priceChangePercent"])
-                            conclusion = us_open_conclusion(sp_fut[1], nq_fut[1], dxy[1], tnx[1])
-                            msg = (
-                                "🇺🇸 [미국장 1시간 전]\n"
-                                f"S&P500 선물 {fmt_pct(sp_fut[1])}\n"
-                                f"나스닥 선물 {fmt_pct(nq_fut[1])}\n"
-                                f"달러인덱스 {dxy[0]:.2f} ({fmt_pct(dxy[1])})\n"
-                                f"10년물 금리 {tnx[0]:.2f} ({fmt_pct(tnx[1])})\n"
-                                f"BTC {btc_price:,.0f} USDT ({fmt_pct(btc_pct)})\n\n"
-                                f"📌 오늘 결론: {conclusion}"
-                            )
-                            await safe_send(bot, msg, disable_preview=True)
-                            state.market_session_sent_dates[key] = now.date()
+                            btc_line = f"BTC: {btc_price:,.0f} USDT ({fmt_pct(btc_pct)})"
 
-                # 🌙 미국장 마감: 05:00 (서머타임 기준, KST 화~토)
-                if is_us_market_close_day(now) and in_window(now, 5, 0, 15):
+                        conclusion = us_open_conclusion(
+                            pct_or_zero(sp_fut),
+                            pct_or_zero(nq_fut),
+                            pct_or_zero(dxy),
+                            pct_or_zero(tnx),
+                        )
+                        msg = (
+                            "🇺🇸 [미국장 1시간 전]\n"
+                            f"{snap_line('S&P500 선물', sp_fut)}\n"
+                            f"{snap_line('나스닥 선물', nq_fut)}\n"
+                            f"{snap_line('달러인덱스', dxy)}\n"
+                            f"{snap_line('10년물 금리', tnx)}\n"
+                            f"{btc_line}\n\n"
+                            f"📌 오늘 결론: {conclusion}"
+                        )
+                        await safe_send(bot, msg, disable_preview=True)
+                        state.market_session_sent_dates[key] = now.date()
+                        logging.info("미국장 1시간 전 브리핑 전송 완료")
+
+                # 🌙 미국장 마감: 05:00~07:00
+                if is_us_market_close_day(now) and in_range(now, 5, 0, 7, 0):
                     key = "us_close_0500"
                     if state.market_session_sent_dates.get(key) != now.date():
                         spx = await get_yahoo_snapshot(session, "%5EGSPC")
@@ -1126,21 +1244,28 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         dji = await get_yahoo_snapshot(session, "%5EDJI")
                         dxy = await get_yahoo_snapshot(session, "DX-Y.NYB")
                         tnx = await get_yahoo_snapshot(session, "%5ETNX")
-                        if spx and ixic and dji:
-                            conclusion = us_close_conclusion(spx[1], ixic[1], dji[1])
-                            extra = ""
-                            if dxy and tnx:
-                                extra = f"\n달러인덱스 {dxy[0]:.2f} ({fmt_pct(dxy[1])})\n10년물 금리 {tnx[0]:.2f} ({fmt_pct(tnx[1])})"
-                            msg = (
-                                "🌙 [미국장 마감]\n"
-                                f"S&P500 {spx[0]:,.2f} ({fmt_pct(spx[1])})\n"
-                                f"나스닥 {ixic[0]:,.2f} ({fmt_pct(ixic[1])})\n"
-                                f"다우 {dji[0]:,.2f} ({fmt_pct(dji[1])})"
-                                f"{extra}\n\n"
-                                f"📌 오늘 결론: {conclusion}"
-                            )
-                            await safe_send(bot, msg, disable_preview=True)
-                            state.market_session_sent_dates[key] = now.date()
+                        btc = await get_binance_ticker_24h(session, "BTCUSDT")
+
+                        conclusion = us_close_conclusion(pct_or_zero(spx), pct_or_zero(ixic), pct_or_zero(dji))
+                        btc_line = "BTC: 확인중"
+                        if btc:
+                            btc_price = float(btc["lastPrice"])
+                            btc_pct = float(btc["priceChangePercent"])
+                            btc_line = f"BTC: {btc_price:,.0f} USDT ({fmt_pct(btc_pct)})"
+
+                        msg = (
+                            "🌙 [미국장 마감 정리]\n"
+                            f"{snap_line('S&P500', spx)}\n"
+                            f"{snap_line('나스닥', ixic)}\n"
+                            f"{snap_line('다우', dji)}\n"
+                            f"{snap_line('달러인덱스', dxy)}\n"
+                            f"{snap_line('10년물 금리', tnx)}\n"
+                            f"{btc_line}\n\n"
+                            f"📌 오늘 결론: {conclusion}"
+                        )
+                        await safe_send(bot, msg, disable_preview=True)
+                        state.market_session_sent_dates[key] = now.date()
+                        logging.info("미국장 마감 브리핑 전송 완료")
 
             except Exception:
                 logging.exception("market_session_scheduler 오류")
