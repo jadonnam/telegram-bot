@@ -1102,18 +1102,19 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
     핵심 원칙:
     - 정해진 시간대에 조건 없이 하루 1회 발송
     - API 일부 실패해도 '확인중'으로 보내고 조용히 씹지 않음
-    - Railway 루프 딜레이/재시작 대비: 넓은 보정 구간 사용
+    - Railway 루프 딜레이 대비: 정해진 시간부터 5분 보정 구간 안에서 하루 1회 발송
 
     발송 시간대(KST):
-    - 한국장 1시간 전: 08:00~09:00, 월~금
-    - 한국장 마감 정리: 15:30~17:00, 월~금
-    - 미국장 1시간 전: 21:30~22:30, 월~금
-    - 미국장 마감 정리: 05:00~07:00, 화~토
+    - 한국장 1시간 전: 08:00~08:05, 월~금
+    - 한국장 마감 정리: 15:30~15:35, 월~금
+    - 미국장 1시간 전: 21:30~21:35, 월~금
+    - 미국장 마감 정리: 05:00~05:05, 화~토
     """
 
-    def in_range(now: datetime, hour: int, minute: int, end_hour: int, end_minute: int) -> bool:
+    def in_exact_window(now: datetime, hour: int, minute: int, window_minutes: int = 5) -> bool:
+        """정해진 시각에 맞춰 보내되, Railway 루프 지연 방지를 위해 5분만 보정."""
         start = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        end = now.replace(hour=end_hour, minute=end_minute, second=0, microsecond=0)
+        end = start + timedelta(minutes=window_minutes)
         return start <= now < end
 
     def snap_line(name: str, snap: Optional[Tuple[float, float]], digits: int = 2) -> str:
@@ -1131,8 +1132,8 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
             try:
                 now = now_kst()
 
-                # 🇰🇷 한국장 1시간 전: 08:00~09:00
-                if is_korean_market_weekday(now) and in_range(now, 8, 0, 9, 0):
+                # 🇰🇷 한국장 1시간 전: 08:00~08:05
+                if is_korean_market_weekday(now) and in_exact_window(now, 8, 0):
                     key = "kr_pre_0800"
                     if state.market_session_sent_dates.get(key) != now.date():
                         kospi = await get_yahoo_snapshot(session, "%5EKS11")
@@ -1164,8 +1165,8 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         state.market_session_sent_dates[key] = now.date()
                         logging.info("한국장 1시간 전 브리핑 전송 완료")
 
-                # 🔔 한국장 마감: 15:30~17:00
-                if is_korean_market_weekday(now) and in_range(now, 15, 30, 17, 0):
+                # 🔔 한국장 마감: 15:30~15:35
+                if is_korean_market_weekday(now) and in_exact_window(now, 15, 30):
                     key = "kr_close_1530"
                     if state.market_session_sent_dates.get(key) != now.date():
                         kospi = await get_yahoo_snapshot(session, "%5EKS11")
@@ -1200,8 +1201,8 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         state.market_session_sent_dates[key] = now.date()
                         logging.info("한국장 마감 브리핑 전송 완료")
 
-                # 🇺🇸 미국장 1시간 전: 21:30~22:30
-                if is_us_market_premarket_day(now) and in_range(now, 21, 30, 22, 30):
+                # 🇺🇸 미국장 1시간 전: 21:30~21:35
+                if is_us_market_premarket_day(now) and in_exact_window(now, 21, 30):
                     key = "us_pre_2130"
                     if state.market_session_sent_dates.get(key) != now.date():
                         sp_fut = await get_yahoo_snapshot(session, "ES%3DF")
@@ -1235,8 +1236,8 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         state.market_session_sent_dates[key] = now.date()
                         logging.info("미국장 1시간 전 브리핑 전송 완료")
 
-                # 🌙 미국장 마감: 05:00~07:00
-                if is_us_market_close_day(now) and in_range(now, 5, 0, 7, 0):
+                # 🌙 미국장 마감: 05:00~05:05
+                if is_us_market_close_day(now) and in_exact_window(now, 5, 0):
                     key = "us_close_0500"
                     if state.market_session_sent_dates.get(key) != now.date():
                         spx = await get_yahoo_snapshot(session, "%5EGSPC")
