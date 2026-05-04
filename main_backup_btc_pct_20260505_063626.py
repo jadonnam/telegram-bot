@@ -334,12 +334,6 @@ async def fetch_text(session: aiohttp.ClientSession, url: str):
 # ============================================================
 
 async def get_market_ticker(session: aiohttp.ClientSession, symbol: str) -> Optional[dict]:
-    # 가격/24h 변동률 안정화:
-    # 1순위 Bybit: lastPrice + price24hPcnt
-    # 2순위 OKX: last + open24h로 직접 계산
-    # 3순위 Binance: lastPrice + priceChangePercent
-
-    # 1) Bybit
     data = await fetch_json(
         session,
         "https://api.bybit.com/v5/market/tickers",
@@ -347,25 +341,15 @@ async def get_market_ticker(session: aiohttp.ClientSession, symbol: str) -> Opti
     )
     try:
         item = (data.get("result") or {}).get("list", [])[0]
-        price = float(item["lastPrice"])
-
-        pct_raw = item.get("price24hPcnt")
-        if pct_raw is not None:
-            pct = float(pct_raw) * 100
-        else:
-            prev_price = float(item.get("prevPrice24h") or 0)
-            pct = ((price - prev_price) / prev_price) * 100 if prev_price > 0 else 0.0
-
         return {
-            "lastPrice": price,
-            "priceChangePercent": pct,
+            "lastPrice": float(item["lastPrice"]),
+            "priceChangePercent": float(item.get("price24hPcnt", 0)) * 100,
             "volume24h": float(item.get("turnover24h", 0) or 0),
             "source": "Bybit",
         }
     except Exception:
         pass
 
-    # 2) OKX
     okx_symbol = symbol.replace("USDT", "-USDT")
     data = await fetch_json(
         session,
@@ -374,29 +358,16 @@ async def get_market_ticker(session: aiohttp.ClientSession, symbol: str) -> Opti
     )
     try:
         item = data["data"][0]
-        price = float(item["last"])
-
-        open_24h = float(item.get("open24h") or 0)
-        if open_24h > 0:
-            pct = ((price - open_24h) / open_24h) * 100
-        else:
-            pct = float(item.get("chg24h") or 0) * 100
-
         return {
-            "lastPrice": price,
-            "priceChangePercent": pct,
+            "lastPrice": float(item["last"]),
+            "priceChangePercent": float(item.get("chg24h", 0)) * 100,
             "volume24h": float(item.get("volCcy24h", 0) or 0),
             "source": "OKX",
         }
     except Exception:
         pass
 
-    # 3) Binance
-    data = await fetch_json(
-        session,
-        "https://api.binance.com/api/v3/ticker/24hr",
-        {"symbol": symbol},
-    )
+    data = await fetch_json(session, "https://api.binance.com/api/v3/ticker/24hr", {"symbol": symbol})
     try:
         return {
             "lastPrice": float(data["lastPrice"]),
