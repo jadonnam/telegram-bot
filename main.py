@@ -1381,11 +1381,11 @@ async def briefing_scheduler(bot: Bot, state: State) -> None:
 
 
 def is_korean_market_weekday(now: datetime) -> bool:
-    return now.weekday() < 5 and not is_kr_holiday_day(now)
+    return now.weekday() < 5 and not is_kr_holiday_day(now) and not is_kr_holiday_day(now) and not is_kr_holiday_day(now)
 
 
 def is_us_market_premarket_day(now: datetime) -> bool:
-    return now.weekday() < 5 and not is_us_holiday_day(now)
+    return now.weekday() < 5 and not is_us_holiday_day(now) and not is_us_holiday_day(now) and not is_us_holiday_day(now)
 
 
 def is_us_market_close_day(now: datetime) -> bool:
@@ -1640,7 +1640,6 @@ async def kimchi_monitor(bot: Bot, state: State) -> None:
             elapsed = (utc_now() - started).total_seconds()
             await asyncio.sleep(max(5, KIMCHI_CHECK_SECONDS - int(elapsed)))
 
-
 # ============================================================
 # RUNTIME
 # ============================================================
@@ -1684,6 +1683,100 @@ async def railway_port_health_server() -> None:
     await asyncio.Future()
 
 
+async def liquidation_monitor(bot: Bot, state: State) -> None:
+    cooldown_key_long = "liquidation:long"
+    cooldown_key_short = "liquidation:short"
+
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                url = "https://fapi.binance.com/fapi/v1/allForceOrders"
+                async with session.get(
+                    url,
+                    params={"symbol": "BTCUSDT", "limit": 50},
+                    timeout=12,
+                    headers=REQUEST_HEADERS,
+                ) as response:
+                    if response.status != 200:
+                        await asyncio.sleep(60)
+                        continue
+                    data = await response.json()
+
+                if not isinstance(data, list):
+                    await asyncio.sleep(60)
+                    continue
+
+                total_long = 0.0
+                total_short = 0.0
+
+                for row in data:
+                    price = float(row.get("price") or 0)
+                    qty = float(row.get("origQty") or row.get("executedQty") or 0)
+                    notional = price * qty
+                    side = row.get("side")
+
+                    if side == "SELL":
+                        total_long += notional
+                    elif side == "BUY":
+                        total_short += notional
+
+                now = utc_now()
+
+                if total_long >= 5_000_000 and not state.is_on_cooldown(cooldown_key_long, now):
+                    await safe_send(
+                        bot,
+                        (
+                            "💥 [롱 청산 감지]\n"
+                            f"규모: {total_long:,.0f} USDT\n\n"
+                            "관찰: 하방 압력이 한 번 크게 나온 구간.\n"
+                            "리스크: 반등이 약하면 추가 하락 가능.\n"
+                            "대응: 바로 추격보다 반등 강도 확인."
+                        ),
+                        disable_preview=True,
+                    )
+                    state.touch_cooldown(cooldown_key_long, now)
+
+                if total_short >= 5_000_000 and not state.is_on_cooldown(cooldown_key_short, now):
+                    await safe_send(
+                        bot,
+                        (
+                            "🔥 [숏 청산 감지]\n"
+                            f"규모: {total_short:,.0f} USDT\n\n"
+                            "관찰: 위로 강제 매수 물량이 나온 구간.\n"
+                            "리스크: 급등 직후 위꼬리 가능.\n"
+                            "대응: 돌파 유지 여부 먼저 확인."
+                        ),
+                        disable_preview=True,
+                    )
+                    state.touch_cooldown(cooldown_key_short, now)
+
+            except Exception:
+                logging.exception("liquidation_monitor 오류")
+
+            await asyncio.sleep(60)
+
+
+def market_direction(funding: float, oi_change: float, imbalance: float) -> str:
+    if funding > 0.05 and oi_change > 3:
+        return "롱 과열 → 숏 우위"
+    if funding < -0.05 and oi_change > 3:
+        return "숏 과열 → 롱 우위"
+    if imbalance > 1.8:
+        return "매수 우위"
+    if imbalance < 0.6:
+        return "매도 우위"
+    return "중립"
+
+
+def build_position_message(direction: str) -> str:
+    return (
+        "🎯 [포지션 판단]\n\n"
+        f"{direction}\n\n"
+        "추격 ❌\n"
+        "눌림/돌파 유지 확인 ⭕"
+    )
+
+
 async def run_forever() -> None:
     token, _ = resolve_telegram_token()
     if not token:
@@ -1701,6 +1794,7 @@ async def run_forever() -> None:
         asyncio.create_task(news_monitor(bot, state)),
         asyncio.create_task(futures_flow_monitor(bot, state)),
         asyncio.create_task(alpha_flow_monitor(bot, state)),
+        asyncio.create_task(liquidation_monitor(bot, state)),
         asyncio.create_task(market_session_scheduler(bot, state)),
     ]
 
@@ -1715,7 +1809,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     while True:
         try:
-            asyncio.run(run_foreverasyncio.create_task(liquidation_monitor(bot, state)),())
+            asyncio.run(run_forever())
         except RuntimeError as e:
             if "TELEGRAM_TOKEN" in str(e):
                 logging.error("토큰 없음. Railway Variables 에 TELEGRAM_TOKEN 확인.")
@@ -1725,61 +1819,5 @@ if __name__ == "__main__":
         except Exception:
             logging.exception("run_forever 재시작")
             time.sleep(10)
-async def liquidation_monitor(bot, state):
-    async with aiohttp.ClientSession() as session:
-        while True:
-            try:
-                data = await fetch_json(
-                    session,
-                    "https://fapi.binance.com/fapi/v1/allForceOrders",
-                    {"symbol": "BTCUSDT", "limit": 50},
-                )
-
-                if not data:
-                    await asyncio.sleep(10)
-                    continue
-
-                total_long = 0
-                total_short = 0
-
-                for d in data:
-                    price = float(d["price"])
-                    qty = float(d["origQty"])
-                    notional = price * qty
-
-                    if d["side"] == "SELL":
-                        total_long += notional
-                    else:
-                        total_short += notional
-
-                if total_long > 5_000_000:
-                    await safe_send(bot, f"💥 [롱 청산]\n{total_long:,.0f} USDT")
-
-                if total_short > 5_000_000:
-                    await safe_send(bot, f"🔥 [숏 청산]\n{total_short:,.0f} USDT")
-
-            except:
-                pass
-
-            await asyncio.sleep(20)
-
-
-def market_direction(funding, oi_change, imbalance):
-    if funding > 0.05 and oi_change > 3:
-        return "롱 과열 → 숏 우위"
-    if funding < -0.05 and oi_change > 3:
-        return "숏 과열 → 롱 우위"
-    if imbalance > 1.8:
-        return "매수 우위"
-    if imbalance < 0.6:
-        return "매도 우위"
-    return "중립"
-
-
-def build_position_message(direction):
-    return (
-        "🎯 [포지션 판단]\n\n"
-        f"{direction}\n\n"
-        "추격 ❌ / 눌림 ⭕"
-    )
+            continue
 
