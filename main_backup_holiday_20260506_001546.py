@@ -98,82 +98,6 @@ REQUEST_HEADERS = {
     "Accept": "application/json,text/plain,*/*",
 }
 
-# ============================================================
-# HOLIDAY FILTER
-# ============================================================
-
-# Nager.Date API로 연도별 공휴일 자동 로드.
-# 실패 시 FALLBACK_HOLIDAYS를 사용.
-HOLIDAY_CACHE: Dict[str, set[str]] = {
-    "KR": set(),
-    "US": set(),
-}
-HOLIDAY_CACHE_YEARS: set[str] = set()
-
-# API 실패 대비 최소 백업값. 필요하면 매년 여기에 추가 가능.
-FALLBACK_HOLIDAYS = {
-    "KR": {
-        "2026-01-01",
-        "2026-02-16", "2026-02-17", "2026-02-18",
-        "2026-03-01",
-        "2026-05-05",
-        "2026-06-06",
-        "2026-08-15",
-        "2026-09-24", "2026-09-25", "2026-09-26",
-        "2026-10-03",
-        "2026-10-09",
-        "2026-12-25",
-    },
-    "US": {
-        "2026-01-01",
-        "2026-01-19",
-        "2026-02-16",
-        "2026-04-03",
-        "2026-05-25",
-        "2026-07-03",
-        "2026-09-07",
-        "2026-11-26",
-        "2026-12-25",
-    },
-}
-
-
-async def warm_holiday_cache(session: aiohttp.ClientSession, year: int) -> None:
-    key = str(year)
-    if key in HOLIDAY_CACHE_YEARS:
-        return
-
-    for country in ("KR", "US"):
-        loaded = set()
-        url = f"https://date.nager.at/api/v3/PublicHolidays/{year}/{country}"
-        data = await fetch_json(session, url)
-
-        if isinstance(data, list):
-            for row in data:
-                date_s = row.get("date")
-                if date_s:
-                    loaded.add(date_s)
-
-        # 미국 주식시장 휴장에 가까운 Good Friday는 공휴일 API에 없을 수 있어 수동 보강
-        if country == "US":
-            loaded.update(FALLBACK_HOLIDAYS.get("US", set()))
-
-        # API 실패해도 백업 공휴일은 유지
-        loaded.update(FALLBACK_HOLIDAYS.get(country, set()))
-
-        HOLIDAY_CACHE[country].update(loaded)
-
-    HOLIDAY_CACHE_YEARS.add(key)
-
-
-def is_kr_holiday_day(day) -> bool:
-    return day.strftime("%Y-%m-%d") in HOLIDAY_CACHE.get("KR", set())
-
-
-def is_us_holiday_day(day) -> bool:
-    return day.strftime("%Y-%m-%d") in HOLIDAY_CACHE.get("US", set())
-
-
 
 # ============================================================
 # STATE
@@ -1381,17 +1305,15 @@ async def briefing_scheduler(bot: Bot, state: State) -> None:
 
 
 def is_korean_market_weekday(now: datetime) -> bool:
-    return now.weekday() < 5 and not is_kr_holiday_day(now)
+    return now.weekday() < 5
 
 
 def is_us_market_premarket_day(now: datetime) -> bool:
-    return now.weekday() < 5 and not is_us_holiday_day(now)
+    return now.weekday() < 5
 
 
 def is_us_market_close_day(now: datetime) -> bool:
-    # KST 새벽 05:00 미국장 마감 브리핑은 전날 미국 거래일 기준
-    us_session_day = now - timedelta(days=1)
-    return us_session_day.weekday() < 5 and not is_us_holiday_day(us_session_day)
+    return 1 <= now.weekday() <= 5
 
 
 def market_direction_label(*pcts: float) -> str:
@@ -1470,8 +1392,6 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
             started = utc_now()
             try:
                 now = now_kst()
-                await warm_holiday_cache(session, now.year)
-                await warm_holiday_cache(session, (now - timedelta(days=1)).year)
 
                 if is_korean_market_weekday(now) and is_exact_time(now, 8, 0):
                     key = "kr_pre_0800"
