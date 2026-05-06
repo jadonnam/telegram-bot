@@ -1238,6 +1238,8 @@ async def whale_monitor(bot: Bot, state: State) -> None:
             await asyncio.sleep(max(5, WHALE_CHECK_SECONDS - int(elapsed)))
 
 
+LEGACY_NEWS_TASK_DISABLED = True
+
 async def news_monitor(bot: Bot, state: State) -> None:
     async with aiohttp.ClientSession() as session:
         while True:
@@ -2114,7 +2116,6 @@ async def run_forever() -> None:
         asyncio.create_task(fear_greed_monitor(bot, state)),
         asyncio.create_task(kimchi_monitor(bot, state)),
         asyncio.create_task(whale_monitor(bot, state)),
-        asyncio.create_task(news_monitor(bot, state)),
         asyncio.create_task(live_news_monitor(bot, state)),
         asyncio.create_task(daily_digest_scheduler(bot, state)),
         asyncio.create_task(macro_pulse_monitor(bot, state)),
