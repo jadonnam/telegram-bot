@@ -301,7 +301,7 @@ def sentiment_label(*pcts: float) -> str:
         return "🟢 위험선호 우위"
     if avg <= -0.35:
         return "🔴 리스크오프 우위"
-    return "🟡 혼조"
+    return "🟡 눈치보기"
 
 
 def format_price_level(level: float) -> str:
@@ -1328,7 +1328,7 @@ def market_one_liner(btc_24h_pct: float) -> str:
         return "BTC 저항선 테스트 중. 돌파 유지 여부가 핵심."
     if btc_24h_pct <= -2.0:
         return "변동성 확대 구간. 지지선 반응 확인 필요."
-    return "방향성 탐색 구간. 거래량 동반 여부가 핵심."
+    return "큰 방향은 아직 안 나왔고, 수급 붙는 쪽으로 시장이 움직일 가능성 큼."
 
 
 async def briefing_scheduler(bot: Bot, state: State) -> None:
@@ -1408,7 +1408,7 @@ def kr_open_conclusion(kospi_pct: float, kosdaq_pct: float, sp_pct: float, nq_pc
         return "환율·미국 선물이 부담이면 장 초반 추격보다 눌림 확인이 우선."
     if kospi_pct >= 0 and kosdaq_pct < 0:
         return "대형주 쪽이 상대적으로 유리한 흐름. 중소형주는 선별 필요."
-    return "오늘은 방향보다 수급 확인이 중요. 장 초반 30분은 무리하지 않는 구간."
+    return "오늘은 외국인 수급과 반도체 흐름 확인이 먼저. 장 초반 30분은 무리하지 않는 구간."
 
 
 def kr_close_conclusion(kospi_pct: float, kosdaq_pct: float, usd_krw: float) -> str:
@@ -1452,6 +1452,117 @@ def session_data_note(lines: list[str], required_min: int = 2) -> str:
     return "" if len(lines) >= required_min else "\n데이터 일부 지연 중. 핵심 가격 반응 우선 확인."
 
 
+
+# ============================================================
+# PREMIUM BRIEFING STYLE
+# ============================================================
+
+def pct_from_snap(snap: Optional[Tuple[float, float]]) -> float:
+    return float(snap[1]) if snap else 0.0
+
+
+def brief_flow_word(*pcts: float) -> str:
+    vals = [p for p in pcts if p is not None]
+    if not vals:
+        return "⚪ 데이터 확인 중"
+    avg = sum(vals) / len(vals)
+    if avg >= 0.45:
+        return "🟢 위험선호"
+    if avg <= -0.45:
+        return "🔴 리스크오프"
+    if max(vals) - min(vals) >= 0.8:
+        return "🟡 종목장"
+    return "🟡 눈치보기"
+
+
+def kr_market_focus_line(sp_pct: float, nq_pct: float, usd_krw: float) -> str:
+    if nq_pct >= 0.4:
+        return "미국 AI·반도체 강세 영향이 이어지는 중. 오늘은 외국인 반도체 수급 먼저 봐야함."
+    if nq_pct <= -0.4:
+        return "나스닥 쪽 부담이 남아있음. 장 초반 추격보다 반도체 방어력 확인이 먼저."
+    if usd_krw >= 1450:
+        return "환율이 높은 구간이라 외국인 수급이 오늘 방향을 정할 가능성 큼."
+    return "큰 방향보다 수급 확인이 먼저. 장 초반 30분은 무리하지 않는 구간."
+
+
+def kr_close_focus_line(kospi_pct: float, kosdaq_pct: float, usd_krw: float) -> str:
+    if kospi_pct >= 0.5 and kosdaq_pct >= 0.3:
+        return "지수 동반 강세. 내일도 외국인 수급과 반도체 흐름이 핵심."
+    if kospi_pct >= 0.5 and kosdaq_pct < 0:
+        return "대형주 쪽으로 돈이 몰린 장. 삼성전자·하이닉스 수급 확인 필요."
+    if kospi_pct < 0 and kosdaq_pct < 0:
+        return "전반적으로 힘이 빠진 장. 환율과 미국 선물 반응이 더 중요해짐."
+    if usd_krw >= 1450:
+        return "환율 부담이 남아있어서 종목보다 수급 방향 확인이 우선."
+    return "지수보다 종목장 성격이 강한 하루. 강한 섹터만 살아남는 흐름."
+
+
+def us_pre_focus_line(sp_pct: float, nq_pct: float, dxy_pct: float, tnx_pct: float) -> str:
+    if nq_pct >= 0.4:
+        return "나스닥 선물이 강함. 오늘도 AI·빅테크 쪽으로 돈이 붙는지 봐야함."
+    if nq_pct <= -0.4:
+        return "나스닥 선물이 약함. 장 초반 기술주 매도 압력부터 확인 필요."
+    if dxy_pct > 0.25 or tnx_pct > 0.25:
+        return "달러·금리 부담이 있어서 초반 변동성 커질 수 있음."
+    return "방향은 아직 애매함. 첫 30분 거래량 붙는 쪽이 오늘 흐름."
+
+
+def us_close_focus_line(sp_pct: float, nq_pct: float, dji_pct: float) -> str:
+    if nq_pct >= sp_pct and nq_pct >= dji_pct and nq_pct > 0.4:
+        return "나스닥 상대강세. AI·반도체 수급이 한국장까지 이어질지 체크."
+    if sp_pct > 0 and nq_pct > 0 and dji_pct > 0:
+        return "미국장 전반 강세. 한국장도 위험선호 이어질 가능성 있음."
+    if sp_pct < 0 and nq_pct < 0 and dji_pct < 0:
+        return "미국장 전반 약세. 한국장은 방어적으로 출발할 가능성 큼."
+    return "지수별 온도차가 있는 장. 한국장은 환율과 반도체 수급이 방향을 정할 가능성."
+
+
+def build_kr_open_briefing(lines: list[str], us_flow: str, conclusion: str, sp_pct: float, nq_pct: float, usd_krw: float) -> str:
+    focus = kr_market_focus_line(sp_pct, nq_pct, usd_krw)
+    mood = brief_flow_word(sp_pct, nq_pct)
+    return (
+        "\n".join(lines)
+        + session_data_note(lines)
+        + f"\n\n📌 오늘 핵심:\n{focus}"
+        + f"\n\n🧭 시장 분위기: {mood}"
+        + "\n⚠️ 장 초반 추격매수보다 거래량 확인이 우선."
+    )
+
+
+def build_kr_close_briefing(lines: list[str], feature: str, conclusion: str, kospi_pct: float, kosdaq_pct: float, usd_krw: float) -> str:
+    focus = kr_close_focus_line(kospi_pct, kosdaq_pct, usd_krw)
+    return (
+        "\n".join(lines)
+        + session_data_note(lines)
+        + f"\n\n📌 오늘 특징: {feature}"
+        + f"\n📊 한 줄 정리: {focus}"
+    )
+
+
+def build_us_pre_briefing(lines: list[str], conclusion: str, sp_pct: float, nq_pct: float, dxy_pct: float, tnx_pct: float) -> str:
+    focus = us_pre_focus_line(sp_pct, nq_pct, dxy_pct, tnx_pct)
+    mood = brief_flow_word(sp_pct, nq_pct, -dxy_pct, -tnx_pct)
+    return (
+        "\n".join(lines)
+        + session_data_note(lines)
+        + f"\n\n📌 오늘 핵심:\n{focus}"
+        + f"\n\n🧭 미국장 분위기: {mood}"
+        + "\n⚠️ 첫 30분은 방향 확인 구간."
+    )
+
+
+def build_us_close_briefing(lines: list[str], conclusion: str, sp_pct: float, nq_pct: float, dji_pct: float) -> str:
+    focus = us_close_focus_line(sp_pct, nq_pct, dji_pct)
+    mood = brief_flow_word(sp_pct, nq_pct, dji_pct)
+    return (
+        "\n".join(lines)
+        + session_data_note(lines)
+        + f"\n\n📌 오늘 핵심:\n{focus}"
+        + f"\n\n🧭 미국장 분위기: {mood}"
+        + "\n🇰🇷 한국장은 반도체·환율·외국인 수급 먼저 체크."
+    )
+
+
 async def market_session_scheduler(bot: Bot, state: State) -> None:
     def is_exact_time(now: datetime, hour: int, minute: int) -> bool:
         return now.hour == hour and now.minute == minute
@@ -1485,7 +1596,7 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         nq_fut = await get_yahoo_snapshot(session, "NQ%3DF")
                         btc_text, _ = await btc_line(session)
 
-                        lines = [section_bar("🇰🇷 한국장 1시간 전")]
+                        lines = [section_bar("🌅 한국장 오픈 브리핑")]
                         append_if_value(lines, "코스피", kospi)
                         append_if_value(lines, "코스닥", kosdaq)
                         if usd_krw:
@@ -1542,7 +1653,7 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         tnx = await get_yahoo_snapshot(session, "%5ETNX")
                         btc_text, _ = await btc_line(session)
 
-                        lines = [section_bar("🇺🇸 미국장 1시간 전")]
+                        lines = [section_bar("🌆 미국장 프리뷰")]
                         append_if_value(lines, "S&P500 선물", sp_fut)
                         append_if_value(lines, "나스닥 선물", nq_fut)
                         append_if_value(lines, "달러인덱스", dxy)
@@ -1565,7 +1676,7 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         tnx = await get_yahoo_snapshot(session, "%5ETNX")
                         btc_text, _ = await btc_line(session)
 
-                        lines = [section_bar("🌙 미국장 마감 정리")]
+                        lines = [section_bar("🌙 미국장 마감 핵심 정리")]
                         append_if_value(lines, "S&P500", spx)
                         append_if_value(lines, "나스닥", ixic)
                         append_if_value(lines, "다우", dji)
