@@ -24,7 +24,7 @@ SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
 KST = ZoneInfo("Asia/Seoul")
 
 MARKET_CHECK_SECONDS = 5 * 60
-NEWS_CHECK_SECONDS = 5 * 60
+NEWS_CHECK_SECONDS = 15 * 60
 FUTURES_FLOW_CHECK_SECONDS = 15 * 60
 ALPHA_FLOW_CHECK_SECONDS = 60
 FNG_CHECK_SECONDS = 5 * 60
@@ -44,10 +44,10 @@ BTC_PRICE_MILESTONES = (60000, 70000, 75000, 80000, 85000, 90000, 100000)
 PRICE_MILESTONE_COOLDOWN = timedelta(hours=12)
 PRICE_MILESTONE_BUFFER_PCT = 0.15
 
-NEWS_DAILY_LIMIT = 30
-NEWS_MIN_INTERVAL = timedelta(minutes=12)
+NEWS_DAILY_LIMIT = 5
+NEWS_MIN_INTERVAL = timedelta(minutes=60)
 NEWS_URGENT_MIN_INTERVAL = timedelta(minutes=5)
-NEWS_MAX_PER_SCAN = 2
+NEWS_MAX_PER_SCAN = 1
 NEWS_URGENT_SCORE = 9
 NEWS_NORMAL_SCORE = 8
 NEWS_TITLE_SIMILARITY_BLOCK_HOURS = 24
@@ -1645,8 +1645,8 @@ async def kimchi_monitor(bot: Bot, state: State) -> None:
 # LIVE MARKET ROOM UPGRADE
 # ============================================================
 
-LIVE_NEWS_CHECK_SECONDS = 5 * 60
-LIVE_NEWS_DAILY_LIMIT = 60
+LIVE_NEWS_CHECK_SECONDS = 15 * 60
+LIVE_NEWS_DAILY_LIMIT = 5
 LIVE_NEWS_DAY_INTERVAL = timedelta(minutes=10)
 LIVE_NEWS_NIGHT_INTERVAL = timedelta(minutes=35)
 LIVE_NEWS_MAX_PER_SCAN_DAY = 2
@@ -1700,6 +1700,97 @@ LIVE_NIGHT_FORCE_KEYWORDS = (
     "속보", "긴급", "미사일", "공격", "전쟁", "호르무즈", "이란", "이스라엘", "유가",
     "급등", "급락", "청산", "연준", "금리", "물가",
 )
+
+
+# 시장 영향 필터: 이 단어가 없으면 뉴스가 아니라 잡음으로 본다.
+MARKET_IMPACT_TERMS = (
+    "nasdaq", "s&p", "dow", "stock", "shares", "pre-market", "after hours", "earnings", "guidance",
+    "nvidia", "tesla", "apple", "microsoft", "meta", "amazon", "google", "alphabet", "broadcom", "micron",
+    "fed", "cpi", "ppi", "interest rate", "rate cut", "treasury", "yield",
+    "oil", "wti", "brent", "dollar", "dxy", "gold", "copper",
+    "iran", "israel", "hormuz", "missile", "strike", "ceasefire", "sanction", "nuclear",
+    "bitcoin", "btc", "ethereum", "eth", "solana", "sol", "etf", "liquidation", "crypto",
+    "semiconductor", "ai", "data center", "cloud", "chip",
+    "나스닥", "다우", "주가", "증시", "선물", "프리장", "시간외", "실적", "가이던스",
+    "엔비디아", "테슬라", "애플", "마이크로소프트", "메타", "아마존", "구글", "알파벳", "브로드컴", "마이크론",
+    "연준", "금리", "물가", "국채", "수익률",
+    "유가", "원유", "달러", "금", "구리",
+    "이란", "이스라엘", "호르무즈", "미사일", "공습", "휴전", "제재", "핵",
+    "비트코인", "이더리움", "솔라나", "ETF", "청산", "코인",
+    "반도체", "AI", "데이터센터", "클라우드", "칩",
+    "삼성전자", "하이닉스", "코스피", "환율", "외국인",
+)
+
+# 시장방에 필요 없는 기사. 들어오면 차단.
+LIVE_HARD_BLOCK_TERMS = (
+    "migrant worker", "migrant workers", "shelter", "laboring", "human rights", "refugee",
+    "celebrity", "sports", "movie", "music", "crime", "accident",
+    "이주 노동자", "노동자", "쉼터", "인권", "난민", "연예", "스포츠", "범죄", "사고",
+    "사설", "칼럼", "인터뷰", "기고",
+)
+
+
+def has_market_impact(title: str, summary: str) -> bool:
+    text_value = f"{title}\n{summary}".lower()
+    return any(k.lower() in text_value for k in MARKET_IMPACT_TERMS)
+
+
+def is_hard_blocked_live_news(title: str, summary: str) -> bool:
+    text_value = f"{title}\n{summary}".lower()
+    return any(k.lower() in text_value for k in LIVE_HARD_BLOCK_TERMS)
+
+
+def strip_news_source_tail(title: str) -> str:
+    title = clean_text(title or "", 150)
+    if " - " in title:
+        title = title.rsplit(" - ", 1)[0].strip()
+    return title
+
+
+def mostly_english(text_value: str) -> bool:
+    if not text_value:
+        return False
+    letters = re.findall(r"[A-Za-z]", text_value)
+    korean = re.findall(r"[가-힣]", text_value)
+    return len(letters) > max(25, len(korean) * 2)
+
+
+def build_market_impact_line(category: str, title: str, summary: str) -> str:
+    t = f"{title}\n{summary}".lower()
+
+    if any(k in t for k in ("nvidia", "엔비디아", "semiconductor", "반도체", "micron", "마이크론", "broadcom", "브로드컴", "chip", "칩")):
+        return "AI·반도체 쪽 돈 흐름 계속 체크할 자리."
+    if any(k in t for k in ("tesla", "테슬라", "apple", "애플", "meta", "메타", "google", "구글", "amazon", "아마존", "microsoft", "마이크로소프트")):
+        return "빅테크 움직임이라 나스닥 분위기 같이 봐야함."
+    if any(k in t for k in ("earnings", "guidance", "실적", "가이던스", "eps", "매출")):
+        return "실적 숫자가 시장 기대를 계속 맞추는지가 핵심."
+    if any(k in t for k in ("fed", "cpi", "ppi", "interest rate", "rate cut", "연준", "금리", "물가")):
+        return "금리 기대 흔들리면 주식·코인 같이 움직일 수 있음."
+    if any(k in t for k in ("oil", "wti", "brent", "유가", "원유", "hormuz", "호르무즈")):
+        return "유가 움직임 나오면 달러·위험자산 반응 같이 봐야함."
+    if any(k in t for k in ("iran", "israel", "missile", "strike", "ceasefire", "sanction", "nuclear", "이란", "이스라엘", "미사일", "공습", "휴전", "제재", "핵")):
+        return "중동 리스크라 유가·달러·코인 변동성 바로 커질 수 있음."
+    if any(k in t for k in ("bitcoin", "btc", "비트코인", "etf", "청산", "liquidation")):
+        return "BTC 가격 반응이랑 거래량 붙는지 보는 게 핵심."
+    if any(k in t for k in ("samsung", "삼성전자", "hynix", "하이닉스", "kospi", "코스피", "환율", "외국인")):
+        return "한국장은 반도체·환율·외국인 수급 같이 봐야함."
+
+    return "시장 영향은 가격 반응 확인하면서 봐야함."
+
+
+def build_short_news_summary(category: str, title: str, summary: str) -> str:
+    title_clean = strip_news_source_tail(title)
+    summary_clean = clean_text(re.sub(r"<[^>]+>", " ", summary or ""), 120)
+
+    # 영어 요약은 제거. 한국어 요약만 짧게 사용.
+    if mostly_english(summary_clean):
+        summary_clean = ""
+
+    if summary_clean and summary_clean != title_clean:
+        return summary_clean
+
+    return build_market_impact_line(category, title, summary)
+
 
 
 def is_night_kst(now: datetime) -> bool:
@@ -1763,36 +1854,58 @@ def entry_image_url(entry) -> Optional[str]:
 
 
 def live_news_score(title: str, summary: str, category: str) -> int:
-    text = f"{title}\n{summary}".lower()
-    if any(k in text for k in LIVE_BLOCK_KEYWORDS):
-        return -10
+    text_low = f"{title}
+{summary}".lower()
+
+    if is_hard_blocked_live_news(title, summary):
+        return -100
+
+    if any(k in text_low for k in LIVE_BLOCK_KEYWORDS):
+        return -20
+
+    if not has_market_impact(title, summary):
+        return -30
 
     score = 0
-    score += sum(2 for k in LIVE_IMPORTANT_KEYWORDS if k in text)
-    score += sum(4 for k in LIVE_NIGHT_FORCE_KEYWORDS if k in text)
+    score += sum(2 for k in LIVE_IMPORTANT_KEYWORDS if k.lower() in text_low)
+    score += sum(5 for k in LIVE_NIGHT_FORCE_KEYWORDS if k.lower() in text_low)
+    score += sum(1 for k in MARKET_IMPACT_TERMS if k.lower() in text_low)
 
-    if category == "미국" and any(k in text for k in ("nvidia", "tesla", "earnings", "nasdaq", "fed", "엔비디아", "테슬라", "실적", "나스닥", "연준")):
-        score += 5
-    if category == "세계" and any(k in text for k in ("oil", "iran", "hormuz", "war", "유가", "이란", "호르무즈", "전쟁")):
-        score += 5
-    if category == "한국" and any(k in text for k in ("삼성전자", "하이닉스", "코스피", "환율", "반도체")):
-        score += 5
-    if category == "코인" and any(k in text for k in ("bitcoin", "btc", "etf", "liquidation", "비트코인", "청산")):
-        score += 5
+    if category == "미국" and any(k in text_low for k in ("nvidia", "tesla", "earnings", "guidance", "nasdaq", "fed", "cpi", "엔비디아", "테슬라", "실적", "가이던스", "나스닥", "연준", "금리")):
+        score += 8
+
+    if category == "세계" and any(k in text_low for k in ("oil", "dollar", "iran", "israel", "hormuz", "missile", "strike", "sanction", "nuclear", "ceasefire", "유가", "달러", "이란", "이스라엘", "호르무즈", "미사일", "공습", "제재", "핵", "휴전")):
+        score += 8
+
+    if category == "한국" and any(k in text_low for k in ("삼성전자", "하이닉스", "코스피", "환율", "외국인", "반도체")):
+        score += 8
+
+    if category == "코인" and any(k in text_low for k in ("bitcoin", "btc", "ethereum", "eth", "etf", "liquidation", "비트코인", "이더리움", "청산")):
+        score += 8
 
     return score
 
 
+
 def is_live_news_allowed(title: str, summary: str, category: str, now: datetime) -> bool:
+    if is_hard_blocked_live_news(title, summary):
+        return False
+
+    if not has_market_impact(title, summary):
+        return False
+
     score = live_news_score(title, summary, category)
-    if score < 6:
+
+    if score < 12:
         return False
 
     if is_night_kst(now):
-        text = f"{title}\n{summary}".lower()
-        return score >= 12 and any(k in text for k in LIVE_NIGHT_FORCE_KEYWORDS)
+        text_low = f"{title}
+{summary}".lower()
+        return score >= 22 and any(k.lower() in text_low for k in LIVE_NIGHT_FORCE_KEYWORDS)
 
     return True
+
 
 
 def live_digest_bucket(state: State):
@@ -1815,14 +1928,28 @@ async def safe_send_photo(bot: Bot, photo_url: str, caption: str) -> None:
 
 
 async def build_live_news_message(session: aiohttp.ClientSession, category_emoji: str, category: str, title: str, summary: str, source: str) -> str:
-    title_ko = await translate_to_korean(session, normalize_live_text(title))
-    summary_clean = normalize_live_text(summary)
-    summary_ko = await translate_to_korean(session, summary_clean) if summary_clean else ""
-    summary_ko = clean_text(summary_ko, 120)
+    title_clean = strip_news_source_tail(title)
+    title_ko = await translate_to_korean(session, title_clean)
 
-    if summary_ko and summary_ko != title_ko:
-        return f"{category_emoji} {title_ko}\n\n{summary_ko}\n\n출처: {source}"
-    return f"{category_emoji} {title_ko}\n\n출처: {source}"
+    body = build_short_news_summary(category, title, summary)
+    body_ko = await translate_to_korean(session, body)
+    body_ko = clean_text(body_ko, 150)
+
+    impact = build_market_impact_line(category, title, summary)
+
+    return (
+        f"{category_emoji} {title_ko}
+
+"
+        f"{body_ko}
+
+"
+        f"시장 영향: {impact}
+
+"
+        f"출처: {source}"
+    )
+
 
 
 async def live_news_monitor(bot: Bot, state: State) -> None:
