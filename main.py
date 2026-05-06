@@ -1791,7 +1791,7 @@ def extract_entry_image_url(entry) -> Optional[str]:
             if href and href.startswith("http") and ("image" in typ or rel in ("enclosure", "thumbnail")):
                 return href
     summary = getattr(entry, "summary", "") or ""
-    m = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', summary)
+    m = re.search(r'<img[^>]+src=["\\\']([^"\\\']+)["\\\']', summary)
     if m and m.group(1).startswith("http"):
         return m.group(1)
     return None
