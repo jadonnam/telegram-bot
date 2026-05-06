@@ -1645,10 +1645,10 @@ async def kimchi_monitor(bot: Bot, state: State) -> None:
 # LIVE MARKET ROOM QUALITY + MEDIA
 # ============================================================
 
-LIVE_NEWS_DAILY_LIMIT = 36
+LIVE_NEWS_DAILY_LIMIT = 48
 LIVE_NEWS_MAX_PER_SCAN = 2
-LIVE_NEWS_MIN_INTERVAL = timedelta(minutes=10)
-LIVE_NIGHT_NEWS_MIN_INTERVAL = timedelta(minutes=45)
+LIVE_NEWS_MIN_INTERVAL = timedelta(minutes=7)
+LIVE_NIGHT_NEWS_MIN_INTERVAL = timedelta(minutes=35)
 LIVE_RECAP_HOURS = (9, 13, 18, 23)
 
 MARKET_IMPACT_TERMS = (
@@ -1667,6 +1667,15 @@ MARKET_IMPACT_TERMS = (
     "비트코인", "이더리움", "솔라나", "ETF", "청산", "코인",
     "반도체", "AI", "데이터센터", "클라우드", "칩",
     "삼성전자", "하이닉스", "SK하이닉스", "코스피", "환율", "외국인",
+
+    "ionq", "rigetti", "qbts", "quantum", "quantum computing", "양자", "양자컴퓨터", "아이온큐", "리게티",
+    "palantir", "pltr", "팔란티어",
+    "amd", "arm", "tsmc", "asml", "oracle", "orcl", "coreweave", "dell", "supermicro", "smci",
+    "vertiv", "vst", "ge vernova", "nuclear", "uranium", "power grid", "electricity", "energy demand",
+    "원전", "우라늄", "전력", "전력망", "전기", "에너지 수요", "버티브",
+    "lockheed", "boeing", "defense", "drone", "ship", "shipping", "tariff", "rare earth", "battery",
+    "국방", "방산", "드론", "해운", "관세", "희토류", "배터리", "2차전지",
+    "현대차", "기아", "LG에너지솔루션", "두산에너빌리티", "한화에어로스페이스",
 )
 
 LIVE_HARD_BLOCK_TERMS = (
@@ -1677,10 +1686,10 @@ LIVE_HARD_BLOCK_TERMS = (
 )
 
 LIVE_CATEGORY_FEEDS = (
-    ("🇺🇸", "미국", "https://news.google.com/rss/search?q=(Nvidia%20OR%20Tesla%20OR%20Apple%20OR%20Meta%20OR%20Microsoft%20OR%20Amazon%20OR%20Google%20OR%20Nasdaq%20OR%20Fed%20OR%20CPI%20OR%20earnings%20OR%20guidance%20OR%20semiconductor%20OR%20AI)&hl=ko&gl=KR&ceid=KR:ko"),
-    ("🌍", "세계", "https://news.google.com/rss/search?q=(oil%20OR%20WTI%20OR%20dollar%20OR%20Iran%20OR%20Israel%20OR%20Hormuz%20OR%20missile%20OR%20ceasefire%20OR%20sanction%20OR%20China%20OR%20supply%20chain)&hl=ko&gl=KR&ceid=KR:ko"),
-    ("🇰🇷", "한국", "https://news.google.com/rss/search?q=(%EC%82%BC%EC%84%B1%EC%A0%84%EC%9E%90%20OR%20SK%ED%95%98%EC%9D%B4%EB%8B%89%EC%8A%A4%20OR%20%EC%BD%94%EC%8A%A4%ED%94%BC%20OR%20%ED%99%98%EC%9C%A8%20OR%20%EC%99%B8%EA%B5%AD%EC%9D%B8%20OR%20%EB%B0%98%EB%8F%84%EC%B2%B4)&hl=ko&gl=KR&ceid=KR:ko"),
-    ("🟠", "코인", "https://news.google.com/rss/search?q=(Bitcoin%20OR%20BTC%20OR%20Ethereum%20OR%20ETF%20OR%20crypto%20liquidation%20OR%20Solana)&hl=ko&gl=KR&ceid=KR:ko"),
+    ("🇺🇸", "미국", "https://news.google.com/rss/search?q=(Nvidia%20OR%20Tesla%20OR%20Apple%20OR%20Meta%20OR%20Microsoft%20OR%20Amazon%20OR%20Google%20OR%20Nasdaq%20OR%20Fed%20OR%20CPI%20OR%20earnings%20OR%20guidance%20OR%20semiconductor%20OR%20AI%20OR%20IonQ%20OR%20Rigetti%20OR%20Palantir%20OR%20AMD%20OR%20Oracle%20OR%20CoreWeave%20OR%20Vertiv%20OR%20nuclear%20OR%20defense)&hl=ko&gl=KR&ceid=KR:ko"),
+    ("🌍", "세계", "https://news.google.com/rss/search?q=(oil%20OR%20WTI%20OR%20dollar%20OR%20Iran%20OR%20Israel%20OR%20Hormuz%20OR%20missile%20OR%20ceasefire%20OR%20sanction%20OR%20China%20OR%20supply%20chain%20OR%20tariff%20OR%20rare%20earth%20OR%20shipping%20OR%20uranium%20OR%20power%20grid)&hl=ko&gl=KR&ceid=KR:ko"),
+    ("🇰🇷", "한국", "https://news.google.com/rss/search?q=(%EC%82%BC%EC%84%B1%EC%A0%84%EC%9E%90%20OR%20SK%ED%95%98%EC%9D%B4%EB%8B%89%EC%8A%A4%20OR%20%EC%BD%94%EC%8A%A4%ED%94%BC%20OR%20%ED%99%98%EC%9C%A8%20OR%20%EC%99%B8%EA%B5%AD%EC%9D%B8%20OR%20%EB%B0%98%EB%8F%84%EC%B2%B4%20OR%20%ED%95%9C%ED%99%94%EC%97%90%EC%96%B4%EB%A1%9C%EC%8A%A4%ED%8E%98%EC%9D%B4%EC%8A%A4%20OR%20%EB%91%90%EC%82%B0%EC%97%90%EB%84%88%EB%B9%8C%EB%A6%AC%ED%8B%B0%20OR%20LG%EC%97%90%EB%84%88%EC%A7%80%EC%86%94%EB%A3%A8%EC%85%98%20OR%20%ED%98%84%EB%8C%80%EC%B0%A8%20OR%20%EA%B8%B0%EC%95%84)&hl=ko&gl=KR&ceid=KR:ko"),
+    ("🟠", "코인", "https://news.google.com/rss/search?q=(Bitcoin%20OR%20BTC%20OR%20Ethereum%20OR%20ETF%20OR%20crypto%20liquidation%20OR%20Solana%20OR%20stablecoin%20OR%20tokenization)&hl=ko&gl=KR&ceid=KR:ko"),
 )
 
 
@@ -1751,12 +1760,12 @@ def is_night_kst(now: datetime) -> bool:
 
 def is_live_news_allowed(title: str, summary: str, category: str, now: datetime) -> bool:
     score = live_news_score(title, summary, category)
-    if score < 12:
+    if score < 8:
         return False
     if is_night_kst(now):
         text_low = f"{title} {summary}".lower()
         night_terms = ("missile", "strike", "war", "hormuz", "oil", "fed", "cpi", "crash", "surge", "liquidation", "미사일", "공습", "전쟁", "호르무즈", "유가", "연준", "금리", "급락", "급등", "청산")
-        return score >= 22 and any(k in text_low for k in night_terms)
+        return score >= 18 and any(k in text_low for k in night_terms)
     return True
 
 
