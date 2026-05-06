@@ -24,7 +24,7 @@ SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
 KST = ZoneInfo("Asia/Seoul")
 
 MARKET_CHECK_SECONDS = 5 * 60
-NEWS_CHECK_SECONDS = 15 * 60
+NEWS_CHECK_SECONDS = 5 * 60
 FUTURES_FLOW_CHECK_SECONDS = 15 * 60
 ALPHA_FLOW_CHECK_SECONDS = 60
 FNG_CHECK_SECONDS = 5 * 60
@@ -44,10 +44,10 @@ BTC_PRICE_MILESTONES = (60000, 70000, 75000, 80000, 85000, 90000, 100000)
 PRICE_MILESTONE_COOLDOWN = timedelta(hours=12)
 PRICE_MILESTONE_BUFFER_PCT = 0.15
 
-NEWS_DAILY_LIMIT = 3
-NEWS_MIN_INTERVAL = timedelta(minutes=60)
-NEWS_URGENT_MIN_INTERVAL = timedelta(minutes=30)
-NEWS_MAX_PER_SCAN = 1
+NEWS_DAILY_LIMIT = 30
+NEWS_MIN_INTERVAL = timedelta(minutes=12)
+NEWS_URGENT_MIN_INTERVAL = timedelta(minutes=5)
+NEWS_MAX_PER_SCAN = 2
 NEWS_URGENT_SCORE = 9
 NEWS_NORMAL_SCORE = 8
 NEWS_TITLE_SIMILARITY_BLOCK_HOURS = 24
@@ -1447,7 +1447,7 @@ def append_if_value(lines: list[str], name: str, snap: Optional[Tuple[float, flo
 
 
 def session_data_note(lines: list[str], required_min: int = 2) -> str:
-    return "" if len(lines) >= required_min else "\n데이터 일부 지연 중. 핵심 가격 반응 우선 확인."
+    return ""
 
 
 async def market_session_scheduler(bot: Bot, state: State) -> None:
@@ -1640,6 +1640,412 @@ async def kimchi_monitor(bot: Bot, state: State) -> None:
             elapsed = (utc_now() - started).total_seconds()
             await asyncio.sleep(max(5, KIMCHI_CHECK_SECONDS - int(elapsed)))
 
+
+# ============================================================
+# LIVE MARKET ROOM UPGRADE
+# ============================================================
+
+LIVE_NEWS_CHECK_SECONDS = 5 * 60
+LIVE_NEWS_DAILY_LIMIT = 60
+LIVE_NEWS_DAY_INTERVAL = timedelta(minutes=10)
+LIVE_NEWS_NIGHT_INTERVAL = timedelta(minutes=35)
+LIVE_NEWS_MAX_PER_SCAN_DAY = 2
+LIVE_NEWS_MAX_PER_SCAN_NIGHT = 1
+
+LIVE_NEWS_FEEDS = (
+    (
+        "🇺🇸",
+        "미국",
+        "https://news.google.com/rss/search?q=(Nasdaq%20OR%20S%26P%20500%20OR%20Nvidia%20OR%20Tesla%20OR%20Apple%20OR%20Microsoft%20OR%20Amazon%20OR%20Meta%20OR%20Google%20OR%20earnings%20OR%20Fed%20OR%20CPI%20OR%20rate%20cut)%20when:1d&hl=ko&gl=KR&ceid=KR:ko",
+    ),
+    (
+        "🌍",
+        "세계",
+        "https://news.google.com/rss/search?q=(oil%20OR%20dollar%20OR%20war%20OR%20Iran%20OR%20Israel%20OR%20Hormuz%20OR%20China%20OR%20supply%20chain%20OR%20missile%20OR%20tanker)%20when:1d&hl=ko&gl=KR&ceid=KR:ko",
+    ),
+    (
+        "🇰🇷",
+        "한국",
+        "https://news.google.com/rss/search?q=(%EC%82%BC%EC%84%B1%EC%A0%84%EC%9E%90%20OR%20SK%ED%95%98%EC%9D%B4%EB%8B%89%EC%8A%A4%20OR%20%EC%BD%94%EC%8A%A4%ED%94%BC%20OR%20%ED%99%98%EC%9C%A8%20OR%20%EC%99%B8%EA%B5%AD%EC%9D%B8%20%EC%88%9C%EB%A7%A4%EC%88%98%20OR%20%EB%B0%98%EB%8F%84%EC%B2%B4)%20when:1d&hl=ko&gl=KR&ceid=KR:ko",
+    ),
+    (
+        "🟠",
+        "코인",
+        "https://news.google.com/rss/search?q=(Bitcoin%20OR%20BTC%20OR%20Ethereum%20OR%20ETF%20OR%20crypto%20liquidation%20OR%20Coinbase%20OR%20Binance%20OR%20Solana)%20when:1d&hl=ko&gl=KR&ceid=KR:ko",
+    ),
+)
+
+LIVE_IMPORTANT_KEYWORDS = (
+    "nasdaq", "s&p", "dow", "nvidia", "tesla", "apple", "microsoft", "amazon", "meta", "google",
+    "earnings", "guidance", "pre-market", "after hours", "fed", "cpi", "ppi", "rate cut", "interest rate",
+    "나스닥", "다우", "엔비디아", "테슬라", "애플", "마이크로소프트", "아마존", "메타", "알파벳",
+    "실적", "가이던스", "프리장", "시간외", "연준", "금리", "물가",
+    "oil", "dollar", "iran", "israel", "hormuz", "war", "missile", "strike", "china", "tanker",
+    "유가", "달러", "이란", "이스라엘", "호르무즈", "전쟁", "미사일", "공격", "중국", "유조선",
+    "samsung", "sk hynix", "kospi", "krw", "semiconductor", "tsmc", "micron",
+    "삼성전자", "하이닉스", "코스피", "환율", "외국인", "반도체", "마이크론",
+    "bitcoin", "btc", "ethereum", "eth", "solana", "sol", "etf", "liquidation", "crypto",
+    "비트코인", "이더리움", "솔라나", "청산", "코인",
+)
+
+LIVE_BLOCK_KEYWORDS = (
+    "opinion", "sponsored", "press release", "podcast", "newsletter", "how to", "guide",
+    "price prediction", "rumor", "recap", "magazine",
+    "광고", "기고", "오피니언", "칼럼", "인터뷰", "루머",
+)
+
+LIVE_NIGHT_FORCE_KEYWORDS = (
+    "breaking", "urgent", "missile", "strike", "war", "hormuz", "iran", "israel", "oil",
+    "cpi", "fomc", "fed", "crash", "surge", "plunge", "liquidation",
+    "속보", "긴급", "미사일", "공격", "전쟁", "호르무즈", "이란", "이스라엘", "유가",
+    "급등", "급락", "청산", "연준", "금리", "물가",
+)
+
+
+def is_night_kst(now: datetime) -> bool:
+    return 1 <= now.hour < 7
+
+
+def normalize_live_text(value: str) -> str:
+    value = clean_text(value or "", limit=260)
+    value = re.sub(r"\s+-\s+[^-]{2,40}$", "", value).strip()
+    return value
+
+
+def live_source_from_entry(entry, link: str) -> str:
+    try:
+        src = entry.get("source", {})
+        if isinstance(src, dict) and src.get("title"):
+            return clean_text(src.get("title"), 30)
+    except Exception:
+        pass
+
+    title = entry.get("title") or ""
+    if " - " in title:
+        tail = title.rsplit(" - ", 1)[-1].strip()
+        if 2 <= len(tail) <= 35:
+            return tail
+
+    return source_name_from_link(link)
+
+
+def entry_image_url(entry) -> Optional[str]:
+    try:
+        media = entry.get("media_content") or []
+        if media and isinstance(media, list):
+            url = media[0].get("url")
+            if url:
+                return url
+    except Exception:
+        pass
+
+    try:
+        thumbs = entry.get("media_thumbnail") or []
+        if thumbs and isinstance(thumbs, list):
+            url = thumbs[0].get("url")
+            if url:
+                return url
+    except Exception:
+        pass
+
+    try:
+        for link in entry.get("links", []) or []:
+            href = link.get("href")
+            typ = (link.get("type") or "").lower()
+            if href and typ.startswith("image/"):
+                return href
+    except Exception:
+        pass
+
+    summary = entry.get("summary") or ""
+    m = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', summary)
+    return m.group(1) if m else None
+
+
+def live_news_score(title: str, summary: str, category: str) -> int:
+    text = f"{title}\n{summary}".lower()
+    if any(k in text for k in LIVE_BLOCK_KEYWORDS):
+        return -10
+
+    score = 0
+    score += sum(2 for k in LIVE_IMPORTANT_KEYWORDS if k in text)
+    score += sum(4 for k in LIVE_NIGHT_FORCE_KEYWORDS if k in text)
+
+    if category == "미국" and any(k in text for k in ("nvidia", "tesla", "earnings", "nasdaq", "fed", "엔비디아", "테슬라", "실적", "나스닥", "연준")):
+        score += 5
+    if category == "세계" and any(k in text for k in ("oil", "iran", "hormuz", "war", "유가", "이란", "호르무즈", "전쟁")):
+        score += 5
+    if category == "한국" and any(k in text for k in ("삼성전자", "하이닉스", "코스피", "환율", "반도체")):
+        score += 5
+    if category == "코인" and any(k in text for k in ("bitcoin", "btc", "etf", "liquidation", "비트코인", "청산")):
+        score += 5
+
+    return score
+
+
+def is_live_news_allowed(title: str, summary: str, category: str, now: datetime) -> bool:
+    score = live_news_score(title, summary, category)
+    if score < 6:
+        return False
+
+    if is_night_kst(now):
+        text = f"{title}\n{summary}".lower()
+        return score >= 12 and any(k in text for k in LIVE_NIGHT_FORCE_KEYWORDS)
+
+    return True
+
+
+def live_digest_bucket(state: State):
+    if not hasattr(state, "live_digest_items"):
+        state.live_digest_items = deque(maxlen=80)
+    return state.live_digest_items
+
+
+def mark_live_digest(state: State, category: str, title: str) -> None:
+    bucket = live_digest_bucket(state)
+    bucket.append((now_kst(), category, clean_text(title, 90)))
+
+
+async def safe_send_photo(bot: Bot, photo_url: str, caption: str) -> None:
+    try:
+        await bot.send_photo(chat_id=CHANNEL_ID, photo=photo_url, caption=caption[:1000])
+    except Exception:
+        logging.exception("Telegram 사진 전송 실패. 텍스트로 대체")
+        await safe_send(bot, caption, disable_preview=True)
+
+
+async def build_live_news_message(session: aiohttp.ClientSession, category_emoji: str, category: str, title: str, summary: str, source: str) -> str:
+    title_ko = await translate_to_korean(session, normalize_live_text(title))
+    summary_clean = normalize_live_text(summary)
+    summary_ko = await translate_to_korean(session, summary_clean) if summary_clean else ""
+    summary_ko = clean_text(summary_ko, 120)
+
+    if summary_ko and summary_ko != title_ko:
+        return f"{category_emoji} {title_ko}\n\n{summary_ko}\n\n출처: {source}"
+    return f"{category_emoji} {title_ko}\n\n출처: {source}"
+
+
+async def live_news_monitor(bot: Bot, state: State) -> None:
+    async with aiohttp.ClientSession() as session:
+        while True:
+            started = utc_now()
+            sent_this_scan = 0
+            try:
+                kst = now_kst()
+
+                if not hasattr(state, "live_news_daily_date") or state.live_news_daily_date != kst.date():
+                    state.live_news_daily_date = kst.date()
+                    state.live_news_daily_count = 0
+                    state.live_last_sent_at = None
+
+                max_scan = LIVE_NEWS_MAX_PER_SCAN_NIGHT if is_night_kst(kst) else LIVE_NEWS_MAX_PER_SCAN_DAY
+                min_interval = LIVE_NEWS_NIGHT_INTERVAL if is_night_kst(kst) else LIVE_NEWS_DAY_INTERVAL
+
+                if state.live_news_daily_count < LIVE_NEWS_DAILY_LIMIT:
+                    candidates = []
+
+                    for category_emoji, category, feed in LIVE_NEWS_FEEDS:
+                        entries = await fetch_feed_entries(session, feed)
+                        for e in entries[:15]:
+                            title = (e.get("title") or "").strip()
+                            link = (e.get("link") or "").strip()
+                            summary = (e.get("summary") or "").strip()
+                            published = (e.get("published") or "").strip()
+                            if not title or not link:
+                                continue
+
+                            nid = "live:" + news_id(title, link, published)
+                            if state.has_news(nid) or is_duplicate_or_similar_news(state, title, link, utc_now()):
+                                continue
+
+                            if not is_live_news_allowed(title, summary, category, kst):
+                                continue
+
+                            score = live_news_score(title, summary, category)
+                            candidates.append((score, category_emoji, category, title, summary, link, published, nid, e))
+
+                    candidates.sort(key=lambda x: x[0], reverse=True)
+
+                    for score, category_emoji, category, title, summary, link, published, nid, entry in candidates:
+                        if sent_this_scan >= max_scan or state.live_news_daily_count >= LIVE_NEWS_DAILY_LIMIT:
+                            break
+
+                        now = utc_now()
+                        last_at = getattr(state, "live_last_sent_at", None)
+                        if last_at and (now - last_at) < min_interval:
+                            break
+
+                        source = live_source_from_entry(entry, link)
+                        msg = await build_live_news_message(session, category_emoji, category, title, summary, source)
+                        image = entry_image_url(entry)
+
+                        if image:
+                            await safe_send_photo(bot, image, msg)
+                        else:
+                            await safe_send(bot, msg, disable_preview=True)
+
+                        mark_news_sent_strict(state, title, link, published, now)
+                        state.mark_news(nid)
+                        mark_live_digest(state, category, normalize_live_text(title))
+
+                        state.live_last_sent_at = now
+                        state.live_news_daily_count += 1
+                        sent_this_scan += 1
+                        logging.info("라이브 뉴스 전송 category=%s score=%s title=%s", category, score, clean_text(title, 80))
+
+            except Exception:
+                logging.exception("live_news_monitor 오류")
+
+            elapsed = (utc_now() - started).total_seconds()
+            await asyncio.sleep(max(10, LIVE_NEWS_CHECK_SECONDS - int(elapsed)))
+
+
+def digest_item_score(item) -> int:
+    _ts, category, title = item
+    score = 0
+    if category == "미국":
+        score += 4
+    if category == "세계":
+        score += 3
+    if category == "한국":
+        score += 3
+    if category == "코인":
+        score += 2
+    text = title.lower()
+    score += sum(2 for k in LIVE_NIGHT_FORCE_KEYWORDS if k in text)
+    return score
+
+
+async def build_market_snapshot_lines(session: aiohttp.ClientSession) -> list[str]:
+    lines = []
+
+    btc = await get_market_ticker(session, "BTCUSDT")
+    eth = await get_market_ticker(session, "ETHUSDT")
+    sol = await get_market_ticker(session, "SOLUSDT")
+
+    if btc:
+        lines.append(f"BTC {float(btc['lastPrice']):,.0f} USDT ({fmt_pct(float(btc['priceChangePercent']))})")
+    if eth:
+        lines.append(f"ETH {float(eth['lastPrice']):,.0f} USDT ({fmt_pct(float(eth['priceChangePercent']))})")
+    if sol:
+        lines.append(f"SOL {float(sol['lastPrice']):,.0f} USDT ({fmt_pct(float(sol['priceChangePercent']))})")
+
+    nq = await get_yahoo_snapshot(session, "NQ%3DF")
+    sp = await get_yahoo_snapshot(session, "ES%3DF")
+    oil = await get_yahoo_snapshot(session, "CL%3DF")
+    dxy = await get_yahoo_snapshot(session, "DX-Y.NYB")
+
+    if nq:
+        lines.append(f"나스닥 선물 {fmt_pct(nq[1])}")
+    if sp:
+        lines.append(f"S&P500 선물 {fmt_pct(sp[1])}")
+    if oil:
+        lines.append(f"유가 {fmt_pct(oil[1])}")
+    if dxy:
+        lines.append(f"달러 {fmt_pct(dxy[1])}")
+
+    return lines
+
+
+async def daily_digest_scheduler(bot: Bot, state: State) -> None:
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                now = now_kst()
+
+                if not hasattr(state, "digest_sent_dates"):
+                    state.digest_sent_dates = {}
+
+                if now.hour == 7 and now.minute == 30 and state.digest_sent_dates.get("morning") != now.date():
+                    since = now - timedelta(hours=12)
+                    items = [x for x in live_digest_bucket(state) if x[0] >= since]
+                    items = sorted(items, key=digest_item_score, reverse=True)[:7]
+
+                    lines = [f"{now.month}/{now.day}, 밤 사이 있었던 일", ""]
+                    if items:
+                        for i, (_ts, category, title) in enumerate(items, 1):
+                            lines.append(f"{i}. {title}")
+                    else:
+                        snap = await build_market_snapshot_lines(session)
+                        for i, row in enumerate(snap[:7], 1):
+                            lines.append(f"{i}. {row}")
+
+                    await safe_send(bot, "\n".join(lines), disable_preview=True)
+                    state.digest_sent_dates["morning"] = now.date()
+
+                if now.hour == 19 and now.minute == 30 and state.digest_sent_dates.get("evening") != now.date():
+                    since = now.replace(hour=7, minute=0, second=0, microsecond=0)
+                    items = [x for x in live_digest_bucket(state) if x[0] >= since]
+                    items = sorted(items, key=digest_item_score, reverse=True)[:7]
+
+                    lines = [f"{now.month}/{now.day}, 오늘 있었던 일", ""]
+                    if items:
+                        for i, (_ts, category, title) in enumerate(items, 1):
+                            lines.append(f"{i}. {title}")
+                    else:
+                        snap = await build_market_snapshot_lines(session)
+                        for i, row in enumerate(snap[:7], 1):
+                            lines.append(f"{i}. {row}")
+
+                    await safe_send(bot, "\n".join(lines), disable_preview=True)
+                    state.digest_sent_dates["evening"] = now.date()
+
+            except Exception:
+                logging.exception("daily_digest_scheduler 오류")
+
+            await asyncio.sleep(20)
+
+
+async def macro_pulse_monitor(bot: Bot, state: State) -> None:
+    watch = (
+        ("나스닥 선물", "NQ%3DF", 0.8, "🇺🇸"),
+        ("S&P500 선물", "ES%3DF", 0.7, "🇺🇸"),
+        ("유가", "CL%3DF", 1.2, "🌍"),
+        ("달러", "DX-Y.NYB", 0.45, "🌍"),
+        ("엔비디아", "NVDA", 3.0, "🇺🇸"),
+        ("테슬라", "TSLA", 3.5, "🇺🇸"),
+        ("애플", "AAPL", 2.5, "🇺🇸"),
+        ("마이크로소프트", "MSFT", 2.5, "🇺🇸"),
+        ("삼성전자", "005930.KS", 3.0, "🇰🇷"),
+        ("SK하이닉스", "000660.KS", 3.0, "🇰🇷"),
+        ("코스피", "%5EKS11", 1.0, "🇰🇷"),
+    )
+
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                now = utc_now()
+                kst = now_kst()
+
+                for name, ticker, threshold, emoji in watch:
+                    snap = await get_yahoo_snapshot(session, ticker)
+                    if not snap:
+                        continue
+
+                    _price, pct = snap
+                    if abs(pct) < threshold:
+                        continue
+
+                    if is_night_kst(kst) and abs(pct) < threshold * 1.5 and name not in ("유가", "달러", "나스닥 선물", "S&P500 선물"):
+                        continue
+
+                    direction = "강세" if pct > 0 else "약세"
+                    key = f"macro:{ticker}:{direction}:{kst.date()}"
+                    if state.is_on_cooldown(key, now):
+                        continue
+
+                    comment = "돈 들어오는 분위기" if pct > 0 else "위험자산 분위기 체크 필요"
+                    msg = f"{emoji} {name} {direction}\n\n{fmt_pct(pct)} 움직임\n\n{comment}"
+                    await safe_send(bot, msg, disable_preview=True)
+                    state.touch_cooldown(key, now)
+                    mark_live_digest(state, "미국" if emoji == "🇺🇸" else "세계" if emoji == "🌍" else "한국", f"{name} {direction} {fmt_pct(pct)}")
+
+            except Exception:
+                logging.exception("macro_pulse_monitor 오류")
+
+            await asyncio.sleep(15 * 60)
+
+
 # ============================================================
 # RUNTIME
 # ============================================================
@@ -1795,6 +2201,9 @@ async def run_forever() -> None:
         asyncio.create_task(futures_flow_monitor(bot, state)),
         asyncio.create_task(alpha_flow_monitor(bot, state)),
         asyncio.create_task(liquidation_monitor(bot, state)),
+        asyncio.create_task(live_news_monitor(bot, state)),
+        asyncio.create_task(daily_digest_scheduler(bot, state)),
+        asyncio.create_task(macro_pulse_monitor(bot, state)),
         asyncio.create_task(market_session_scheduler(bot, state)),
     ]
 
