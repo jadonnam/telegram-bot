@@ -2324,12 +2324,20 @@ def live_news_header(score: int) -> str:
 
 
 
+
 async def build_live_news_message(session: aiohttp.ClientSession, category_emoji: str, category: str, title: str, summary: str, source: str) -> str:
     title_clean = strip_news_source_tail(title or "")
     title_ko = await ensure_korean_text(session, title_clean)
 
-    body = clean_news_body_for_message(title_clean, summary, source)
-    impact = impact_one_liner(category, title_clean, summary)
+    try:
+        body = clean_news_body_for_message(title_clean, summary, source)
+    except Exception:
+        body = ""
+
+    try:
+        impact = impact_one_liner(category, title_clean, summary)
+    except Exception:
+        impact = build_market_impact_line(category, title_clean, summary)
 
     if body and not mostly_english(body):
         body_ko = await ensure_korean_text(session, body)
@@ -2338,40 +2346,30 @@ async def build_live_news_message(session: aiohttp.ClientSession, category_emoji
     else:
         body_ko = impact
 
-    score = live_news_score(title_clean, summary, category)
-    header = live_news_header(score)
+    try:
+        score = live_news_score(title_clean, summary, category)
+        header = live_news_header(score)
+    except Exception:
+        header = "⚡ [실시간 시장 이슈]"
 
     btc_line_text = ""
-
-try:
-    btc = await get_market_ticker(session, "BTCUSDT")
-
-    if btc:
-        btc_price = float(btc["lastPrice"])
-        btc_pct = float(btc["priceChangePercent"])
-
-        btc_line_text = (
-            "
-
-📊 현재 BTC:
-"
-            f"{btc_price:,.0f} USDT ({fmt_pct(btc_pct)})"
-        )
-
-except Exception:
-    btc_line_text = ""
+    try:
+        btc = await get_market_ticker(session, "BTCUSDT")
+        if btc:
+            btc_price = float(btc["lastPrice"])
+            btc_pct = float(btc["priceChangePercent"])
+            btc_line_text = (
+                "\\n\\n📊 현재 BTC:\\n"
+                f"{btc_price:,.0f} USDT ({fmt_pct(btc_pct)})"
+            )
+    except Exception:
+        btc_line_text = ""
 
     return (
         compact_section(header)
-        + f"
-{category_emoji} {title_ko}
-
-"
-        + f"{body_ko}
-
-"
-        + f"📌 시장 영향:
-{impact}"
+        + f"\\n{category_emoji} {title_ko}\\n\\n"
+        + f"{body_ko}\\n\\n"
+        + f"📌 시장 영향:\\n{impact}"
         + btc_line_text
     )
 
