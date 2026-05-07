@@ -1800,6 +1800,104 @@ def session_data_note(lines: list[str], required_min: int = 2) -> str:
 
 
 
+
+# ============================================================
+# FINAL SESSION BRIEFING HELPERS
+# ============================================================
+
+def session_section(title: str) -> str:
+    return "━━━━━━━━━━━━━━\n" + title + "\n━━━━━━━━━━━━━━"
+
+
+def safe_pct_from_snapshot(snap) -> float:
+    try:
+        return float(snap[1]) if snap else 0.0
+    except Exception:
+        return 0.0
+
+
+def session_snapshot_line(name: str, snap, digits: int = 2) -> str:
+    if not snap:
+        return ""
+    price, pct = snap
+    return f"{move_icon(float(pct))} {name}: {float(price):,.{digits}f} ({fmt_pct(float(pct))})"
+
+
+def session_btc_line(price: float, pct: float) -> str:
+    return f"{move_icon(pct)} BTC: {price:,.0f} USDT ({fmt_pct(pct)})"
+
+
+def session_mood(*pcts: float) -> str:
+    vals = []
+    for v in pcts:
+        try:
+            vals.append(float(v))
+        except Exception:
+            pass
+    if not vals:
+        return "🟡 눈치보기 장세"
+    avg = sum(vals) / len(vals)
+    if avg >= 0.55:
+        return "🟢 위험선호"
+    if avg <= -0.55:
+        return "🔴 리스크오프"
+    if max(vals) - min(vals) >= 1.2:
+        return "🟡 지수별 온도차"
+    return "🟡 눈치보기 장세"
+
+
+def final_kr_open_focus(nq_pct: float, sox_pct: float, usd_krw: float, wti_pct: float) -> str:
+    if sox_pct >= 0.8 or nq_pct >= 0.4:
+        return "미국 기술주·반도체 수급이 살아있는 구간.\n오늘 한국장은 외국인 수급과 반도체 대형주 흐름이 핵심."
+    if nq_pct <= -0.4 or sox_pct <= -0.8:
+        return "미국 기술주 쪽 부담이 남아있음.\n장 초반 추격보다 반도체 방어력 확인이 먼저."
+    if usd_krw >= 1450:
+        return "환율이 높은 구간이라 외국인 수급이 오늘 방향을 정할 가능성 큼."
+    if wti_pct >= 1.0:
+        return "유가가 다시 오르는 구간.\n정유·해운보다 물가·환율 부담을 같이 봐야함."
+    return "큰 방향보다 수급 확인이 먼저.\n장 초반 30분은 무리하지 않는 구간."
+
+
+def final_us_pre_focus(sp_pct: float, nq_pct: float, dxy_pct: float, tnx_pct: float, wti_pct: float) -> str:
+    if nq_pct >= 0.4:
+        return "나스닥 선물이 강함.\n오늘은 기술주 수급이 지수 전체를 끌고 갈 수 있는지 확인."
+    if nq_pct <= -0.4:
+        return "나스닥 선물이 약함.\n장 초반 기술주 매도 압력부터 확인 필요."
+    if dxy_pct > 0.25 or tnx_pct > 0.25:
+        return "달러·금리 부담이 있어서 초반 변동성 커질 수 있음."
+    if wti_pct >= 1.0:
+        return "유가가 강하게 움직이는 구간.\n인플레·금리 기대가 같이 흔들릴 수 있음."
+    return "큰 방향은 아직 안 나왔지만,\n첫 30분 수급 붙는 쪽이 오늘 흐름을 만들 가능성 큼."
+
+
+def final_us_close_focus(sp_pct: float, nq_pct: float, dji_pct: float, sox_pct: float, dxy_pct: float, tnx_pct: float, wti_pct: float) -> str:
+    if sox_pct >= 1.0 and nq_pct >= 0.4:
+        return "반도체와 나스닥이 같이 강했던 장.\n한국장은 반도체·AI 인프라 수급이 이어지는지 먼저 봐야함."
+    if nq_pct >= 0.6:
+        return "나스닥 중심 위험선호가 살아난 장.\n성장주 수급이 한국장까지 이어질지 체크."
+    if nq_pct <= -0.6 or sox_pct <= -1.0:
+        return "기술주·반도체 부담이 남은 장.\n한국장은 장 초반 방어력 확인이 우선."
+    if dxy_pct >= 0.3 or tnx_pct >= 0.3:
+        return "달러·금리 압력이 남아있음.\n위험자산 반등보다 수급 확인이 먼저."
+    if wti_pct >= 1.0:
+        return "유가 상승이 다시 부담으로 들어온 장.\n인플레·금리·환율 반응을 같이 봐야함."
+    return "지수는 혼조지만 방향을 정할 재료는 남아있음.\n한국장은 환율·반도체·외국인 수급이 핵심."
+
+
+def final_market_recap_focus(btc_pct: float, eth_pct: float, sol_pct: float, nq_pct: float, sox_pct: float, wti_pct: float, dxy_pct: float) -> str:
+    if btc_pct <= -2.0:
+        return "BTC가 크게 눌린 구간. 1차 지지선 회복 여부와 알트 수급이 핵심."
+    if btc_pct >= 2.0:
+        return "BTC에 매수세가 붙은 구간. 거래량 유지되면 위험자산 분위기도 살아날 수 있음."
+    if nq_pct >= 0.5 or sox_pct >= 1.0:
+        return "미국 기술주·반도체 쪽 수급이 살아있는 흐름. 한국장은 반도체 반응 체크."
+    if wti_pct >= 1.0:
+        return "유가가 움직인 구간. 물가·달러·위험자산 반응을 같이 봐야함."
+    if dxy_pct >= 0.3:
+        return "달러가 강한 구간. 위험자산은 추격보다 수급 확인이 먼저."
+    return "큰 방향보다 수급 확인 구간. 지수보다 강한 섹터만 살아남는 흐름."
+
+
 async def market_session_scheduler(bot: Bot, state: State) -> None:
     def is_exact_time(now: datetime, hour: int, minute: int) -> bool:
         return now.hour == hour and now.minute == minute
@@ -1810,7 +1908,13 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
             return "⚪ BTC: 가격 확인 중", 0.0
         price = float(btc["lastPrice"])
         pct = float(btc["priceChangePercent"])
-        return btc_brief_line(price, pct), pct
+        return session_btc_line(price, pct), pct
+
+    async def coin_snapshot(session: aiohttp.ClientSession, symbol: str):
+        t = await get_market_ticker(session, symbol)
+        if not t:
+            return None
+        return float(t["lastPrice"]), float(t["priceChangePercent"])
 
     async with aiohttp.ClientSession() as session:
         while True:
@@ -1827,27 +1931,37 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         kosdaq = await get_yahoo_snapshot(session, "%5EKQ11")
                         usd_krw = await get_usd_krw(session)
                         nq_fut = await get_yahoo_snapshot(session, "NQ%3DF")
+                        sp_fut = await get_yahoo_snapshot(session, "ES%3DF")
                         wti = await get_yahoo_snapshot(session, "CL%3DF")
                         sox = await get_yahoo_snapshot(session, "%5ESOX")
+                        dxy = await get_yahoo_snapshot(session, "DX-Y.NYB")
+                        tnx = await get_yahoo_snapshot(session, "%5ETNX")
                         btc_text, _ = await btc_line(session)
-                        eth = await get_market_ticker(session, "ETHUSDT")
-                        sol = await get_market_ticker(session, "SOLUSDT")
+                        eth = await coin_snapshot(session, "ETHUSDT")
+                        sol = await coin_snapshot(session, "SOLUSDT")
 
-                        msg = compact_section("🌅 한국장 오픈 브리핑")
+                        msg = session_section("🌅 한국장 오픈 브리핑")
                         if usd_krw:
                             msg += f"\n💵 달러/원: {usd_krw:,.2f}원"
                         msg += f"\n{btc_text}"
                         if eth:
-                            msg += f"\n{move_icon(float(eth['priceChangePercent']))} ETH: {float(eth['lastPrice']):,.0f} USDT ({fmt_pct(float(eth['priceChangePercent']))})"
+                            msg += f"\n{move_icon(eth[1])} ETH: {eth[0]:,.0f} USDT ({fmt_pct(eth[1])})"
                         if sol:
-                            msg += f"\n{move_icon(float(sol['priceChangePercent']))} SOL: {float(sol['lastPrice']):,.0f} USDT ({fmt_pct(float(sol['priceChangePercent']))})"
+                            msg += f"\n{move_icon(sol[1])} SOL: {sol[0]:,.0f} USDT ({fmt_pct(sol[1])})"
 
+                        msg += "\n"
+                        if sp_fut:
+                            msg += f"\n{session_snapshot_line('S&P500 선물', sp_fut)}"
                         if nq_fut:
-                            msg += f"\n\n{snapshot_line('나스닥 선물', nq_fut)}"
-                        if wti:
-                            msg += f"\n{snapshot_line('WTI 유가', wti)}"
+                            msg += f"\n{session_snapshot_line('나스닥 선물', nq_fut)}"
                         if sox:
-                            msg += f"\n{snapshot_line('필라델피아 반도체지수', sox)}"
+                            msg += f"\n{session_snapshot_line('필라델피아 반도체지수', sox)}"
+                        if wti:
+                            msg += f"\n{session_snapshot_line('WTI 유가', wti)}"
+                        if dxy:
+                            msg += f"\n{session_snapshot_line('달러인덱스', dxy)}"
+                        if tnx:
+                            msg += f"\n{session_snapshot_line('미10년물 금리', tnx)}"
 
                         fng = await get_fear_greed(session)
                         kimchi = await get_kimchi_premium(session)
@@ -1858,10 +1972,9 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                             premium, _, _ = kimchi
                             msg += f"\n🇰🇷 김치프리미엄: {fmt_pct(premium)}"
 
-                        msg += f"\n\n📌 오늘 핵심:\n{kr_open_focus(snap_pct(nq_fut), snap_pct(sox), usd_krw or 0)}"
-                        msg += f"\n\n🧭 시장 분위기: {market_mood_label(snap_pct(nq_fut), snap_pct(sox), snap_pct(kospi), snap_pct(kosdaq))}"
+                        msg += f"\n\n📌 오늘 핵심:\n{final_kr_open_focus(safe_pct_from_snapshot(nq_fut), safe_pct_from_snapshot(sox), usd_krw or 0, safe_pct_from_snapshot(wti))}"
+                        msg += f"\n\n🧭 시장 분위기: {session_mood(safe_pct_from_snapshot(sp_fut), safe_pct_from_snapshot(nq_fut), safe_pct_from_snapshot(sox), -safe_pct_from_snapshot(dxy), -safe_pct_from_snapshot(tnx))}"
                         msg += "\n⚠️ 장 초반 추격매수보다 거래량 확인이 우선."
-
                         await safe_send(bot, msg, disable_preview=True)
                         state.market_session_sent_dates[key] = now.date()
 
@@ -1870,29 +1983,36 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                     if state.market_session_sent_dates.get(key) != now.date():
                         sp_fut = await get_yahoo_snapshot(session, "ES%3DF")
                         nq_fut = await get_yahoo_snapshot(session, "NQ%3DF")
+                        sox = await get_yahoo_snapshot(session, "%5ESOX")
                         dxy = await get_yahoo_snapshot(session, "DX-Y.NYB")
                         tnx = await get_yahoo_snapshot(session, "%5ETNX")
                         wti = await get_yahoo_snapshot(session, "CL%3DF")
                         btc_text, _ = await btc_line(session)
+                        eth = await coin_snapshot(session, "ETHUSDT")
+                        sol = await coin_snapshot(session, "SOLUSDT")
 
-                        msg = compact_section("🌆 미국장 프리뷰")
+                        msg = session_section("🌆 미국장 프리뷰")
                         if sp_fut:
-                            msg += f"\n{snapshot_line('S&P500 선물', sp_fut)}"
+                            msg += f"\n{session_snapshot_line('S&P500 선물', sp_fut)}"
                         if nq_fut:
-                            msg += f"\n{snapshot_line('나스닥 선물', nq_fut)}"
+                            msg += f"\n{session_snapshot_line('나스닥 선물', nq_fut)}"
+                        if sox:
+                            msg += f"\n{session_snapshot_line('필라델피아 반도체지수', sox)}"
                         if wti:
-                            msg += f"\n{snapshot_line('WTI 유가', wti)}"
+                            msg += f"\n{session_snapshot_line('WTI 유가', wti)}"
                         if dxy:
-                            msg += f"\n{snapshot_line('달러인덱스', dxy)}"
+                            msg += f"\n{session_snapshot_line('달러인덱스', dxy)}"
                         if tnx:
-                            msg += f"\n{snapshot_line('10년물 금리', tnx)}"
+                            msg += f"\n{session_snapshot_line('미10년물 금리', tnx)}"
                         msg += f"\n{btc_text}"
+                        if eth:
+                            msg += f"\n{move_icon(eth[1])} ETH: {eth[0]:,.0f} USDT ({fmt_pct(eth[1])})"
+                        if sol:
+                            msg += f"\n{move_icon(sol[1])} SOL: {sol[0]:,.0f} USDT ({fmt_pct(sol[1])})"
 
-                        msg += f"\n\n📌 오늘 핵심:\n{us_pre_focus(snap_pct(nq_fut), snap_pct(dxy), snap_pct(tnx))}"
-                        msg += f"\n\n🧭 미국장 분위기: {market_mood_label(snap_pct(sp_fut), snap_pct(nq_fut), -snap_pct(dxy), -snap_pct(tnx))}"
-                        msg += "\n\n체크할 것:\n- 엔비디아·빅테크 초반 수급\n- 나스닥 선물 방향 유지 여부\n- 달러·금리 동반 상승 여부\n- BTC 1차 반응"
-                        msg += "\n\n⚠️ 첫 30분은 방향 확인 구간."
-
+                        msg += f"\n\n📌 오늘 핵심:\n{final_us_pre_focus(safe_pct_from_snapshot(sp_fut), safe_pct_from_snapshot(nq_fut), safe_pct_from_snapshot(dxy), safe_pct_from_snapshot(tnx), safe_pct_from_snapshot(wti))}"
+                        msg += f"\n\n🧭 미국장 분위기: {session_mood(safe_pct_from_snapshot(sp_fut), safe_pct_from_snapshot(nq_fut), safe_pct_from_snapshot(sox), -safe_pct_from_snapshot(dxy), -safe_pct_from_snapshot(tnx))}"
+                        msg += "\n\n체크할 것:\n- S&P500·나스닥 초반 방향\n- 반도체지수 수급\n- 달러·금리 동반 상승 여부\n- BTC 80K/79K 반응"
                         await safe_send(bot, msg, disable_preview=True)
                         state.market_session_sent_dates[key] = now.date()
 
@@ -1903,34 +2023,44 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         ixic = await get_yahoo_snapshot(session, "%5EIXIC")
                         dji = await get_yahoo_snapshot(session, "%5EDJI")
                         sox = await get_yahoo_snapshot(session, "%5ESOX")
-                        nvda = await get_yahoo_snapshot(session, "NVDA")
                         wti = await get_yahoo_snapshot(session, "CL%3DF")
                         dxy = await get_yahoo_snapshot(session, "DX-Y.NYB")
+                        tnx = await get_yahoo_snapshot(session, "%5ETNX")
                         btc_text, _ = await btc_line(session)
+                        eth = await coin_snapshot(session, "ETHUSDT")
+                        sol = await coin_snapshot(session, "SOLUSDT")
 
-                        msg = compact_section("🌙 미국장 마감 정리")
+                        msg = session_section("🌙 미국장 마감 정리")
                         msg += f"\n{btc_text}"
+                        if eth:
+                            msg += f"\n{move_icon(eth[1])} ETH: {eth[0]:,.0f} USDT ({fmt_pct(eth[1])})"
+                        if sol:
+                            msg += f"\n{move_icon(sol[1])} SOL: {sol[0]:,.0f} USDT ({fmt_pct(sol[1])})"
+
+                        msg += "\n"
+                        if spx:
+                            msg += f"\n{session_snapshot_line('S&P500', spx)}"
                         if ixic:
-                            msg += f"\n{snapshot_line('나스닥', ixic)}"
-                        if nvda:
-                            msg += f"\n{snapshot_line('엔비디아', nvda)}"
+                            msg += f"\n{session_snapshot_line('나스닥', ixic)}"
+                        if dji:
+                            msg += f"\n{session_snapshot_line('다우', dji)}"
                         if sox:
-                            msg += f"\n{snapshot_line('필라델피아 반도체', sox)}"
+                            msg += f"\n{session_snapshot_line('필라델피아 반도체', sox)}"
                         if wti:
-                            msg += f"\n\n{snapshot_line('WTI 유가', wti)}"
+                            msg += f"\n{session_snapshot_line('WTI 유가', wti)}"
                         if dxy:
-                            msg += f"\n{snapshot_line('달러인덱스', dxy)}"
+                            msg += f"\n{session_snapshot_line('달러인덱스', dxy)}"
+                        if tnx:
+                            msg += f"\n{session_snapshot_line('미10년물 금리', tnx)}"
 
-                        msg += f"\n\n📌 오늘 핵심:\n{us_close_focus(snap_pct(ixic), snap_pct(sox), snap_pct(nvda))}"
-                        msg += f"\n\n🧭 미국장 분위기: {market_mood_label(snap_pct(spx), snap_pct(ixic), snap_pct(dji))}"
-                        msg += "\n🔥 현재 시장은 AI 섹터 중심으로 순환매가 이어지는지 확인하는 구간."
-
+                        msg += f"\n\n📌 오늘 핵심:\n{final_us_close_focus(safe_pct_from_snapshot(spx), safe_pct_from_snapshot(ixic), safe_pct_from_snapshot(dji), safe_pct_from_snapshot(sox), safe_pct_from_snapshot(dxy), safe_pct_from_snapshot(tnx), safe_pct_from_snapshot(wti))}"
+                        msg += f"\n\n🧭 미국장 분위기: {session_mood(safe_pct_from_snapshot(spx), safe_pct_from_snapshot(ixic), safe_pct_from_snapshot(dji), safe_pct_from_snapshot(sox), -safe_pct_from_snapshot(dxy), -safe_pct_from_snapshot(tnx))}"
+                        msg += "\n\n체크할 것:\n- 한국장 반도체 대형주 수급\n- 환율과 외국인 매매\n- BTC 80K 재안착 여부"
                         await safe_send(bot, msg, disable_preview=True)
                         state.market_session_sent_dates[key] = now.date()
 
             except Exception:
                 logging.exception("market_session_scheduler 오류")
-
             elapsed = (utc_now() - started).total_seconds()
             await asyncio.sleep(max(5, MARKET_SESSION_CHECK_SECONDS - int(elapsed)))
 
@@ -3045,6 +3175,58 @@ async def ops_health_monitor(bot: Bot, state: State) -> None:
 
         await asyncio.sleep(600)
 
+
+async def overnight_recap_scheduler(bot: Bot, state: State) -> None:
+    if not hasattr(state, "overnight_recap_sent_dates"):
+        state.overnight_recap_sent_dates = {}
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                now = now_kst()
+                if now.hour == 7 and now.minute == 10:
+                    key = "overnight_0710"
+                    if state.overnight_recap_sent_dates.get(key) != now.date():
+                        btc = await get_market_ticker(session, "BTCUSDT")
+                        eth = await get_market_ticker(session, "ETHUSDT")
+                        sol = await get_market_ticker(session, "SOLUSDT")
+                        nq = await get_yahoo_snapshot(session, "NQ%3DF")
+                        sox = await get_yahoo_snapshot(session, "%5ESOX")
+                        wti = await get_yahoo_snapshot(session, "CL%3DF")
+                        dxy = await get_yahoo_snapshot(session, "DX-Y.NYB")
+                        btc_price = float(btc["lastPrice"]) if btc else 0.0
+                        btc_pct = float(btc["priceChangePercent"]) if btc else 0.0
+                        eth_price = float(eth["lastPrice"]) if eth else 0.0
+                        eth_pct = float(eth["priceChangePercent"]) if eth else 0.0
+                        sol_price = float(sol["lastPrice"]) if sol else 0.0
+                        sol_pct = float(sol["priceChangePercent"]) if sol else 0.0
+                        msg = session_section(f"{now.month}/{now.day} 밤 사이 있었던 일")
+                        if btc:
+                            msg += f"\n1. BTC {btc_price:,.0f} USDT ({fmt_pct(btc_pct)})"
+                        if eth:
+                            msg += f"\n2. ETH {eth_price:,.0f} USDT ({fmt_pct(eth_pct)})"
+                        if sol:
+                            msg += f"\n3. SOL {sol_price:,.0f} USDT ({fmt_pct(sol_pct)})"
+                        idx = 4
+                        if nq:
+                            msg += f"\n{idx}. 나스닥 선물 {fmt_pct(safe_pct_from_snapshot(nq))}"
+                            idx += 1
+                        if sox:
+                            msg += f"\n{idx}. 반도체지수 {fmt_pct(safe_pct_from_snapshot(sox))}"
+                            idx += 1
+                        if wti:
+                            msg += f"\n{idx}. WTI 유가 {fmt_pct(safe_pct_from_snapshot(wti))}"
+                            idx += 1
+                        if dxy:
+                            msg += f"\n{idx}. 달러인덱스 {fmt_pct(safe_pct_from_snapshot(dxy))}"
+                        msg += f"\n\n📌 한 줄 정리:\n{final_market_recap_focus(btc_pct, eth_pct, sol_pct, safe_pct_from_snapshot(nq), safe_pct_from_snapshot(sox), safe_pct_from_snapshot(wti), safe_pct_from_snapshot(dxy))}"
+                        msg += "\n\n오늘 체크:\n- 한국장 외국인 수급\n- 반도체 대형주 방향\n- BTC 80K/79K 반응"
+                        await safe_send(bot, msg, disable_preview=True)
+                        state.overnight_recap_sent_dates[key] = now.date()
+            except Exception:
+                logging.exception("overnight_recap_scheduler 오류")
+            await asyncio.sleep(20)
+
+
 async def run_forever() -> None:
     token, _ = resolve_telegram_token()
     if not token:
@@ -3070,6 +3252,7 @@ async def run_forever() -> None:
         asyncio.create_task(alpha_flow_monitor(bot, state)),
         asyncio.create_task(liquidation_monitor(bot, state)),
         asyncio.create_task(market_session_scheduler(bot, state)),
+        asyncio.create_task(overnight_recap_scheduler(bot, state)),
     ]
 
     if os.getenv("PORT"):
