@@ -8,6 +8,7 @@ from collections import defaultdict, deque
 from datetime import date, datetime, timedelta, timezone
 from typing import Deque, Dict, Optional, Tuple
 from zoneinfo import ZoneInfo
+from urllib.parse import urlparse
 
 import aiohttp
 from aiohttp import web
@@ -1870,77 +1871,211 @@ def is_live_news_allowed(title: str, summary: str, category: str, now: datetime)
     return True
 
 
+
+SOURCE_MAP = {
+    "v.daum.net": "다음뉴스",
+    "news.daum.net": "다음뉴스",
+    "n.news.naver.com": "네이버뉴스",
+    "news.naver.com": "네이버뉴스",
+    "yna.co.kr": "연합뉴스",
+    "yonhapnewstv.co.kr": "연합뉴스TV",
+    "chosun.com": "조선일보",
+    "biz.chosun.com": "조선비즈",
+    "joongang.co.kr": "중앙일보",
+    "donga.com": "동아일보",
+    "hankyung.com": "한국경제",
+    "mk.co.kr": "매일경제",
+    "sedaily.com": "서울경제",
+    "edaily.co.kr": "이데일리",
+    "khan.co.kr": "경향신문",
+    "coindesk.com": "CoinDesk",
+    "cointelegraph.com": "Cointelegraph",
+    "reuters.com": "Reuters",
+    "bloomberg.com": "Bloomberg",
+    "cnbc.com": "CNBC",
+    "seekingalpha.com": "Seeking Alpha",
+    "koreaittimes.com": "Korea IT Times",
+}
+
+HIGH_IMPORTANCE_TERMS = (
+    "전쟁", "공습", "미사일", "드론", "호르무즈", "봉쇄", "휴전", "제재", "핵",
+    "war", "strike", "missile", "hormuz", "ceasefire", "sanction", "nuclear",
+    "FOMC", "CPI", "PPI", "금리", "연준", "파월", "ETF 승인", "청산", "급락", "급등",
+)
+MID_IMPORTANCE_TERMS = (
+    "엔비디아", "삼성전자", "SK하이닉스", "하이닉스", "AI", "반도체", "HBM",
+    "아이온큐", "양자", "팔란티어", "테슬라", "메타", "구글", "오라클",
+    "nvidia", "samsung", "hynix", "semiconductor", "ionq", "quantum", "palantir", "tesla",
+)
+
+
+def compact_source_name(value: str) -> str:
+    value = html_clean(value or "", 60)
+    if not value:
+        return "뉴스"
+    low = value.lower()
+    if low.startswith("www."):
+        low = low[4:]
+    if low in SOURCE_MAP:
+        return SOURCE_MAP[low]
+    for domain, name in SOURCE_MAP.items():
+        if domain in low:
+            return name
+    return value.replace(" - Google News", "").strip()[:40] or "뉴스"
+
+
 def source_name_from_entry(entry, fallback: str = "Google News") -> str:
+    # 1) RSS source title 우선
     source = getattr(entry, "source", None)
     try:
         title = source.get("title")
         if title:
-            return html_clean(title, 40)
+            return compact_source_name(title)
     except Exception:
         pass
+
+    # 2) 링크 도메인 기반 정리
+    link = getattr(entry, "link", "") or ""
+    try:
+        host = urlparse(link).netloc.replace("www.", "")
+        if host:
+            return compact_source_name(host)
+    except Exception:
+        pass
+
+    # 3) 제목 뒤의 "- 매체명" 사용
     title = html_clean(getattr(entry, "title", ""), 200)
     if " - " in title:
-        return html_clean(title.rsplit(" - ", 1)[-1], 40)
-    return fallback
+        return compact_source_name(title.rsplit(" - ", 1)[-1])
+    return compact_source_name(fallback)
 
 
 def extract_entry_image_url(entry) -> Optional[str]:
+    # 1) media_content / media_thumbnail
     for attr in ("media_content", "media_thumbnail"):
         rows = getattr(entry, attr, None)
         if isinstance(rows, list):
             for row in rows:
-                url = row.get("url") if isinstance(row, dict) else None
-                if url and url.startswith("http"):
-                    return url
+                if isinstance(row, dict):
+                    url = row.get("url")
+                    if url and url.startswith("http"):
+                        return url
+
+    # 2) entry.links enclosure / image
     links = getattr(entry, "links", None)
     if isinstance(links, list):
         for row in links:
             if not isinstance(row, dict):
                 continue
             href = row.get("href")
-            typ = row.get("type", "")
-            rel = row.get("rel", "")
+            typ = str(row.get("type", "")).lower()
+            rel = str(row.get("rel", "")).lower()
             if href and href.startswith("http") and ("image" in typ or rel in ("enclosure", "thumbnail")):
                 return href
+
+    # 3) summary 안 img 태그
     summary = getattr(entry, "summary", "") or ""
-    m = re.search(r'<img[^>]+src=["\\\']([^"\\\']+)["\\\']', summary)
+    m = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', summary)
     if m and m.group(1).startswith("http"):
         return m.group(1)
+
     return None
+
+
+async def resolve_entry_image_url(session: aiohttp.ClientSession, entry) -> Optional[str]:
+    # RSS 내부 이미지 → 기사 본문 og:image 순서로 시도
+    image_url = await resolve_entry_image_url(session, entry)
+    if image_url:
+        return image_url
+
+    link = getattr(entry, "link", "") or ""
+    if not link.startswith("http"):
+        return None
+
+    try:
+        html = await fetch_text(session, link)
+        if not html:
+            return None
+        patterns = [
+            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+            r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image["\']',
+        ]
+        for pat in patterns:
+            m = re.search(pat, html, flags=re.IGNORECASE)
+            if m and m.group(1).startswith("http"):
+                return m.group(1)
+    except Exception:
+        logging.warning("og:image 파싱 실패 link=%s", link)
+    return None
+
+
+def news_importance_label(title: str, summary: str) -> str:
+    t = f"{title} {summary}".lower()
+    if any(k.lower() in t for k in HIGH_IMPORTANCE_TERMS):
+        return "🚨 중요"
+    if any(k.lower() in t for k in MID_IMPORTANCE_TERMS):
+        return "🟡 체크"
+    return "⚪ 참고"
 
 
 def build_market_impact_line(category: str, title: str, summary: str) -> str:
     t = f"{title} {summary}".lower()
-    if any(k in t for k in ("nvidia", "엔비디아", "semiconductor", "반도체", "micron", "마이크론", "broadcom", "브로드컴", "chip", "칩")):
-        return "AI·반도체 쪽 돈 흐름 계속 체크할 자리."
-    if any(k in t for k in ("tesla", "테슬라", "apple", "애플", "meta", "메타", "google", "구글", "amazon", "아마존", "microsoft", "마이크로소프트")):
-        return "빅테크 움직임이라 나스닥 분위기 같이 봐야함."
+
+    if any(k in t for k in ("hormuz", "호르무즈", "oil", "wti", "brent", "유가", "원유", "opec", "해협", "선박", "해운")):
+        return "유가·해운·인플레 압력으로 번질 수 있어서 위험자산 반응 체크."
+    if any(k in t for k in ("iran", "israel", "missile", "strike", "ceasefire", "sanction", "nuclear", "이란", "이스라엘", "미사일", "공습", "휴전", "제재", "핵", "전쟁", "드론")):
+        return "지정학 리스크 이슈. 유가·달러·코인 변동성 커질 수 있음."
+    if any(k in t for k in ("fed", "fomc", "cpi", "ppi", "interest rate", "rate cut", "powell", "연준", "금리", "물가", "파월", "국채", "수익률", "달러")):
+        return "금리·달러 민감 이슈. 나스닥·코인 방향에 바로 영향 줄 수 있음."
+    if any(k in t for k in ("ionq", "아이온큐", "rigetti", "리게티", "quantum", "양자")):
+        return "양자컴퓨터 테마 수급 체크. 기대감은 크지만 변동성도 큰 구간."
+    if any(k in t for k in ("nvidia", "엔비디아", "semiconductor", "반도체", "hbm", "micron", "마이크론", "broadcom", "브로드컴", "amd", "tsmc", "asml", "chip", "칩")):
+        return "AI·반도체 수급 이슈. 삼성전자·하이닉스·나스닥까지 같이 봐야함."
+    if any(k in t for k in ("oracle", "오라클", "coreweave", "dell", "supermicro", "smci", "cloud", "data center", "데이터센터", "클라우드", "ai infrastructure", "ai 인프라")):
+        return "AI 인프라·데이터센터 투자 흐름. 전력·광통신·반도체까지 연결됨."
+    if any(k in t for k in ("vertiv", "vst", "ge vernova", "nuclear", "uranium", "power", "electricity", "전력", "원전", "우라늄", "에너지", "전력망")):
+        return "AI 전력 수요 테마. 전력·원전·인프라 관련주 반응 체크."
+    if any(k in t for k in ("defense", "drone", "lockheed", "boeing", "국방", "방산", "드론", "한화에어로스페이스")):
+        return "방산·지정학 수급 이슈. 방산주와 원자재 변동성 같이 봐야함."
+    if any(k in t for k in ("shipping", "tariff", "rare earth", "supply chain", "해운", "관세", "희토류", "공급망")):
+        return "공급망·관세 이슈. 물가와 기업 마진에 영향 줄 수 있음."
+    if any(k in t for k in ("tesla", "테슬라", "apple", "애플", "meta", "메타", "google", "구글", "amazon", "아마존", "microsoft", "마이크로소프트", "palantir", "팔란티어")):
+        return "빅테크·성장주 수급 이슈. 나스닥 분위기 같이 확인 필요."
     if any(k in t for k in ("earnings", "guidance", "실적", "가이던스", "eps", "매출")):
-        return "실적 숫자가 시장 기대를 계속 맞추는지가 핵심."
-    if any(k in t for k in ("fed", "cpi", "ppi", "interest rate", "rate cut", "연준", "금리", "물가")):
-        return "금리 기대 흔들리면 주식·코인 같이 움직일 수 있음."
-    if any(k in t for k in ("oil", "wti", "brent", "유가", "원유", "hormuz", "호르무즈")):
-        return "유가 움직임 나오면 달러·위험자산 반응 같이 봐야함."
-    if any(k in t for k in ("iran", "israel", "missile", "strike", "ceasefire", "sanction", "nuclear", "이란", "이스라엘", "미사일", "공습", "휴전", "제재", "핵")):
-        return "중동 리스크라 유가·달러·코인 변동성 바로 커질 수 있음."
-    if any(k in t for k in ("bitcoin", "btc", "비트코인", "etf", "청산", "liquidation")):
-        return "BTC 가격 반응이랑 거래량 붙는지 보는 게 핵심."
-    if any(k in t for k in ("samsung", "삼성전자", "hynix", "하이닉스", "kospi", "코스피", "환율", "외국인")):
-        return "한국장은 반도체·환율·외국인 수급 같이 봐야함."
-    return "시장 영향은 가격 반응 확인하면서 봐야함."
+        return "실적 이슈. 숫자보다 가이던스와 장 후반 수급이 더 중요."
+    if any(k in t for k in ("bitcoin", "btc", "비트코인", "ethereum", "eth", "etf", "청산", "liquidation", "tokenization", "stablecoin", "토큰화", "스테이블코인", "거래소")):
+        return "코인 수급 이슈. BTC 가격 반응과 거래량 동반 여부 체크."
+    if any(k in t for k in ("samsung", "삼성전자", "hynix", "하이닉스", "kospi", "코스피", "환율", "외국인", "현대차", "기아", "lg에너지솔루션", "두산에너빌리티")):
+        return "한국장 수급 이슈. 외국인·환율·반도체 흐름 같이 봐야함."
+    return "시장 영향은 가격 반응과 거래량 붙는지 확인 필요."
+
+
+def build_news_body_line(category: str, title: str, summary: str, impact: str) -> str:
+    raw = html_clean(summary, 180)
+    if raw and not mostly_english(raw) and raw not in title:
+        return raw
+    return impact
 
 
 async def build_live_news_message(session: aiohttp.ClientSession, category_emoji: str, category: str, title: str, summary: str, source: str) -> str:
     title_ko = await ensure_korean_text(session, strip_news_source_tail(title))
-    summary_clean = html_clean(summary, 160)
-    if mostly_english(summary_clean):
-        summary_clean = ""
-    if summary_clean and summary_clean != title:
-        body_ko = await ensure_korean_text(session, summary_clean)
-    else:
-        body_ko = build_market_impact_line(category, title, summary)
     impact = build_market_impact_line(category, title, summary)
-    return f"{category_emoji} {title_ko}\n\n{body_ko}\n\n시장 영향: {impact}\n\n출처: {source}"
+    body = build_news_body_line(category, title_ko, summary, impact)
+    if mostly_english(body):
+        body = await ensure_korean_text(session, body)
+    importance = news_importance_label(title, summary)
+
+    return (
+        "━━━━━━━━━━━━━━\n"
+        f"{importance} 실시간 시장 이슈\n"
+        "━━━━━━━━━━━━━━\n"
+        f"{category_emoji} {title_ko}\n\n"
+        f"{body}\n\n"
+        f"📌 시장 영향:\n{impact}\n\n"
+        f"📰 출처: {compact_source_name(source)}"
+    )
 
 
 async def send_news_card(bot: Bot, text: str, image_url: Optional[str] = None) -> None:
@@ -1996,7 +2131,7 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                     candidates.sort(key=lambda x: x[0], reverse=True)
                     score, entry, raw_title, raw_summary, news_key = candidates[0]
                     source = source_name_from_entry(entry)
-                    image_url = extract_entry_image_url(entry)
+                    image_url = await resolve_entry_image_url(session, entry)
                     msg = await build_live_news_message(session, category_emoji, category, raw_title, raw_summary, source)
                     await send_news_card(bot, msg, image_url=image_url)
                     if len(state.live_news_seen_ids) == state.live_news_seen_ids.maxlen:
