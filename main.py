@@ -1462,58 +1462,7 @@ def market_one_liner(btc_24h_pct: float) -> str:
 # ============================================================
 
 def compact_section(title: str) -> str:
-    return f"━━━━━━━━━━━━━━\n{title}\n━━━━━━━━━━━━━━"
-
-
-def snap_pct(snap) -> float:
-    return float(snap[1]) if snap else 0.0
-
-
-def snapshot_line(name: str, snap, digits: int = 2) -> str:
-    if not snap:
-        return ""
-    price, pct = snap
-    return f"{move_icon(float(pct))} {name}: {float(price):,.{digits}f} ({fmt_pct(float(pct))})"
-
-
-def btc_brief_line(price: float, pct: float) -> str:
-    return f"{move_icon(pct)} BTC: {price:,.0f} USDT ({fmt_pct(pct)})"
-
-
-def market_mood_label(*pcts: float) -> str:
-    vals = [float(x) for x in pcts if x is not None]
-    if not vals:
-        return "🟡 눈치보기 장세"
-    avg = sum(vals) / len(vals)
-    if avg >= 0.55:
-        return "🟢 위험선호"
-    if avg <= -0.55:
-        return "🔴 리스크오프"
-    if max(vals) - min(vals) >= 1.0:
-        return "🟡 종목장"
-    return "🟡 눈치보기 장세"
-
-
-def clean_news_body_for_message(title: str, summary: str, source: str = "") -> str:
-    title_clean = html_clean(strip_news_source_tail(title or ""), 220).strip()
-    body = html_clean(summary or "", 280).strip()
-    body = re.sub(r"https?://\S+", "", body)
-    body = body.replace(" ", " ").replace("…", "...").strip()
-
-    for s in (source, "Google News", "조선일보", "한국경제", "경향신문", "blog.google", "Korea IT Times"):
-        if s:
-            body = body.replace(str(s), "").strip()
-
-    if title_clean and body:
-        body_no_space = re.sub(r"\s+", "", body)
-        title_no_space = re.sub(r"\s+", "", title_clean)
-        if body_no_space == title_no_space or title_no_space in body_no_space[: len(title_no_space) + 30]:
-            return ""
-
-    if len(body) < 18:
-        return ""
-    return body.strip()
-
+    return "━━━━━━━━━━━━━━\n" + title + "\n━━━━━━━━━━━━━━"
 
 def live_news_header(score: int) -> str:
     if score >= 26:
@@ -2447,6 +2396,13 @@ def normalize_news_importance(score: int) -> int:
 
 def related_assets_for_news(title: str, summary: str = "") -> str:
     text_value = f"{title} {summary}".lower()
+
+    if any(k in text_value for k in ("호르무즈", "이란", "중동", "원유", "유가", "wti", "brent", "석유", "해운", "선박", "공급망")):
+        found = ["WTI · 에너지 · 해운"]
+        if any(k in text_value for k in ("달러", "금리", "인플레", "물가")):
+            found.append("달러 · 금리 · 인플레")
+        return " / ".join(found)
+
     pairs = [
         (("nvidia", "엔비디아", "gpu", "ai chip", "ai칩"), "NVDA · 반도체 · AI"),
         (("samsung", "삼성전자", "삼전", "hbm"), "삼성전자 · SK하이닉스 · HBM"),
@@ -2461,19 +2417,20 @@ def related_assets_for_news(title: str, summary: str = "") -> str:
         (("tesla", "테슬라", "robotaxi", "로보택시"), "TSLA · 전기차 · AI"),
         (("ionq", "아이온큐", "quantum", "양자"), "IONQ · 양자컴퓨터"),
         (("palantir", "팔란티어", "pltr"), "PLTR · AI 소프트웨어"),
-        (("oil", "유가", "wti", "brent", "호르무즈", "원유", "석유"), "WTI · 에너지 · 해운"),
-        (("gold", "금값", "금리", "달러", "dxy"), "금 · 달러 · 금리"),
+        (("gold", "금값", "금", "dxy"), "금 · 달러 · 금리"),
         (("bitcoin", "btc", "비트코인", "crypto", "코인"), "BTC · ETH · SOL"),
         (("kospi", "코스피", "외국인", "환율"), "KOSPI · 환율 · 외국인 수급"),
     ]
+
     found = []
     for keys, label in pairs:
         if any(k in text_value for k in keys):
             found.append(label)
+
     if not found:
         return "시장 전체 · 관련 섹터 확인"
-    return " / ".join(found[:3])
 
+    return " / ".join(found[:3])
 
 async def build_live_news_message(session: aiohttp.ClientSession, category_emoji: str, category: str, title: str, summary: str, source: str) -> str:
     title_clean = strip_news_source_tail(title or "")
@@ -2489,26 +2446,42 @@ async def build_live_news_message(session: aiohttp.ClientSession, category_emoji
     except Exception:
         impact = build_market_impact_line(category, title_clean, summary)
 
+    body_ko = ""
     if body and not mostly_english(body):
-        body_ko = await ensure_korean_text(session, body)
-        if body_ko.strip() == title_ko.strip():
-            body_ko = impact
-    else:
-        body_ko = impact
+        try:
+            body_ko = await ensure_korean_text(session, body)
+        except Exception:
+            body_ko = ""
+
+    body_norm = re.sub(r"\s+", "", body_ko or "")
+    title_norm = re.sub(r"\s+", "", title_ko or "")
+    impact_norm = re.sub(r"\s+", "", impact or "")
+
+    show_body = bool(body_ko)
+    if body_norm == title_norm or body_norm == impact_norm:
+        show_body = False
+    if impact_norm and body_norm and impact_norm in body_norm:
+        show_body = False
 
     try:
         raw_score = live_news_score(title_clean, summary, category)
     except Exception:
         raw_score = 18
 
-    importance = normalize_news_importance(raw_score)
+    try:
+        importance = normalize_news_importance(raw_score)
+    except Exception:
+        importance = max(1, min(10, round(raw_score / 3)))
 
     try:
         header = live_news_header(raw_score)
     except Exception:
-        header = "⚡ [실시간 시장 이슈]"
+        header = "⚡ 실시간 시장 이슈"
 
-    related = related_assets_for_news(title_clean, summary)
+    try:
+        related = related_assets_for_news(title_clean, summary)
+    except Exception:
+        related = "시장 전체 · 관련 섹터 확인"
 
     btc_line_text = ""
     try:
@@ -2523,15 +2496,18 @@ async def build_live_news_message(session: aiohttp.ClientSession, category_emoji
     except Exception:
         btc_line_text = ""
 
-    return (
-        compact_section(header)
-        + f"\n{category_emoji} {title_ko}\n\n"
-        + f"{body_ko}\n\n"
-        + f"🔥 중요도: {importance}/10\n"
-        + f"🏷 관련: {related}\n\n"
-        + f"📌 시장 영향:\n{impact}"
-        + btc_line_text
-    )
+    msg = compact_section(header)
+    msg += f"\n{category_emoji} {title_ko}\n"
+
+    if show_body:
+        msg += f"\n{body_ko}\n"
+
+    msg += f"\n🔥 중요도: {importance}/10"
+    msg += f"\n🏷 관련: {related}"
+    msg += f"\n\n📌 시장 영향:\n{impact}"
+    msg += btc_line_text
+
+    return msg
 
 async def send_news_card(bot: Bot, text: str, image_url: Optional[str] = None) -> None:
     if image_url:
@@ -2547,6 +2523,7 @@ async def send_news_card(bot: Bot, text: str, image_url: Optional[str] = None) -
 async def btc_key_level_monitor(bot: Bot, state: State) -> None:
     if not hasattr(state, "btc_key_level_last"):
         state.btc_key_level_last = {}
+
     levels = [80000, 79000, 78000, 75000]
 
     async with aiohttp.ClientSession() as session:
@@ -2591,8 +2568,6 @@ async def btc_key_level_monitor(bot: Bot, state: State) -> None:
                 logging.exception("btc_key_level_monitor 오류")
 
             await asyncio.sleep(60)
-
-
 
 async def btc_move_chart_monitor(bot: Bot, state: State) -> None:
     if not hasattr(state, "btc_move_chart_last_sent"):
@@ -2938,18 +2913,12 @@ async def ops_health_monitor(bot: Bot, state: State) -> None:
         try:
             now = utc_now()
             if state.ops_health_last_sent is None or (now - state.ops_health_last_sent).total_seconds() >= 60 * 60 * 6:
-                msg = (
-                    compact_section("🟢 봇 정상 작동 중")
-                    + "\\n실시간 뉴스 · 시장 브리핑 · BTC 레벨 감지 작동 중."
-                    + "\\n문제 발생 시 Railway 로그 기준으로 점검."
-                )
-                await safe_send(bot, msg, disable_preview=True)
+                logging.info("ops_health_monitor 정상 작동: live/news/briefing/level monitors running")
                 state.ops_health_last_sent = now
         except Exception:
             logging.exception("ops_health_monitor 오류")
 
         await asyncio.sleep(600)
-
 
 async def run_forever() -> None:
     token, _ = resolve_telegram_token()
