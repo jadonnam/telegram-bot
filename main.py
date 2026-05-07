@@ -2000,7 +2000,7 @@ async def resolve_entry_image_url(session: aiohttp.ClientSession, entry) -> Opti
         summary = getattr(entry, "summary", "") or ""
 
         m = re.search(
-            r"<img[^>]+src=['\\"]([^'\\"]+)['\\"]",
+            r"<img[^>]+src=[\"']([^\"']+)[\"']",
             summary
         )
 
