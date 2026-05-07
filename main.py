@@ -2382,9 +2382,68 @@ def live_news_header(score: int) -> str:
 
 
 
+
 # ============================================================
-# NEWS IMPORTANCE / RELATED ASSETS
+# FINAL NEWSROOM QUALITY HELPERS
 # ============================================================
+
+def polish_korean_news_text(text_value: str) -> str:
+    s = text_value or ''
+    fixes = {
+        '트럼프의 호르무즈 선박 구조': '호르무즈 해협 선박 지원',
+        '석유 압력': '유가 압력',
+        '공급망 지연은 여전히 ​​남아 있음': '공급망 지연 리스크는 남아있음',
+        '위험자산 반응 체크': '위험자산 반응 확인 필요',
+        '시장 영향은 가격 반응 확인하면서 봐야함.': '가격 반응과 거래량 동반 여부 확인 필요.',
+        '빅테크 움직임이라 나스닥 분위기 같이 봐야함.': 'AI·빅테크 수급이 나스닥 흐름을 좌우할 수 있음.',
+    }
+    for old, new in fixes.items():
+        s = s.replace(old, new)
+    s = s.replace('\n', '
+')
+    s = re.sub(r'
+{3,}', '
+
+', s)
+    return s.strip()
+
+def compact_message(msg: str, limit: int = 1500) -> str:
+    msg = polish_korean_news_text(msg)
+    if len(msg) <= limit:
+        return msg
+    return msg[:limit - 40].rstrip() + '
+
+…내용 압축됨'
+
+def normalize_title_for_dedupe(title: str) -> str:
+    s = (title or '').lower()
+    s = re.sub(r'https?://\S+', '', s)
+    s = re.sub(r'[^0-9a-zA-Z가-힣]+', ' ', s)
+    s = re.sub(r'(속보|단독|종합|영상|사진|update|breaking|exclusive|report)', ' ', s)
+    return re.sub(r'\s+', ' ', s).strip()[:140]
+
+def rough_news_fingerprint(title: str, summary: str = '') -> str:
+    words = [w for w in normalize_title_for_dedupe(title).split() if len(w) >= 2]
+    if len(words) < 8:
+        words += [w for w in normalize_title_for_dedupe(summary).split() if len(w) >= 2]
+    return ' '.join(words[:10])
+
+def newsroom_keyword_score(title: str, summary: str, category: str = '') -> int:
+    txt = f'{title} {summary} {category}'.lower()
+    score = 10
+    critical = ('fed','fomc','powell','파월','연준','금리','cpi','pce','실업수당','고용','전쟁','공습','미사일','호르무즈','봉쇄','etf','sec','엔비디아','nvidia','hbm','삼성전자','sk하이닉스','btc','비트코인','청산')
+    high = ('ai','반도체','데이터센터','cloud','클라우드','oil','wti','brent','유가','원유','달러','dxy','10년물','테슬라','tesla','아이온큐','ionq','양자')
+    low = ('맛집','행사','기념','인터뷰','칼럼','opinion','blog','생활','문화')
+    score += sum(3 for k in critical if k in txt)
+    score += sum(2 for k in high if k in txt)
+    score -= sum(2 for k in low if k in txt)
+    if any(k in txt for k in ('호르무즈','전쟁','공습','미사일','봉쇄')) and any(k in txt for k in ('유가','원유','wti','brent','석유')):
+        score += 5
+    if any(k in txt for k in ('엔비디아','nvidia','hbm','데이터센터')):
+        score += 4
+    if any(k in txt for k in ('cpi','pce','fomc','fed','파월','연준','금리')):
+        score += 4
+    return max(1, min(35, score))
 
 def normalize_news_importance(score: int) -> int:
     try:
@@ -2393,69 +2452,79 @@ def normalize_news_importance(score: int) -> int:
         score = 10
     return max(1, min(10, round(score / 3)))
 
+def live_news_header(score: int) -> str:
+    if score >= 27:
+        return '🚨 시장 속보'
+    if score >= 20:
+        return '⚡ 실시간 시장 이슈'
+    return '🟡 체크할 시장 이슈'
 
-def related_assets_for_news(title: str, summary: str = "") -> str:
-    text_value = f"{title} {summary}".lower()
-
-    if any(k in text_value for k in ("호르무즈", "이란", "중동", "원유", "유가", "wti", "brent", "석유", "해운", "선박", "공급망")):
-        found = ["WTI · 에너지 · 해운"]
-        if any(k in text_value for k in ("달러", "금리", "인플레", "물가")):
-            found.append("달러 · 금리 · 인플레")
-        return " / ".join(found)
-
+def related_assets_for_news(title: str, summary: str = '') -> str:
+    txt = f'{title} {summary}'.lower()
+    if any(k in txt for k in ('호르무즈','이란','중동','원유','유가','wti','brent','석유','해운','선박','공급망')):
+        found = ['WTI · 에너지 · 해운']
+        if any(k in txt for k in ('달러','금리','인플레','물가')):
+            found.append('달러 · 금리 · 인플레')
+        if any(k in txt for k in ('방산','미사일','군함','드론','전쟁')):
+            found.append('방산 · 지정학')
+        return ' / '.join(found)
     pairs = [
-        (("nvidia", "엔비디아", "gpu", "ai chip", "ai칩"), "NVDA · 반도체 · AI"),
-        (("samsung", "삼성전자", "삼전", "hbm"), "삼성전자 · SK하이닉스 · HBM"),
-        (("sk hynix", "하이닉스", "sk하이닉스", "hbm"), "SK하이닉스 · 삼성전자 · HBM"),
-        (("amd",), "AMD · 반도체"),
-        (("broadcom", "브로드컴", "avgo"), "AVGO · 네트워크 반도체"),
-        (("tsmc", "대만 tsmc"), "TSMC · 파운드리"),
-        (("google", "alphabet", "구글", "알파벳"), "GOOGL · 클라우드 · AI"),
-        (("amazon", "아마존", "aws"), "AMZN · 클라우드 · 소비"),
-        (("microsoft", "마이크로소프트", "openai"), "MSFT · AI · 클라우드"),
-        (("meta", "메타", "저커버그"), "META · AI · 광고"),
-        (("tesla", "테슬라", "robotaxi", "로보택시"), "TSLA · 전기차 · AI"),
-        (("ionq", "아이온큐", "quantum", "양자"), "IONQ · 양자컴퓨터"),
-        (("palantir", "팔란티어", "pltr"), "PLTR · AI 소프트웨어"),
-        (("gold", "금값", "금", "dxy"), "금 · 달러 · 금리"),
-        (("bitcoin", "btc", "비트코인", "crypto", "코인"), "BTC · ETH · SOL"),
-        (("kospi", "코스피", "외국인", "환율"), "KOSPI · 환율 · 외국인 수급"),
+        (('nvidia','엔비디아','gpu','ai칩','hbm'), 'NVDA · 반도체 · AI'),
+        (('samsung','삼성전자','삼전','sk하이닉스','하이닉스'), '삼성전자 · SK하이닉스 · HBM'),
+        (('amd',), 'AMD · 반도체'),
+        (('google','alphabet','구글','알파벳'), 'GOOGL · 클라우드 · AI'),
+        (('amazon','아마존','aws'), 'AMZN · 클라우드 · 소비'),
+        (('microsoft','마이크로소프트','openai'), 'MSFT · AI · 클라우드'),
+        (('tesla','테슬라','로보택시'), 'TSLA · 전기차 · AI'),
+        (('ionq','아이온큐','quantum','양자'), 'IONQ · 양자컴퓨터'),
+        (('gold','금값','금','dxy'), '금 · 달러 · 금리'),
+        (('bitcoin','btc','비트코인','crypto','코인'), 'BTC · ETH · SOL'),
+        (('kospi','코스피','외국인','환율'), 'KOSPI · 환율 · 외국인 수급'),
     ]
-
     found = []
     for keys, label in pairs:
-        if any(k in text_value for k in keys):
+        if any(k in txt for k in keys):
             found.append(label)
+    return ' / '.join(found[:3]) if found else '시장 전체 · 관련 섹터 확인'
 
-    if not found:
-        return "시장 전체 · 관련 섹터 확인"
+def impact_one_liner(category: str, title: str, summary: str) -> str:
+    txt = f'{title} {summary} {category}'.lower()
+    if any(k in txt for k in ('호르무즈','유가','원유','wti','brent','석유','해운')):
+        return '유가·해운·인플레 압력으로 번질 수 있어 위험자산 반응 확인 필요.'
+    if any(k in txt for k in ('엔비디아','nvidia','hbm','반도체','데이터센터')):
+        return 'AI·반도체 수급에 직접 연결될 수 있어 삼성전자·SK하이닉스 흐름 확인 필요.'
+    if any(k in txt for k in ('fed','fomc','파월','연준','금리','cpi','pce','실업수당','고용')):
+        return '금리 기대와 달러 방향을 바꿀 수 있어 나스닥·BTC 동반 반응 확인 필요.'
+    if any(k in txt for k in ('bitcoin','btc','비트코인','etf','sec')):
+        return '비트코인 수급에 직접 영향 줄 수 있어 현물 ETF·거래량 반응 확인 필요.'
+    try:
+        return polish_korean_news_text(build_market_impact_line(category, title, summary))
+    except Exception:
+        return '가격 반응과 거래량 동반 여부 확인 필요.'
 
-    return " / ".join(found[:3])
 
 async def build_live_news_message(session: aiohttp.ClientSession, category_emoji: str, category: str, title: str, summary: str, source: str) -> str:
-    title_clean = strip_news_source_tail(title or "")
-    title_ko = await ensure_korean_text(session, title_clean)
+    title_clean = strip_news_source_tail(title or '')
+    title_ko = await ensure_korean_text(session, polish_korean_news_text(title_clean))
 
     try:
         body = clean_news_body_for_message(title_clean, summary, source)
     except Exception:
-        body = ""
+        body = ''
 
-    try:
-        impact = impact_one_liner(category, title_clean, summary)
-    except Exception:
-        impact = build_market_impact_line(category, title_clean, summary)
+    impact = impact_one_liner(category, title_clean, summary)
 
-    body_ko = ""
+    body_ko = ''
     if body and not mostly_english(body):
         try:
             body_ko = await ensure_korean_text(session, body)
+            body_ko = polish_korean_news_text(body_ko)
         except Exception:
-            body_ko = ""
+            body_ko = ''
 
-    body_norm = re.sub(r"\s+", "", body_ko or "")
-    title_norm = re.sub(r"\s+", "", title_ko or "")
-    impact_norm = re.sub(r"\s+", "", impact or "")
+    body_norm = re.sub(r'\s+', '', body_ko or '')
+    title_norm = re.sub(r'\s+', '', title_ko or '')
+    impact_norm = re.sub(r'\s+', '', impact or '')
 
     show_body = bool(body_ko)
     if body_norm == title_norm or body_norm == impact_norm:
@@ -2468,46 +2537,36 @@ async def build_live_news_message(session: aiohttp.ClientSession, category_emoji
     except Exception:
         raw_score = 18
 
-    try:
-        importance = normalize_news_importance(raw_score)
-    except Exception:
-        importance = max(1, min(10, round(raw_score / 3)))
+    raw_score = max(raw_score, newsroom_keyword_score(title_clean, summary, category))
+    importance = normalize_news_importance(raw_score)
+    header = live_news_header(raw_score)
+    related = related_assets_for_news(title_clean, summary)
 
+    btc_line_text = ''
     try:
-        header = live_news_header(raw_score)
-    except Exception:
-        header = "⚡ 실시간 시장 이슈"
-
-    try:
-        related = related_assets_for_news(title_clean, summary)
-    except Exception:
-        related = "시장 전체 · 관련 섹터 확인"
-
-    btc_line_text = ""
-    try:
-        btc = await get_market_ticker(session, "BTCUSDT")
+        btc = await get_market_ticker(session, 'BTCUSDT')
         if btc:
-            btc_price = float(btc["lastPrice"])
-            btc_pct = float(btc["priceChangePercent"])
+            btc_price = float(btc['lastPrice'])
+            btc_pct = float(btc['priceChangePercent'])
             btc_line_text = (
-                "\n\n📊 현재 BTC:\n"
-                f"{btc_price:,.0f} USDT ({fmt_pct(btc_pct)})"
+                '\n\n📊 현재 BTC:\n'
+                f'{btc_price:,.0f} USDT ({fmt_pct(btc_pct)})'
             )
     except Exception:
-        btc_line_text = ""
+        btc_line_text = ''
 
     msg = compact_section(header)
-    msg += f"\n{category_emoji} {title_ko}\n"
+    msg += f'\n{category_emoji} {title_ko}\n'
 
     if show_body:
-        msg += f"\n{body_ko}\n"
+        msg += f'\n{body_ko}\n'
 
-    msg += f"\n🔥 중요도: {importance}/10"
-    msg += f"\n🏷 관련: {related}"
-    msg += f"\n\n📌 시장 영향:\n{impact}"
+    msg += f'\n🔥 중요도: {importance}/10'
+    msg += f'\n🏷 관련: {related}'
+    msg += f'\n\n📌 시장 영향:\n{impact}'
     msg += btc_line_text
 
-    return msg
+    return compact_message(msg, limit=1500)
 
 async def send_news_card(bot: Bot, text: str, image_url: Optional[str] = None) -> None:
     if image_url:
