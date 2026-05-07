@@ -1982,32 +1982,26 @@ def extract_entry_image_url(entry) -> Optional[str]:
     return None
 
 
-async def resolve_entry_image_url(session: aiohttp.ClientSession, entry) -> Optional[str]:
-    # RSS 내부 이미지 → 기사 본문 og:image 순서로 시도
-    image_url = await resolve_entry_image_url(session, entry)
-    if image_url:
-        return image_url
 
-    link = getattr(entry, "link", "") or ""
-    if not link.startswith("http"):
-        return None
+async def resolve_entry_image_url(session: aiohttp.ClientSession, entry) -> Optional[str]:
+    # RSS entry에서 이미지 URL만 안전하게 뽑는다. 자기 자신을 다시 호출하지 않는다.
+    try:
+        image_url = extract_entry_image_url(entry)
+        if image_url:
+            return image_url
+    except Exception:
+        pass
 
     try:
-        html = await fetch_text(session, link)
-        if not html:
-            return None
-        patterns = [
-            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
-            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
-            r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
-            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image["\']',
-        ]
-        for pat in patterns:
-            m = re.search(pat, html, flags=re.IGNORECASE)
-            if m and m.group(1).startswith("http"):
-                return m.group(1)
+        summary = getattr(entry, "summary", "") or ""
+        m = re.search(r'<img[^>]+src=["\\']([^"\\']+)["\\']', summary)
+        if m:
+            url = m.group(1)
+            if url.startswith("http"):
+                return url
     except Exception:
-        logging.warning("og:image 파싱 실패 link=%s", link)
+        pass
+
     return None
 
 
