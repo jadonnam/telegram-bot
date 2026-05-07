@@ -1479,6 +1479,7 @@ def impact_one_liner(category: str, title: str, summary: str) -> str:
 
 
 
+
 async def briefing_scheduler(bot: Bot, state: State) -> None:
     slots = {
         "08": (8, "🌅 오전 시장 체크"),
@@ -1640,6 +1641,7 @@ def append_if_value(lines: list[str], name: str, snap: Optional[Tuple[float, flo
 def session_data_note(lines: list[str], required_min: int = 2) -> str:
     # 사용자에게 '데이터 지연' 문구를 노출하지 않는다.
     return ""
+
 
 
 
@@ -2113,6 +2115,7 @@ def extract_entry_image_url(entry) -> Optional[str]:
 
 
 
+
 async def resolve_entry_image_url(session: aiohttp.ClientSession, entry) -> Optional[str]:
     try:
         image_url = extract_entry_image_url(entry)
@@ -2123,11 +2126,16 @@ async def resolve_entry_image_url(session: aiohttp.ClientSession, entry) -> Opti
 
     try:
         summary = getattr(entry, "summary", "") or ""
-        m = re.search(r"<img[^>]+src=[\"']([^\"']+)[\"']", summary)
-        if m:
-            url = m.group(1)
-            if url.startswith("http"):
-                return url
+        for quote in ("\\"", "'"):
+            marker = "src=" + quote
+            idx = summary.find(marker)
+            if idx >= 0:
+                start = idx + len(marker)
+                end = summary.find(quote, start)
+                if end > start:
+                    url = summary[start:end]
+                    if url.startswith("http"):
+                        return url
     except Exception:
         pass
 
@@ -2218,6 +2226,7 @@ def live_news_header(score: int) -> str:
 
 
 
+
 async def build_live_news_message(session: aiohttp.ClientSession, category_emoji: str, category: str, title: str, summary: str, source: str) -> str:
     title_clean = strip_news_source_tail(title or "")
     title_ko = await ensure_korean_text(session, title_clean)
@@ -2241,27 +2250,15 @@ async def build_live_news_message(session: aiohttp.ClientSession, category_emoji
         if btc:
             btc_price = float(btc["lastPrice"])
             btc_pct = float(btc["priceChangePercent"])
-            btc_line_text = (
-        	f"
-
-📊 현재 BTC:
-"
-        	f"{btc_price:,.0f} USDT ({fmt_pct(btc_pct)})"
-   	 )
-except Exception:
-    btc_line_text = ""
+            btc_line_text = "\n\n📊 현재 BTC:\n" + f"{btc_price:,.0f} USDT ({fmt_pct(btc_pct)})"
+    except Exception:
+        btc_line_text = ""
 
     return (
         compact_section(header)
-        + f"
-{category_emoji} {title_ko}
-
-"
-        + f"{body_ko}
-
-"
-        + f"📌 시장 영향:
-{impact}"
+        + f"\n{category_emoji} {title_ko}\n\n"
+        + f"{body_ko}\n\n"
+        + f"📌 시장 영향:\n{impact}"
         + btc_line_text
     )
 
