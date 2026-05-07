@@ -699,6 +699,113 @@ async def translate_to_korean(session: aiohttp.ClientSession, text: str) -> str:
         return text
 
 
+
+# ============================================================
+# MARKET DATA FALLBACKS - OKX / CoinGecko
+# ============================================================
+
+COINGECKO_IDS = {
+    "BTCUSDT": "bitcoin",
+    "ETHUSDT": "ethereum",
+    "SOLUSDT": "solana",
+}
+
+OKX_SYMBOLS = {
+    "BTCUSDT": "BTC-USDT",
+    "ETHUSDT": "ETH-USDT",
+    "SOLUSDT": "SOL-USDT",
+}
+
+
+async def get_okx_market_ticker(session: aiohttp.ClientSession, symbol: str):
+    inst_id = OKX_SYMBOLS.get(symbol)
+    if not inst_id:
+        return None
+
+    url = f"https://www.okx.com/api/v5/market/ticker?instId={inst_id}"
+    data = await fetch_json(session, url)
+    try:
+        item = (data.get("data") or [])[0]
+        last = float(item.get("last"))
+        open_24h = float(item.get("open24h") or last)
+        pct = ((last - open_24h) / open_24h * 100.0) if open_24h else 0.0
+        return {
+            "symbol": symbol,
+            "lastPrice": str(last),
+            "priceChangePercent": str(pct),
+            "source": "OKX",
+        }
+    except Exception:
+        return None
+
+
+async def get_coingecko_market_ticker(session: aiohttp.ClientSession, symbol: str):
+    coin_id = COINGECKO_IDS.get(symbol)
+    if not coin_id:
+        return None
+
+    url = (
+        "https://api.coingecko.com/api/v3/simple/price"
+        f"?ids={coin_id}&vs_currencies=usd&include_24hr_change=true"
+    )
+    data = await fetch_json(session, url)
+    try:
+        item = data.get(coin_id) or {}
+        last = float(item.get("usd"))
+        pct = float(item.get("usd_24h_change") or 0.0)
+        return {
+            "symbol": symbol,
+            "lastPrice": str(last),
+            "priceChangePercent": str(pct),
+            "source": "CoinGecko",
+        }
+    except Exception:
+        return None
+
+
+_BASE_GET_MARKET_TICKER = get_market_ticker
+
+
+async def get_market_ticker(session: aiohttp.ClientSession, symbol: str):
+    try:
+        primary = await _BASE_GET_MARKET_TICKER(session, symbol)
+        if primary:
+            return primary
+    except Exception:
+        logging.warning("primary get_market_ticker 실패 symbol=%s", symbol)
+
+    try:
+        okx = await get_okx_market_ticker(session, symbol)
+        if okx:
+            return okx
+    except Exception:
+        logging.warning("OKX fallback 실패 symbol=%s", symbol)
+
+    try:
+        cg = await get_coingecko_market_ticker(session, symbol)
+        if cg:
+            return cg
+    except Exception:
+        logging.warning("CoinGecko fallback 실패 symbol=%s", symbol)
+
+    return None
+
+
+async def get_okx_btc_candles(session: aiohttp.ClientSession, bar: str = "5m", limit: int = 40):
+    url = f"https://www.okx.com/api/v5/market/candles?instId=BTC-USDT&bar={bar}&limit={limit}"
+    data = await fetch_json(session, url)
+    candles = []
+    try:
+        for row in data.get("data", []):
+            ts = int(row[0])
+            close = float(row[4])
+            candles.append((ts, close))
+        candles.sort(key=lambda x: x[0])
+    except Exception:
+        return []
+    return candles
+
+
 def source_name_from_link(link: str) -> str:
     lowered = (link or "").lower()
     if "coindesk" in lowered:
@@ -2325,6 +2432,49 @@ def live_news_header(score: int) -> str:
 
 
 
+
+# ============================================================
+# NEWS IMPORTANCE / RELATED ASSETS
+# ============================================================
+
+def normalize_news_importance(score: int) -> int:
+    try:
+        score = int(score)
+    except Exception:
+        score = 10
+    return max(1, min(10, round(score / 3)))
+
+
+def related_assets_for_news(title: str, summary: str = "") -> str:
+    text_value = f"{title} {summary}".lower()
+    pairs = [
+        (("nvidia", "엔비디아", "gpu", "ai chip", "ai칩"), "NVDA · 반도체 · AI"),
+        (("samsung", "삼성전자", "삼전", "hbm"), "삼성전자 · SK하이닉스 · HBM"),
+        (("sk hynix", "하이닉스", "sk하이닉스", "hbm"), "SK하이닉스 · 삼성전자 · HBM"),
+        (("amd",), "AMD · 반도체"),
+        (("broadcom", "브로드컴", "avgo"), "AVGO · 네트워크 반도체"),
+        (("tsmc", "대만 tsmc"), "TSMC · 파운드리"),
+        (("google", "alphabet", "구글", "알파벳"), "GOOGL · 클라우드 · AI"),
+        (("amazon", "아마존", "aws"), "AMZN · 클라우드 · 소비"),
+        (("microsoft", "마이크로소프트", "openai"), "MSFT · AI · 클라우드"),
+        (("meta", "메타", "저커버그"), "META · AI · 광고"),
+        (("tesla", "테슬라", "robotaxi", "로보택시"), "TSLA · 전기차 · AI"),
+        (("ionq", "아이온큐", "quantum", "양자"), "IONQ · 양자컴퓨터"),
+        (("palantir", "팔란티어", "pltr"), "PLTR · AI 소프트웨어"),
+        (("oil", "유가", "wti", "brent", "호르무즈", "원유", "석유"), "WTI · 에너지 · 해운"),
+        (("gold", "금값", "금리", "달러", "dxy"), "금 · 달러 · 금리"),
+        (("bitcoin", "btc", "비트코인", "crypto", "코인"), "BTC · ETH · SOL"),
+        (("kospi", "코스피", "외국인", "환율"), "KOSPI · 환율 · 외국인 수급"),
+    ]
+    found = []
+    for keys, label in pairs:
+        if any(k in text_value for k in keys):
+            found.append(label)
+    if not found:
+        return "시장 전체 · 관련 섹터 확인"
+    return " / ".join(found[:3])
+
+
 async def build_live_news_message(session: aiohttp.ClientSession, category_emoji: str, category: str, title: str, summary: str, source: str) -> str:
     title_clean = strip_news_source_tail(title or "")
     title_ko = await ensure_korean_text(session, title_clean)
@@ -2347,10 +2497,18 @@ async def build_live_news_message(session: aiohttp.ClientSession, category_emoji
         body_ko = impact
 
     try:
-        score = live_news_score(title_clean, summary, category)
-        header = live_news_header(score)
+        raw_score = live_news_score(title_clean, summary, category)
+    except Exception:
+        raw_score = 18
+
+    importance = normalize_news_importance(raw_score)
+
+    try:
+        header = live_news_header(raw_score)
     except Exception:
         header = "⚡ [실시간 시장 이슈]"
+
+    related = related_assets_for_news(title_clean, summary)
 
     btc_line_text = ""
     try:
@@ -2359,7 +2517,7 @@ async def build_live_news_message(session: aiohttp.ClientSession, category_emoji
             btc_price = float(btc["lastPrice"])
             btc_pct = float(btc["priceChangePercent"])
             btc_line_text = (
-                "\\n\\n📊 현재 BTC:\\n"
+                "\n\n📊 현재 BTC:\n"
                 f"{btc_price:,.0f} USDT ({fmt_pct(btc_pct)})"
             )
     except Exception:
@@ -2367,9 +2525,11 @@ async def build_live_news_message(session: aiohttp.ClientSession, category_emoji
 
     return (
         compact_section(header)
-        + f"\\n{category_emoji} {title_ko}\\n\\n"
-        + f"{body_ko}\\n\\n"
-        + f"📌 시장 영향:\\n{impact}"
+        + f"\n{category_emoji} {title_ko}\n\n"
+        + f"{body_ko}\n\n"
+        + f"🔥 중요도: {importance}/10\n"
+        + f"🏷 관련: {related}\n\n"
+        + f"📌 시장 영향:\n{impact}"
         + btc_line_text
     )
 
@@ -2431,6 +2591,83 @@ async def btc_key_level_monitor(bot: Bot, state: State) -> None:
                 logging.exception("btc_key_level_monitor 오류")
 
             await asyncio.sleep(60)
+
+
+
+async def btc_move_chart_monitor(bot: Bot, state: State) -> None:
+    if not hasattr(state, "btc_move_chart_last_sent"):
+        state.btc_move_chart_last_sent = None
+        state.btc_move_chart_last_side = None
+
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                candles = await get_okx_btc_candles(session, bar="5m", limit=36)
+                if len(candles) >= 8:
+                    start_price = candles[-7][1]
+                    last_price = candles[-1][1]
+                    move_pct = ((last_price - start_price) / start_price * 100.0) if start_price else 0.0
+
+                    side = None
+                    if move_pct <= -1.2:
+                        side = "drop"
+                    elif move_pct >= 1.2:
+                        side = "pump"
+
+                    now = utc_now()
+                    cooldown_ok = True
+                    if state.btc_move_chart_last_sent:
+                        cooldown_ok = (now - state.btc_move_chart_last_sent).total_seconds() >= 60 * 30
+
+                    if side and cooldown_ok:
+                        labels = [str(i + 1) for i in range(len(candles[-18:]))]
+                        values = [round(x[1], 2) for x in candles[-18:]]
+
+                        chart = {
+                            "type": "line",
+                            "data": {
+                                "labels": labels,
+                                "datasets": [{
+                                    "label": "BTC 5m",
+                                    "data": values,
+                                    "fill": False,
+                                    "tension": 0.25
+                                }]
+                            },
+                            "options": {
+                                "plugins": {
+                                    "legend": {"display": False},
+                                    "title": {"display": True, "text": "BTC 5m chart"}
+                                }
+                            }
+                        }
+
+                        import json
+                        from urllib.parse import quote
+                        chart_url = "https://quickchart.io/chart?width=900&height=500&c=" + quote(json.dumps(chart, ensure_ascii=False))
+
+                        icon = "🔴" if side == "drop" else "🟢"
+                        word = "급락" if side == "drop" else "급등"
+                        msg = (
+                            compact_section(f"{icon} BTC {word} 감지")
+                            + f"\\n최근 30분 변동률: {fmt_pct(move_pct)}"
+                            + f"\\n현재가: {last_price:,.0f} USDT"
+                            + "\\n\\n📌 체크:"
+                            + "\\n거래량 동반 여부와 80K/79K 레벨 반응 확인."
+                        )
+
+                        try:
+                            await bot.send_photo(chat_id=CHANNEL_ID, photo=chart_url, caption=msg[:1024], parse_mode=None)
+                        except Exception:
+                            await safe_send(bot, msg, disable_preview=True)
+
+                        state.btc_move_chart_last_sent = now
+                        state.btc_move_chart_last_side = side
+
+            except Exception:
+                logging.exception("btc_move_chart_monitor 오류")
+
+            await asyncio.sleep(120)
 
 
 async def live_news_monitor(bot: Bot, state: State) -> None:
@@ -2692,6 +2929,28 @@ def build_position_message(direction: str) -> str:
     )
 
 
+
+async def ops_health_monitor(bot: Bot, state: State) -> None:
+    if not hasattr(state, "ops_health_last_sent"):
+        state.ops_health_last_sent = None
+
+    while True:
+        try:
+            now = utc_now()
+            if state.ops_health_last_sent is None or (now - state.ops_health_last_sent).total_seconds() >= 60 * 60 * 6:
+                msg = (
+                    compact_section("🟢 봇 정상 작동 중")
+                    + "\\n실시간 뉴스 · 시장 브리핑 · BTC 레벨 감지 작동 중."
+                    + "\\n문제 발생 시 Railway 로그 기준으로 점검."
+                )
+                await safe_send(bot, msg, disable_preview=True)
+                state.ops_health_last_sent = now
+        except Exception:
+            logging.exception("ops_health_monitor 오류")
+
+        await asyncio.sleep(600)
+
+
 async def run_forever() -> None:
     token, _ = resolve_telegram_token()
     if not token:
@@ -2708,6 +2967,8 @@ async def run_forever() -> None:
         asyncio.create_task(kimchi_monitor(bot, state)),
         asyncio.create_task(whale_monitor(bot, state)),
         asyncio.create_task(live_news_monitor(bot, state)),
+        asyncio.create_task(ops_health_monitor(bot, state)),
+        asyncio.create_task(btc_move_chart_monitor(bot, state)),
         asyncio.create_task(daily_digest_scheduler(bot, state)),
         asyncio.create_task(macro_pulse_monitor(bot, state)),
         asyncio.create_task(live_recap_scheduler(bot, state)),
