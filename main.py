@@ -1983,6 +1983,7 @@ def extract_entry_image_url(entry) -> Optional[str]:
 
 
 
+
 async def resolve_entry_image_url(session: aiohttp.ClientSession, entry) -> Optional[str]:
     # RSS entry에서 이미지 URL만 안전하게 뽑는다. 자기 자신을 다시 호출하지 않는다.
     try:
@@ -1994,7 +1995,7 @@ async def resolve_entry_image_url(session: aiohttp.ClientSession, entry) -> Opti
 
     try:
         summary = getattr(entry, "summary", "") or ""
-        m = re.search(r'<img[^>]+src=["\\']([^"\\']+)["\\']', summary)
+        m = re.search(r"<img[^>]+src=['\"]([^'\"]+)['\"]", summary)
         if m:
             url = m.group(1)
             if url.startswith("http"):
