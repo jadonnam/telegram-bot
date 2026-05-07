@@ -911,7 +911,7 @@ async def build_korean_news_message(session: aiohttp.ClientSession, title: str, 
         f"리스크: 뉴스 직후 과한 추격은 변동성에 휘말릴 수 있음.\n"
         f"대응: BTC 가격 반응과 거래량 동반 여부 확인."
         f"{btc_line}\n\n"
-        f"출처: {source}\n"
+        f" {source}\n"
         f"{link}"
     )
     return telegram_msg, build_threads_text(title_ko, title, summary)
@@ -1339,11 +1339,14 @@ def fear_greed_zone(value: int) -> str:
 
 def market_one_liner(btc_24h_pct: float) -> str:
     if btc_24h_pct >= 2.0:
-        return "BTC 저항선 테스트 중. 돌파 유지 여부가 핵심."
+        return "매수세가 다시 붙는 구간. 돌파 후 거래량 유지가 핵심."
     if btc_24h_pct <= -2.0:
-        return "변동성 확대 구간. 지지선 반응 확인 필요."
-    return "방향성 탐색 구간. 거래량 동반 여부가 핵심."
-
+        return "변동성 커진 구간. 지금은 반등보다 지지선 확인이 먼저."
+    if btc_24h_pct >= 0.3:
+        return "위험자산 분위기 살아나는 중. 거래량 붙으면 추가 반등 가능."
+    if btc_24h_pct <= -0.3:
+        return "살짝 눌리는 흐름. 급락보다 지지 확인 구간에 가까움."
+    return "큰 방향은 아직 안 나왔고, 수급 붙는 쪽으로 시장이 움직일 가능성 큼."
 
 
 async def briefing_scheduler(bot: Bot, state: State) -> None:
@@ -1481,7 +1484,7 @@ def us_open_conclusion(sp_pct: float, nq_pct: float, dxy_pct: float, tnx_pct: fl
         return "나스닥 선물이 약함. 장 초반 기술주 매도 압력부터 확인 필요."
     if dxy_pct > 0.25 or tnx_pct > 0.25:
         return "달러·금리 부담이 있어서 초반 변동성 커질 수 있음."
-    return "방향은 아직 애매함. 첫 30분 거래량 붙는 쪽이 오늘 흐름."
+    return "큰 방향은 아직 안 나왔지만, 첫 30분 수급 붙는 쪽이 오늘 흐름을 만들 가능성 큼."
 
 
 def us_close_conclusion(sp_pct: float, nq_pct: float, dji_pct: float) -> str:
@@ -1984,8 +1987,8 @@ def extract_entry_image_url(entry) -> Optional[str]:
 
 
 
+
 async def resolve_entry_image_url(session: aiohttp.ClientSession, entry) -> Optional[str]:
-    # RSS entry에서 이미지 URL만 안전하게 뽑는다. 자기 자신을 다시 호출하지 않는다.
     try:
         image_url = extract_entry_image_url(entry)
         if image_url:
@@ -2054,22 +2057,67 @@ def build_news_body_line(category: str, title: str, summary: str, impact: str) -
     return impact
 
 
+
+def clean_news_body_for_message(title: str, summary: str, source: str = "") -> str:
+    title_clean = html_clean(strip_news_source_tail(title or ""), 220).strip()
+    body = html_clean(summary or "", 260).strip()
+
+    body = re.sub(r"https?://\S+", "", body)
+    body = body.replace("&nbsp;", " ").replace("... -", "").strip()
+
+    for s in (source, "Google News", "조선일보", "한국경제", "경향신문", "blog.google", "Korea IT Times"):
+        if s:
+            body = body.replace(str(s), "").strip()
+
+    if title_clean and body:
+        body_no_space = re.sub(r"\s+", "", body)
+        title_no_space = re.sub(r"\s+", "", title_clean)
+        if body_no_space == title_no_space or title_no_space in body_no_space[: len(title_no_space) + 20]:
+            body = ""
+
+    if len(body) < 18:
+        body = ""
+
+    return body.strip()
+
+
+def live_news_header(score: int) -> str:
+    if score >= 26:
+        return "🚨 중요 실시간 시장 이슈"
+    if score >= 18:
+        return "⚡ 실시간 시장 이슈"
+    return "🟡 체크 실시간 시장 이슈"
+
+
+
 async def build_live_news_message(session: aiohttp.ClientSession, category_emoji: str, category: str, title: str, summary: str, source: str) -> str:
-    title_ko = await ensure_korean_text(session, strip_news_source_tail(title))
-    impact = build_market_impact_line(category, title, summary)
-    body = build_news_body_line(category, title_ko, summary, impact)
-    if mostly_english(body):
-        body = await ensure_korean_text(session, body)
-    importance = news_importance_label(title, summary)
+    title_clean = strip_news_source_tail(title or "")
+    title_ko = await ensure_korean_text(session, title_clean)
+
+    summary_clean = clean_news_body_for_message(title_clean, summary, source)
+    impact = build_market_impact_line(category, title_clean, summary)
+
+    if summary_clean and not mostly_english(summary_clean):
+        body_ko = await ensure_korean_text(session, summary_clean)
+        if body_ko.strip() == title_ko.strip():
+            body_ko = impact
+    else:
+        body_ko = impact
+
+    score = live_news_score(title_clean, summary, category)
+    header = live_news_header(score)
 
     return (
-        "━━━━━━━━━━━━━━\n"
-        f"{importance} 실시간 시장 이슈\n"
-        "━━━━━━━━━━━━━━\n"
-        f"{category_emoji} {title_ko}\n\n"
-        f"{body}\n\n"
-        f"📌 시장 영향:\n{impact}\n\n"
-        f"📰 출처: {compact_source_name(source)}"
+        f"{section_bar(header)}
+"
+        f"{category_emoji} {title_ko}
+
+"
+        f"{body_ko}
+
+"
+        f"📌 시장 영향:
+{impact}"
     )
 
 
@@ -2197,7 +2245,7 @@ async def live_recap_scheduler(bot: Bot, state: State) -> None:
                         top = sorted(items, key=lambda x: x[-1], reverse=True)[:3]
                         lines = ["👀 지금 시장에서 많이 보는 것"]
                         for i, (_ts, emoji, title, source, _score) in enumerate(top, 1):
-                            lines.append(f"{i}. {emoji} {strip_news_source_tail(title)}\n출처: {source}")
+                            lines.append(f"{i}. {emoji} {strip_news_source_tail(title)}\n {source}")
                         await safe_send(bot, "\n\n".join(lines), disable_preview=True)
                         state.recap_sent_keys.add(key)
             await asyncio.sleep(60)
