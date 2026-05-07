@@ -2342,17 +2342,24 @@ async def build_live_news_message(session: aiohttp.ClientSession, category_emoji
     header = live_news_header(score)
 
     btc_line_text = ""
-    try:
-        btc = await get_market_ticker(session, "BTCUSDT")
-        if btc:
-            btc_price = float(btc["lastPrice"])
-            btc_pct = float(btc["priceChangePercent"])
-            btc_line_text = "
+
+try:
+    btc = await get_market_ticker(session, "BTCUSDT")
+
+    if btc:
+        btc_price = float(btc["lastPrice"])
+        btc_pct = float(btc["priceChangePercent"])
+
+        btc_line_text = (
+            "
 
 📊 현재 BTC:
-" + f"{btc_price:,.0f} USDT ({fmt_pct(btc_pct)})"
-    except Exception:
-        btc_line_text = ""
+"
+            f"{btc_price:,.0f} USDT ({fmt_pct(btc_pct)})"
+        )
+
+except Exception:
+    btc_line_text = ""
 
     return (
         compact_section(header)
