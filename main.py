@@ -1865,40 +1865,6 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         await safe_send(bot, msg, disable_preview=True)
                         state.market_session_sent_dates[key] = now.date()
 
-                if is_korean_market_weekday(now) and is_exact_time(now, 15, 30):
-                    key = "kr_close_1530"
-                    if state.market_session_sent_dates.get(key) != now.date():
-                        kospi = await get_yahoo_snapshot(session, "%5EKS11")
-                        kosdaq = await get_yahoo_snapshot(session, "%5EKQ11")
-                        usd_krw = await get_usd_krw(session)
-                        btc_text, _ = await btc_line(session)
-
-                        msg = compact_section("🔔 한국장 마감 정리")
-                        if kospi:
-                            msg += f"\n{snapshot_line('코스피', kospi)}"
-                        if kosdaq:
-                            msg += f"\n{snapshot_line('코스닥', kosdaq)}"
-                        if usd_krw:
-                            msg += f"\n💵 달러/원: {usd_krw:,.0f}원"
-                        msg += f"\n{btc_text}"
-
-                        kp, kq = snap_pct(kospi), snap_pct(kosdaq)
-                        if kp >= 0 and kq >= 0:
-                            feature = "🟢 지수 동반 강세"
-                        elif kp >= 0 > kq:
-                            feature = "🟡 대형주 상대강세, 중소형주 약세"
-                        elif kp < 0 <= kq:
-                            feature = "🟡 종목장 성격 강화"
-                        else:
-                            feature = "🔴 지수 전반 약세"
-
-                        msg += f"\n\n📌 오늘 특징: {feature}"
-                        msg += f"\n📊 한 줄 정리: {kr_close_focus(kp, kq, usd_krw or 0)}"
-                        msg += "\n\n체크할 것:\n- 미국장 전 나스닥 선물\n- 환율 방향\n- 반도체·전력·방산 섹터 수급"
-
-                        await safe_send(bot, msg, disable_preview=True)
-                        state.market_session_sent_dates[key] = now.date()
-
                 if is_us_market_premarket_day(now) and is_exact_time(now, 21, 30):
                     key = "us_pre_2130"
                     if state.market_session_sent_dates.get(key) != now.date():
@@ -2383,67 +2349,76 @@ def live_news_header(score: int) -> str:
 
 
 
+
 # ============================================================
-# FINAL NEWSROOM QUALITY HELPERS
+# FINAL STABLE ROOM HELPERS
 # ============================================================
 
+def compact_section(title: str) -> str:
+    return "━━━━━━━━━━━━━━\n" + title + "\n━━━━━━━━━━━━━━"
+
+
+def snap_pct(snap) -> float:
+    try:
+        return float(snap[1]) if snap else 0.0
+    except Exception:
+        return 0.0
+
+
+def snapshot_line(name: str, snap, digits: int = 2) -> str:
+    if not snap:
+        return ""
+    price, pct = snap
+    return f"{move_icon(float(pct))} {name}: {float(price):,.{digits}f} ({fmt_pct(float(pct))})"
+
+
+def btc_brief_line(price: float, pct: float) -> str:
+    return f"{move_icon(pct)} BTC: {price:,.0f} USDT ({fmt_pct(pct)})"
+
+
+def market_mood_label(*pcts: float) -> str:
+    vals = []
+    for x in pcts:
+        try:
+            vals.append(float(x))
+        except Exception:
+            pass
+    if not vals:
+        return "🟡 눈치보기 장세"
+    avg = sum(vals) / len(vals)
+    if avg >= 0.55:
+        return "🟢 위험선호"
+    if avg <= -0.55:
+        return "🔴 리스크오프"
+    if max(vals) - min(vals) >= 1.0:
+        return "🟡 종목장"
+    return "🟡 눈치보기 장세"
+
+
 def polish_korean_news_text(text_value: str) -> str:
-    s = text_value or ''
+    s = text_value or ""
     fixes = {
-        '트럼프의 호르무즈 선박 구조': '호르무즈 해협 선박 지원',
-        '석유 압력': '유가 압력',
-        '공급망 지연은 여전히 ​​남아 있음': '공급망 지연 리스크는 남아있음',
-        '위험자산 반응 체크': '위험자산 반응 확인 필요',
-        '시장 영향은 가격 반응 확인하면서 봐야함.': '가격 반응과 거래량 동반 여부 확인 필요.',
-        '빅테크 움직임이라 나스닥 분위기 같이 봐야함.': 'AI·빅테크 수급이 나스닥 흐름을 좌우할 수 있음.',
+        "호르무즈 해협 선박 지원": "호르무즈 해협 선박 지원",
+        "유가 압력": "유가 압력",
+        "공급망 지연은 여전히 남아 있음": "공급망 지연 리스크는 남아있음",
+        "공급망 지연은 여전히 ​​남아 있음": "공급망 지연 리스크는 남아있음",
+        "위험자산 반응 체크": "위험자산 반응 확인 필요",
+        "빅테크 움직임이라 나스닥 분위기 같이 봐야함.": "AI·빅테크 수급이 나스닥 흐름을 좌우할 수 있음.",
+        "시장 영향은 가격 반응 확인하면서 봐야함.": "가격 반응과 거래량 동반 여부 확인 필요.",
     }
     for old, new in fixes.items():
         s = s.replace(old, new)
-    s = s.replace('\n', '
-')
-    s = re.sub(r'
-{3,}', '
-
-', s)
+    s = s.replace("\\n", "\n")
+    s = re.sub(r"\n{3,}", "\n\n", s)
     return s.strip()
+
 
 def compact_message(msg: str, limit: int = 1500) -> str:
     msg = polish_korean_news_text(msg)
     if len(msg) <= limit:
         return msg
-    return msg[:limit - 40].rstrip() + '
+    return msg[:limit - 40].rstrip() + "\n\n…내용 압축됨"
 
-…내용 압축됨'
-
-def normalize_title_for_dedupe(title: str) -> str:
-    s = (title or '').lower()
-    s = re.sub(r'https?://\S+', '', s)
-    s = re.sub(r'[^0-9a-zA-Z가-힣]+', ' ', s)
-    s = re.sub(r'(속보|단독|종합|영상|사진|update|breaking|exclusive|report)', ' ', s)
-    return re.sub(r'\s+', ' ', s).strip()[:140]
-
-def rough_news_fingerprint(title: str, summary: str = '') -> str:
-    words = [w for w in normalize_title_for_dedupe(title).split() if len(w) >= 2]
-    if len(words) < 8:
-        words += [w for w in normalize_title_for_dedupe(summary).split() if len(w) >= 2]
-    return ' '.join(words[:10])
-
-def newsroom_keyword_score(title: str, summary: str, category: str = '') -> int:
-    txt = f'{title} {summary} {category}'.lower()
-    score = 10
-    critical = ('fed','fomc','powell','파월','연준','금리','cpi','pce','실업수당','고용','전쟁','공습','미사일','호르무즈','봉쇄','etf','sec','엔비디아','nvidia','hbm','삼성전자','sk하이닉스','btc','비트코인','청산')
-    high = ('ai','반도체','데이터센터','cloud','클라우드','oil','wti','brent','유가','원유','달러','dxy','10년물','테슬라','tesla','아이온큐','ionq','양자')
-    low = ('맛집','행사','기념','인터뷰','칼럼','opinion','blog','생활','문화')
-    score += sum(3 for k in critical if k in txt)
-    score += sum(2 for k in high if k in txt)
-    score -= sum(2 for k in low if k in txt)
-    if any(k in txt for k in ('호르무즈','전쟁','공습','미사일','봉쇄')) and any(k in txt for k in ('유가','원유','wti','brent','석유')):
-        score += 5
-    if any(k in txt for k in ('엔비디아','nvidia','hbm','데이터센터')):
-        score += 4
-    if any(k in txt for k in ('cpi','pce','fomc','fed','파월','연준','금리')):
-        score += 4
-    return max(1, min(35, score))
 
 def normalize_news_importance(score: int) -> int:
     try:
@@ -2452,79 +2427,170 @@ def normalize_news_importance(score: int) -> int:
         score = 10
     return max(1, min(10, round(score / 3)))
 
+
 def live_news_header(score: int) -> str:
     if score >= 27:
-        return '🚨 시장 속보'
+        return "🚨 시장 속보"
     if score >= 20:
-        return '⚡ 실시간 시장 이슈'
-    return '🟡 체크할 시장 이슈'
+        return "⚡ 실시간 시장 이슈"
+    return "🟡 체크할 시장 이슈"
 
-def related_assets_for_news(title: str, summary: str = '') -> str:
-    txt = f'{title} {summary}'.lower()
-    if any(k in txt for k in ('호르무즈','이란','중동','원유','유가','wti','brent','석유','해운','선박','공급망')):
-        found = ['WTI · 에너지 · 해운']
-        if any(k in txt for k in ('달러','금리','인플레','물가')):
-            found.append('달러 · 금리 · 인플레')
-        if any(k in txt for k in ('방산','미사일','군함','드론','전쟁')):
-            found.append('방산 · 지정학')
-        return ' / '.join(found)
+
+def newsroom_keyword_score(title: str, summary: str, category: str = "") -> int:
+    txt = f"{title} {summary} {category}".lower()
+    score = 10
+    critical = ("fed","fomc","powell","파월","연준","금리","cpi","pce","실업수당","고용","전쟁","공습","미사일","호르무즈","봉쇄","etf","sec","엔비디아","nvidia","hbm","삼성전자","sk하이닉스","btc","비트코인","청산")
+    high = ("ai","반도체","데이터센터","cloud","클라우드","oil","wti","brent","유가","원유","달러","dxy","10년물","테슬라","tesla","아이온큐","ionq","양자")
+    low = ("맛집","행사","기념","인터뷰","칼럼","opinion","blog","생활","문화")
+    score += sum(3 for k in critical if k in txt)
+    score += sum(2 for k in high if k in txt)
+    score -= sum(2 for k in low if k in txt)
+    if any(k in txt for k in ("호르무즈","전쟁","공습","미사일","봉쇄")) and any(k in txt for k in ("유가","원유","wti","brent","석유")):
+        score += 5
+    if any(k in txt for k in ("엔비디아","nvidia","hbm","데이터센터")):
+        score += 4
+    if any(k in txt for k in ("cpi","pce","fomc","fed","파월","연준","금리")):
+        score += 4
+    return max(1, min(35, score))
+
+
+def clean_news_body_for_message(title: str, summary: str, source: str = "") -> str:
+    title_clean = html_clean(strip_news_source_tail(title or ""), 220).strip()
+    body = html_clean(summary or "", 300).strip()
+    body = re.sub(r"https?://\S+", "", body)
+    body = body.replace(" ", " ").replace("…", "...").strip()
+
+    for s in (source, "Google News", "조선일보", "한국경제", "경향신문", "blog.google", "Korea IT Times", "프라임경제", "Reuters", "로이터"):
+        if s:
+            body = body.replace(str(s), "").strip()
+
+    body = polish_korean_news_text(body)
+
+    if title_clean and body:
+        body_no_space = re.sub(r"\s+", "", body)
+        title_no_space = re.sub(r"\s+", "", title_clean)
+        if body_no_space == title_no_space or title_no_space in body_no_space[: len(title_no_space) + 30]:
+            return ""
+
+    if len(body) < 18:
+        return ""
+    return body.strip()
+
+
+def related_assets_for_news(title: str, summary: str = "") -> str:
+    txt = f"{title} {summary}".lower()
+
+    if any(k in txt for k in ("호르무즈","이란","중동","원유","유가","wti","brent","석유","해운","선박","공급망")):
+        found = ["WTI · 에너지 · 해운"]
+        if any(k in txt for k in ("달러","금리","인플레","물가")):
+            found.append("달러 · 금리 · 인플레")
+        if any(k in txt for k in ("방산","미사일","군함","드론","전쟁")):
+            found.append("방산 · 지정학")
+        return " / ".join(found)
+
     pairs = [
-        (('nvidia','엔비디아','gpu','ai칩','hbm'), 'NVDA · 반도체 · AI'),
-        (('samsung','삼성전자','삼전','sk하이닉스','하이닉스'), '삼성전자 · SK하이닉스 · HBM'),
-        (('amd',), 'AMD · 반도체'),
-        (('google','alphabet','구글','알파벳'), 'GOOGL · 클라우드 · AI'),
-        (('amazon','아마존','aws'), 'AMZN · 클라우드 · 소비'),
-        (('microsoft','마이크로소프트','openai'), 'MSFT · AI · 클라우드'),
-        (('tesla','테슬라','로보택시'), 'TSLA · 전기차 · AI'),
-        (('ionq','아이온큐','quantum','양자'), 'IONQ · 양자컴퓨터'),
-        (('gold','금값','금','dxy'), '금 · 달러 · 금리'),
-        (('bitcoin','btc','비트코인','crypto','코인'), 'BTC · ETH · SOL'),
-        (('kospi','코스피','외국인','환율'), 'KOSPI · 환율 · 외국인 수급'),
+        (("nvidia","엔비디아","gpu","ai칩","hbm"), "NVDA · 반도체 · AI"),
+        (("samsung","삼성전자","삼전","sk하이닉스","하이닉스"), "삼성전자 · SK하이닉스 · HBM"),
+        (("amd",), "AMD · 반도체"),
+        (("google","alphabet","구글","알파벳"), "GOOGL · 클라우드 · AI"),
+        (("amazon","아마존","aws"), "AMZN · 클라우드 · 소비"),
+        (("microsoft","마이크로소프트","openai"), "MSFT · AI · 클라우드"),
+        (("tesla","테슬라","로보택시"), "TSLA · 전기차 · AI"),
+        (("ionq","아이온큐","quantum","양자"), "IONQ · 양자컴퓨터"),
+        (("gold","금값","금","dxy"), "금 · 달러 · 금리"),
+        (("bitcoin","btc","비트코인","crypto","코인"), "BTC · ETH · SOL"),
+        (("kospi","코스피","외국인","환율"), "KOSPI · 환율 · 외국인 수급"),
     ]
+
     found = []
     for keys, label in pairs:
         if any(k in txt for k in keys):
             found.append(label)
-    return ' / '.join(found[:3]) if found else '시장 전체 · 관련 섹터 확인'
+    return " / ".join(found[:3]) if found else "시장 전체 · 관련 섹터 확인"
+
 
 def impact_one_liner(category: str, title: str, summary: str) -> str:
-    txt = f'{title} {summary} {category}'.lower()
-    if any(k in txt for k in ('호르무즈','유가','원유','wti','brent','석유','해운')):
-        return '유가·해운·인플레 압력으로 번질 수 있어 위험자산 반응 확인 필요.'
-    if any(k in txt for k in ('엔비디아','nvidia','hbm','반도체','데이터센터')):
-        return 'AI·반도체 수급에 직접 연결될 수 있어 삼성전자·SK하이닉스 흐름 확인 필요.'
-    if any(k in txt for k in ('fed','fomc','파월','연준','금리','cpi','pce','실업수당','고용')):
-        return '금리 기대와 달러 방향을 바꿀 수 있어 나스닥·BTC 동반 반응 확인 필요.'
-    if any(k in txt for k in ('bitcoin','btc','비트코인','etf','sec')):
-        return '비트코인 수급에 직접 영향 줄 수 있어 현물 ETF·거래량 반응 확인 필요.'
+    txt = f"{title} {summary} {category}".lower()
+
+    if any(k in txt for k in ("호르무즈","유가","원유","wti","brent","석유","해운")):
+        return "유가·해운·인플레 압력으로 번질 수 있어 위험자산 반응 확인 필요."
+    if any(k in txt for k in ("엔비디아","nvidia","hbm","반도체","데이터센터")):
+        return "AI·반도체 수급에 직접 연결될 수 있어 삼성전자·SK하이닉스 흐름 확인 필요."
+    if any(k in txt for k in ("fed","fomc","파월","연준","금리","cpi","pce","실업수당","고용")):
+        return "금리 기대와 달러 방향을 바꿀 수 있어 나스닥·BTC 동반 반응 확인 필요."
+    if any(k in txt for k in ("bitcoin","btc","비트코인","etf","sec")):
+        return "비트코인 수급에 직접 영향 줄 수 있어 현물 ETF·거래량 반응 확인 필요."
+
     try:
         return polish_korean_news_text(build_market_impact_line(category, title, summary))
     except Exception:
-        return '가격 반응과 거래량 동반 여부 확인 필요.'
+        return "가격 반응과 거래량 동반 여부 확인 필요."
+
+
+def kr_open_focus(nq_pct: float, sox_pct: float, usd_krw: float) -> str:
+    if nq_pct >= 0.4 or sox_pct >= 0.8:
+        return "미국 AI·반도체 강세 영향 이어지는 중.\n오늘 한국장은 외국인 수급 + 반도체 흐름 먼저 체크해야함."
+    if nq_pct <= -0.4:
+        return "나스닥 쪽 부담이 남아있음.\n장 초반 추격보다 반도체 방어력 확인이 먼저."
+    if usd_krw >= 1450:
+        return "환율이 높은 구간이라 외국인 수급이 오늘 방향을 정할 가능성 큼."
+    return "큰 방향보다 수급 확인이 먼저.\n장 초반 30분은 무리하지 않는 구간."
+
+
+def us_pre_focus(nq_pct: float, dxy_pct: float, tnx_pct: float) -> str:
+    if nq_pct >= 0.4:
+        return "나스닥 선물이 강함.\n오늘도 AI·빅테크 쪽으로 돈이 붙는지 봐야함."
+    if nq_pct <= -0.4:
+        return "나스닥 선물이 약함.\n장 초반 기술주 매도 압력부터 확인 필요."
+    if dxy_pct > 0.25 or tnx_pct > 0.25:
+        return "달러·금리 부담이 있어서 초반 변동성 커질 수 있음."
+    return "큰 방향은 아직 안 나왔지만,\n첫 30분 수급 붙는 쪽이 오늘 흐름을 만들 가능성 큼."
+
+
+def us_close_focus(nq_pct: float, sox_pct: float, nvda_pct: float) -> str:
+    if sox_pct >= 1.0 or nvda_pct >= 1.5:
+        return "AI·반도체 쪽으로 다시 수급 몰리는 분위기.\n특히 HBM·데이터센터 관련주 강세 계속 이어지는 중."
+    if nq_pct >= 0.5:
+        return "나스닥 상대강세.\nAI·빅테크 수급이 한국장까지 이어질지 체크."
+    if nq_pct <= -0.5:
+        return "기술주 쪽 부담이 남아있음.\n한국장은 반도체 방어력부터 확인 필요."
+    return "지수별 온도차가 있는 장.\n한국장은 환율과 반도체 수급이 방향을 정할 가능성."
+
+
+def kr_close_focus(kospi_pct: float, kosdaq_pct: float, usd_krw: float) -> str:
+    if kospi_pct >= 0.5 and kosdaq_pct >= 0.3:
+        return "지수 동반 강세. 내일도 외국인 수급과 반도체 흐름이 핵심."
+    if kospi_pct >= 0.5 and kosdaq_pct < 0:
+        return "대형주 쪽으로 돈이 몰린 장. 삼성전자·하이닉스 수급 확인 필요."
+    if kospi_pct < 0 and kosdaq_pct < 0:
+        return "전반적으로 힘이 빠진 장. 환율과 미국 선물 반응이 더 중요해짐."
+    if usd_krw >= 1450:
+        return "환율 부담이 남아있어서 종목보다 수급 방향 확인이 우선."
+    return "지수보다 종목장 성격이 강한 하루. 강한 섹터만 살아남는 흐름."
 
 
 async def build_live_news_message(session: aiohttp.ClientSession, category_emoji: str, category: str, title: str, summary: str, source: str) -> str:
-    title_clean = strip_news_source_tail(title or '')
+    title_clean = strip_news_source_tail(title or "")
     title_ko = await ensure_korean_text(session, polish_korean_news_text(title_clean))
 
     try:
         body = clean_news_body_for_message(title_clean, summary, source)
     except Exception:
-        body = ''
+        body = ""
 
     impact = impact_one_liner(category, title_clean, summary)
 
-    body_ko = ''
+    body_ko = ""
     if body and not mostly_english(body):
         try:
             body_ko = await ensure_korean_text(session, body)
             body_ko = polish_korean_news_text(body_ko)
         except Exception:
-            body_ko = ''
+            body_ko = ""
 
-    body_norm = re.sub(r'\s+', '', body_ko or '')
-    title_norm = re.sub(r'\s+', '', title_ko or '')
-    impact_norm = re.sub(r'\s+', '', impact or '')
+    body_norm = re.sub(r"\s+", "", body_ko or "")
+    title_norm = re.sub(r"\s+", "", title_ko or "")
+    impact_norm = re.sub(r"\s+", "", impact or "")
 
     show_body = bool(body_ko)
     if body_norm == title_norm or body_norm == impact_norm:
@@ -2542,28 +2608,28 @@ async def build_live_news_message(session: aiohttp.ClientSession, category_emoji
     header = live_news_header(raw_score)
     related = related_assets_for_news(title_clean, summary)
 
-    btc_line_text = ''
+    btc_line_text = ""
     try:
-        btc = await get_market_ticker(session, 'BTCUSDT')
+        btc = await get_market_ticker(session, "BTCUSDT")
         if btc:
-            btc_price = float(btc['lastPrice'])
-            btc_pct = float(btc['priceChangePercent'])
+            btc_price = float(btc["lastPrice"])
+            btc_pct = float(btc["priceChangePercent"])
             btc_line_text = (
-                '\n\n📊 현재 BTC:\n'
-                f'{btc_price:,.0f} USDT ({fmt_pct(btc_pct)})'
+                "\n\n📊 현재 BTC:\n"
+                f"{btc_price:,.0f} USDT ({fmt_pct(btc_pct)})"
             )
     except Exception:
-        btc_line_text = ''
+        btc_line_text = ""
 
     msg = compact_section(header)
-    msg += f'\n{category_emoji} {title_ko}\n'
+    msg += f"\n{category_emoji} {title_ko}\n"
 
     if show_body:
-        msg += f'\n{body_ko}\n'
+        msg += f"\n{body_ko}\n"
 
-    msg += f'\n🔥 중요도: {importance}/10'
-    msg += f'\n🏷 관련: {related}'
-    msg += f'\n\n📌 시장 영향:\n{impact}'
+    msg += f"\n🔥 중요도: {importance}/10"
+    msg += f"\n🏷 관련: {related}"
+    msg += f"\n\n📌 시장 영향:\n{impact}"
     msg += btc_line_text
 
     return compact_message(msg, limit=1500)
