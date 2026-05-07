@@ -1998,11 +1998,18 @@ async def resolve_entry_image_url(session: aiohttp.ClientSession, entry) -> Opti
 
     try:
         summary = getattr(entry, "summary", "") or ""
-        m = re.search(r"<img[^>]+src=['\"]([^'\"]+)['\"]", summary)
+
+        m = re.search(
+            r"<img[^>]+src=['\\"]([^'\\"]+)['\\"]",
+            summary
+        )
+
         if m:
             url = m.group(1)
+
             if url.startswith("http"):
                 return url
+
     except Exception:
         pass
 
@@ -2094,30 +2101,38 @@ async def build_live_news_message(session: aiohttp.ClientSession, category_emoji
     title_clean = strip_news_source_tail(title or "")
     title_ko = await ensure_korean_text(session, title_clean)
 
-    summary_clean = clean_news_body_for_message(title_clean, summary, source)
     impact = build_market_impact_line(category, title_clean, summary)
 
-    if summary_clean and not mostly_english(summary_clean):
-        body_ko = await ensure_korean_text(session, summary_clean)
-        if body_ko.strip() == title_ko.strip():
-            body_ko = impact
+    body = html_clean(summary or "", 240).strip()
+    body = re.sub(r"https?://\S+", "", body)
+
+    if body:
+        body_ko = await ensure_korean_text(session, body)
     else:
         body_ko = impact
 
+    if body_ko.strip() == title_ko.strip():
+        body_ko = impact
+
     score = live_news_score(title_clean, summary, category)
-    header = live_news_header(score)
+
+    if score >= 26:
+        header = "🚨 중요 실시간 시장 이슈"
+    elif score >= 18:
+        header = "⚡ 실시간 시장 이슈"
+    else:
+        header = "🟡 체크 실시간 시장 이슈"
+
+    btc_price = await get_btc_price(session)
+    btc_pct = await get_btc_change_pct(session)
 
     return (
-        f"{section_bar(header)}
-"
-        f"{category_emoji} {title_ko}
-
-"
-        f"{body_ko}
-
-"
-        f"📌 시장 영향:
-{impact}"
+        section_bar(header) + "\n"
+        + f"{category_emoji} {title_ko}\n\n"
+        + f"{body_ko}\n\n"
+        + "📌 시장 영향:\n"
+        + f"{impact}\n\n"
+        + f"📊 현재 BTC:\n{btc_price:,.0f} USDT ({fmt_pct(btc_pct)})"
     )
 
 
