@@ -1349,9 +1349,135 @@ def market_one_liner(btc_24h_pct: float) -> str:
     return "큰 방향은 아직 안 나왔고, 수급 붙는 쪽으로 시장이 움직일 가능성 큼."
 
 
+
+# ============================================================
+# FINAL MESSAGE STYLE HELPERS
+# ============================================================
+
+def compact_section(title: str) -> str:
+    return f"━━━━━━━━━━━━━━\n{title}\n━━━━━━━━━━━━━━"
+
+
+def snap_pct(snap) -> float:
+    return float(snap[1]) if snap else 0.0
+
+
+def snapshot_line(name: str, snap, digits: int = 2) -> str:
+    if not snap:
+        return ""
+    price, pct = snap
+    return f"{move_icon(float(pct))} {name}: {float(price):,.{digits}f} ({fmt_pct(float(pct))})"
+
+
+def btc_brief_line(price: float, pct: float) -> str:
+    return f"{move_icon(pct)} BTC: {price:,.0f} USDT ({fmt_pct(pct)})"
+
+
+def market_mood_label(*pcts: float) -> str:
+    vals = [float(x) for x in pcts if x is not None]
+    if not vals:
+        return "🟡 눈치보기 장세"
+    avg = sum(vals) / len(vals)
+    if avg >= 0.55:
+        return "🟢 위험선호"
+    if avg <= -0.55:
+        return "🔴 리스크오프"
+    if max(vals) - min(vals) >= 1.0:
+        return "🟡 종목장"
+    return "🟡 눈치보기 장세"
+
+
+def clean_news_body_for_message(title: str, summary: str, source: str = "") -> str:
+    title_clean = html_clean(strip_news_source_tail(title or ""), 220).strip()
+    body = html_clean(summary or "", 280).strip()
+    body = re.sub(r"https?://\S+", "", body)
+    body = body.replace("&nbsp;", " ").replace("…", "...").strip()
+
+    for s in (source, "Google News", "조선일보", "한국경제", "경향신문", "blog.google", "Korea IT Times"):
+        if s:
+            body = body.replace(str(s), "").strip()
+
+    if title_clean and body:
+        body_no_space = re.sub(r"\s+", "", body)
+        title_no_space = re.sub(r"\s+", "", title_clean)
+        if body_no_space == title_no_space or title_no_space in body_no_space[: len(title_no_space) + 30]:
+            return ""
+
+    if len(body) < 18:
+        return ""
+    return body.strip()
+
+
+def live_news_header(score: int) -> str:
+    if score >= 26:
+        return "🚨 중요 실시간 시장 이슈"
+    if score >= 18:
+        return "⚡ 실시간 시장 이슈"
+    return "🟡 체크 실시간 시장 이슈"
+
+
+def market_one_liner(btc_24h_pct: float) -> str:
+    if btc_24h_pct >= 2.0:
+        return "매수세가 다시 붙는 구간. 돌파 후 거래량 유지가 핵심."
+    if btc_24h_pct <= -2.0:
+        return "변동성 커진 구간. 지금은 반등보다 지지선 확인이 먼저."
+    if btc_24h_pct >= 0.3:
+        return "위험자산 분위기 살아나는 중. 거래량 붙으면 추가 반등 가능."
+    if btc_24h_pct <= -0.3:
+        return "살짝 눌리는 흐름. 급락보다 지지 확인 구간에 가까움."
+    return "큰 방향은 아직 안 나왔고, 수급 붙는 쪽으로 시장이 움직일 가능성 큼."
+
+
+def kr_open_focus(nq_pct: float, sox_pct: float, usd_krw: float) -> str:
+    if nq_pct >= 0.4 or sox_pct >= 0.8:
+        return "미국 AI·반도체 강세 영향 이어지는 중.\n오늘 한국장은 외국인 수급 + 반도체 흐름 먼저 체크해야함."
+    if nq_pct <= -0.4:
+        return "나스닥 쪽 부담이 남아있음.\n장 초반 추격보다 반도체 방어력 확인이 먼저."
+    if usd_krw >= 1450:
+        return "환율이 높은 구간이라 외국인 수급이 오늘 방향을 정할 가능성 큼."
+    return "큰 방향보다 수급 확인이 먼저.\n장 초반 30분은 무리하지 않는 구간."
+
+
+def kr_close_focus(kospi_pct: float, kosdaq_pct: float, usd_krw: float) -> str:
+    if kospi_pct >= 0.5 and kosdaq_pct >= 0.3:
+        return "지수 동반 강세. 내일도 외국인 수급과 반도체 흐름이 핵심."
+    if kospi_pct >= 0.5 and kosdaq_pct < 0:
+        return "대형주 쪽으로 돈이 몰린 장. 삼성전자·하이닉스 수급 확인 필요."
+    if kospi_pct < 0 and kosdaq_pct < 0:
+        return "전반적으로 힘이 빠진 장. 환율과 미국 선물 반응이 더 중요해짐."
+    if usd_krw >= 1450:
+        return "환율 부담이 남아있어서 종목보다 수급 방향 확인이 우선."
+    return "지수보다 종목장 성격이 강한 하루. 강한 섹터만 살아남는 흐름."
+
+
+def us_close_focus(nq_pct: float, sox_pct: float, nvda_pct: float) -> str:
+    if sox_pct >= 1.0 or nvda_pct >= 1.5:
+        return "AI·반도체 쪽으로 다시 수급 몰리는 분위기.\n특히 HBM·데이터센터 관련주 강세 계속 이어지는 중."
+    if nq_pct >= 0.5:
+        return "나스닥 상대강세.\nAI·빅테크 수급이 한국장까지 이어질지 체크."
+    if nq_pct <= -0.5:
+        return "기술주 쪽 부담이 남아있음.\n한국장은 반도체 방어력부터 확인 필요."
+    return "지수별 온도차가 있는 장.\n한국장은 환율과 반도체 수급이 방향을 정할 가능성."
+
+
+def us_pre_focus(nq_pct: float, dxy_pct: float, tnx_pct: float) -> str:
+    if nq_pct >= 0.4:
+        return "나스닥 선물이 강함.\n오늘도 AI·빅테크 쪽으로 돈이 붙는지 봐야함."
+    if nq_pct <= -0.4:
+        return "나스닥 선물이 약함.\n장 초반 기술주 매도 압력부터 확인 필요."
+    if dxy_pct > 0.25 or tnx_pct > 0.25:
+        return "달러·금리 부담이 있어서 초반 변동성 커질 수 있음."
+    return "큰 방향은 아직 안 나왔지만,\n첫 30분 수급 붙는 쪽이 오늘 흐름을 만들 가능성 큼."
+
+
+def impact_one_liner(category: str, title: str, summary: str) -> str:
+    impact = build_market_impact_line(category, title, summary)
+    impact = impact.replace("시장 영향은 가격 반응 확인하면서 봐야함.", "가격 반응과 거래량 붙는지 확인 필요.")
+    return impact
+
+
+
 async def briefing_scheduler(bot: Bot, state: State) -> None:
-    # 08 / 12 / 21 정기 시장 브리핑.
-    # 단순 가격 나열이 아니라 현재 시장 톤을 같이 보낸다.
     slots = {
         "08": (8, "🌅 오전 시장 체크"),
         "12": (12, "☀️ 점심 시장 체크"),
@@ -1377,18 +1503,26 @@ async def briefing_scheduler(bot: Bot, state: State) -> None:
 
                         fng = await get_fear_greed(session)
                         kimchi = await get_kimchi_premium(session)
+                        nq_fut = await get_yahoo_snapshot(session, "NQ%3DF")
+                        wti = await get_yahoo_snapshot(session, "CL%3DF")
+                        sox = await get_yahoo_snapshot(session, "%5ESOX")
 
                         btc_price, btc_pct = tickers["BTCUSDT"]
                         eth_price, eth_pct = tickers.get("ETHUSDT", (0, 0))
                         sol_price, sol_pct = tickers.get("SOLUSDT", (0, 0))
-                        line = market_one_liner(btc_pct)
 
-                        msg = (
-                            f"{section_bar(title)}\n"
-                            f"{fmt_btc_line(btc_price, btc_pct)}\n"
-                            f"{move_icon(eth_pct)} ETH: {eth_price:,.0f} USDT ({fmt_pct(eth_pct)})\n"
-                            f"{move_icon(sol_pct)} SOL: {sol_price:,.0f} USDT ({fmt_pct(sol_pct)})"
-                        )
+                        msg = compact_section(title)
+                        msg += f"\n{btc_brief_line(btc_price, btc_pct)}"
+                        msg += f"\n{move_icon(eth_pct)} ETH: {eth_price:,.0f} USDT ({fmt_pct(eth_pct)})"
+                        msg += f"\n{move_icon(sol_pct)} SOL: {sol_price:,.0f} USDT ({fmt_pct(sol_pct)})"
+
+                        if nq_fut:
+                            msg += f"\n\n{snapshot_line('나스닥 선물', nq_fut)}"
+                        if wti:
+                            msg += f"\n{snapshot_line('WTI 유가', wti)}"
+                        if sox:
+                            msg += f"\n{snapshot_line('필라델피아 반도체지수', sox)}"
+
                         if fng:
                             fng_value, fng_label = fng
                             msg += f"\n\n😶‍🌫️ 공포탐욕지수: {fng_value} ({fng_label})"
@@ -1396,13 +1530,11 @@ async def briefing_scheduler(bot: Bot, state: State) -> None:
                             premium, _, _ = kimchi
                             msg += f"\n🇰🇷 김치프리미엄: {fmt_pct(premium)}"
 
-                        msg += (
-                            f"\n\n📌 지금 핵심:\n{line}"
-                            "\n\n체크할 것:\n"
-                            "- BTC 1차 지지선 유지 여부\n"
-                            "- ETH/SOL로 알트 수급 번지는지\n"
-                            "- 미국 선물·환율·반도체 흐름"
-                        )
+                        msg += f"\n\n📌 지금 핵심:\n{market_one_liner(btc_pct)}"
+                        msg += "\n\n체크할 것:"
+                        msg += "\n- BTC 1차 지지선 유지 여부"
+                        msg += "\n- ETH/SOL로 알트 수급 번지는지"
+                        msg += "\n- 미국 선물·환율·반도체 흐름"
 
                         await safe_send(bot, msg, disable_preview=True)
                         state.briefing_sent_dates[slot_key] = now.date()
@@ -1411,7 +1543,6 @@ async def briefing_scheduler(bot: Bot, state: State) -> None:
 
             elapsed = (utc_now() - started).total_seconds()
             await asyncio.sleep(max(5, BRIEFING_CHECK_SECONDS - int(elapsed)))
-
 
 def is_korean_market_weekday(now: datetime) -> bool:
     return now.weekday() < 5 and not is_kr_holiday_day(now)
@@ -1509,12 +1640,10 @@ def session_data_note(lines: list[str], required_min: int = 2) -> str:
     return ""
 
 
+
 async def market_session_scheduler(bot: Bot, state: State) -> None:
     def is_exact_time(now: datetime, hour: int, minute: int) -> bool:
         return now.hour == hour and now.minute == minute
-
-    def pct_or_zero(snap: Optional[Tuple[float, float]]) -> float:
-        return float(snap[1]) if snap else 0.0
 
     async def btc_line(session: aiohttp.ClientSession) -> Tuple[str, float]:
         btc = await get_market_ticker(session, "BTCUSDT")
@@ -1522,13 +1651,7 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
             return "⚪ BTC: 가격 확인 중", 0.0
         price = float(btc["lastPrice"])
         pct = float(btc["priceChangePercent"])
-        return fmt_btc_line(price, pct), pct
-
-    def add_check_block(base: str, *items: str) -> str:
-        valid = [x for x in items if x]
-        if not valid:
-            return base
-        return base + "\n\n체크할 것:\n" + "\n".join(f"- {x}" for x in valid)
+        return btc_brief_line(price, pct), pct
 
     async with aiohttp.ClientSession() as session:
         while True:
@@ -1544,33 +1667,41 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         kospi = await get_yahoo_snapshot(session, "%5EKS11")
                         kosdaq = await get_yahoo_snapshot(session, "%5EKQ11")
                         usd_krw = await get_usd_krw(session)
-                        sp_fut = await get_yahoo_snapshot(session, "ES%3DF")
                         nq_fut = await get_yahoo_snapshot(session, "NQ%3DF")
+                        wti = await get_yahoo_snapshot(session, "CL%3DF")
+                        sox = await get_yahoo_snapshot(session, "%5ESOX")
                         btc_text, _ = await btc_line(session)
+                        eth = await get_market_ticker(session, "ETHUSDT")
+                        sol = await get_market_ticker(session, "SOLUSDT")
 
-                        lines = [section_bar("🌅 한국장 오픈 브리핑")]
-                        append_if_value(lines, "코스피", kospi)
-                        append_if_value(lines, "코스닥", kosdaq)
+                        msg = compact_section("🌅 한국장 오픈 브리핑")
                         if usd_krw:
-                            lines.append(f"💵 달러/원: {usd_krw:,.2f}원")
-                        append_if_value(lines, "S&P500 선물", sp_fut)
-                        append_if_value(lines, "나스닥 선물", nq_fut)
-                        lines.append(btc_text)
+                            msg += f"\n💵 달러/원: {usd_krw:,.2f}원"
+                        msg += f"\n{btc_text}"
+                        if eth:
+                            msg += f"\n{move_icon(float(eth['priceChangePercent']))} ETH: {float(eth['lastPrice']):,.0f} USDT ({fmt_pct(float(eth['priceChangePercent']))})"
+                        if sol:
+                            msg += f"\n{move_icon(float(sol['priceChangePercent']))} SOL: {float(sol['lastPrice']):,.0f} USDT ({fmt_pct(float(sol['priceChangePercent']))})"
 
-                        mood = market_direction_label(pct_or_zero(sp_fut), pct_or_zero(nq_fut), pct_or_zero(kospi), pct_or_zero(kosdaq))
-                        conclusion = kr_open_conclusion(pct_or_zero(kospi), pct_or_zero(kosdaq), pct_or_zero(sp_fut), pct_or_zero(nq_fut), usd_krw or 0)
+                        if nq_fut:
+                            msg += f"\n\n{snapshot_line('나스닥 선물', nq_fut)}"
+                        if wti:
+                            msg += f"\n{snapshot_line('WTI 유가', wti)}"
+                        if sox:
+                            msg += f"\n{snapshot_line('필라델피아 반도체지수', sox)}"
 
-                        msg = "\n".join(lines)
-                        msg += f"\n\n📌 오늘 핵심:\n{conclusion}"
-                        msg += f"\n\n🧭 시장 분위기: {mood}"
-                        msg = add_check_block(
-                            msg,
-                            "외국인 반도체 수급",
-                            "삼성전자·SK하이닉스 장 초반 거래대금",
-                            "환율 1450원 안착 여부",
-                            "나스닥 선물 방향",
-                        )
-                        msg += "\n\n⚠️ 장 초반 30분은 추격보다 거래량 확인."
+                        fng = await get_fear_greed(session)
+                        kimchi = await get_kimchi_premium(session)
+                        if fng:
+                            fng_value, fng_label = fng
+                            msg += f"\n\n😶‍🌫️ 공포탐욕지수: {fng_value} ({fng_label})"
+                        if kimchi:
+                            premium, _, _ = kimchi
+                            msg += f"\n🇰🇷 김치프리미엄: {fmt_pct(premium)}"
+
+                        msg += f"\n\n📌 오늘 핵심:\n{kr_open_focus(snap_pct(nq_fut), snap_pct(sox), usd_krw or 0)}"
+                        msg += f"\n\n🧭 시장 분위기: {market_mood_label(snap_pct(nq_fut), snap_pct(sox), snap_pct(kospi), snap_pct(kosdaq))}"
+                        msg += "\n⚠️ 장 초반 추격매수보다 거래량 확인이 우선."
 
                         await safe_send(bot, msg, disable_preview=True)
                         state.market_session_sent_dates[key] = now.date()
@@ -1583,36 +1714,28 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         usd_krw = await get_usd_krw(session)
                         btc_text, _ = await btc_line(session)
 
-                        kp, kq = pct_or_zero(kospi), pct_or_zero(kosdaq)
-                        if kospi and kosdaq:
-                            if kp >= 0 and kq >= 0:
-                                feature = "🟢 지수 동반 강세"
-                            elif kp >= 0 > kq:
-                                feature = "🟡 대형주 상대강세, 중소형주 약세"
-                            elif kp < 0 <= kq:
-                                feature = "🟡 종목장 성격 강화"
-                            else:
-                                feature = "🔴 지수 전반 약세"
-                        else:
-                            feature = "⚪ 환율·미국 선물 흐름 확인 필요"
-
-                        lines = [section_bar("🔔 한국장 마감 정리")]
-                        append_if_value(lines, "코스피", kospi)
-                        append_if_value(lines, "코스닥", kosdaq)
+                        msg = compact_section("🔔 한국장 마감 정리")
+                        if kospi:
+                            msg += f"\n{snapshot_line('코스피', kospi)}"
+                        if kosdaq:
+                            msg += f"\n{snapshot_line('코스닥', kosdaq)}"
                         if usd_krw:
-                            lines.append(f"💵 달러/원: {usd_krw:,.0f}원")
-                        lines.append(btc_text)
+                            msg += f"\n💵 달러/원: {usd_krw:,.0f}원"
+                        msg += f"\n{btc_text}"
 
-                        conclusion = kr_close_conclusion(kp, kq, usd_krw or 0)
-                        msg = "\n".join(lines)
+                        kp, kq = snap_pct(kospi), snap_pct(kosdaq)
+                        if kp >= 0 and kq >= 0:
+                            feature = "🟢 지수 동반 강세"
+                        elif kp >= 0 > kq:
+                            feature = "🟡 대형주 상대강세, 중소형주 약세"
+                        elif kp < 0 <= kq:
+                            feature = "🟡 종목장 성격 강화"
+                        else:
+                            feature = "🔴 지수 전반 약세"
+
                         msg += f"\n\n📌 오늘 특징: {feature}"
-                        msg += f"\n📊 한 줄 정리: {conclusion}"
-                        msg = add_check_block(
-                            msg,
-                            "미국장 전 나스닥 선물",
-                            "환율 방향",
-                            "반도체·전력·방산 섹터 수급",
-                        )
+                        msg += f"\n📊 한 줄 정리: {kr_close_focus(kp, kq, usd_krw or 0)}"
+                        msg += "\n\n체크할 것:\n- 미국장 전 나스닥 선물\n- 환율 방향\n- 반도체·전력·방산 섹터 수급"
 
                         await safe_send(bot, msg, disable_preview=True)
                         state.market_session_sent_dates[key] = now.date()
@@ -1624,27 +1747,25 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         nq_fut = await get_yahoo_snapshot(session, "NQ%3DF")
                         dxy = await get_yahoo_snapshot(session, "DX-Y.NYB")
                         tnx = await get_yahoo_snapshot(session, "%5ETNX")
+                        wti = await get_yahoo_snapshot(session, "CL%3DF")
                         btc_text, _ = await btc_line(session)
 
-                        lines = [section_bar("🌆 미국장 프리뷰")]
-                        append_if_value(lines, "S&P500 선물", sp_fut)
-                        append_if_value(lines, "나스닥 선물", nq_fut)
-                        append_if_value(lines, "달러인덱스", dxy)
-                        append_if_value(lines, "10년물 금리", tnx)
-                        lines.append(btc_text)
+                        msg = compact_section("🌆 미국장 프리뷰")
+                        if sp_fut:
+                            msg += f"\n{snapshot_line('S&P500 선물', sp_fut)}"
+                        if nq_fut:
+                            msg += f"\n{snapshot_line('나스닥 선물', nq_fut)}"
+                        if wti:
+                            msg += f"\n{snapshot_line('WTI 유가', wti)}"
+                        if dxy:
+                            msg += f"\n{snapshot_line('달러인덱스', dxy)}"
+                        if tnx:
+                            msg += f"\n{snapshot_line('10년물 금리', tnx)}"
+                        msg += f"\n{btc_text}"
 
-                        mood = market_direction_label(pct_or_zero(sp_fut), pct_or_zero(nq_fut), -pct_or_zero(dxy), -pct_or_zero(tnx))
-                        conclusion = us_open_conclusion(pct_or_zero(sp_fut), pct_or_zero(nq_fut), pct_or_zero(dxy), pct_or_zero(tnx))
-                        msg = "\n".join(lines)
-                        msg += f"\n\n📌 오늘 핵심:\n{conclusion}"
-                        msg += f"\n\n🧭 미국장 분위기: {mood}"
-                        msg = add_check_block(
-                            msg,
-                            "엔비디아·빅테크 초반 수급",
-                            "나스닥 선물 방향 유지 여부",
-                            "달러·금리 동반 상승 여부",
-                            "BTC 1차 반응",
-                        )
+                        msg += f"\n\n📌 오늘 핵심:\n{us_pre_focus(snap_pct(nq_fut), snap_pct(dxy), snap_pct(tnx))}"
+                        msg += f"\n\n🧭 미국장 분위기: {market_mood_label(snap_pct(sp_fut), snap_pct(nq_fut), -snap_pct(dxy), -snap_pct(tnx))}"
+                        msg += "\n\n체크할 것:\n- 엔비디아·빅테크 초반 수급\n- 나스닥 선물 방향 유지 여부\n- 달러·금리 동반 상승 여부\n- BTC 1차 반응"
                         msg += "\n\n⚠️ 첫 30분은 방향 확인 구간."
 
                         await safe_send(bot, msg, disable_preview=True)
@@ -1656,30 +1777,28 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         spx = await get_yahoo_snapshot(session, "%5EGSPC")
                         ixic = await get_yahoo_snapshot(session, "%5EIXIC")
                         dji = await get_yahoo_snapshot(session, "%5EDJI")
+                        sox = await get_yahoo_snapshot(session, "%5ESOX")
+                        nvda = await get_yahoo_snapshot(session, "NVDA")
+                        wti = await get_yahoo_snapshot(session, "CL%3DF")
                         dxy = await get_yahoo_snapshot(session, "DX-Y.NYB")
-                        tnx = await get_yahoo_snapshot(session, "%5ETNX")
                         btc_text, _ = await btc_line(session)
 
-                        lines = [section_bar("🌙 미국장 마감 핵심 정리")]
-                        append_if_value(lines, "S&P500", spx)
-                        append_if_value(lines, "나스닥", ixic)
-                        append_if_value(lines, "다우", dji)
-                        append_if_value(lines, "달러인덱스", dxy)
-                        append_if_value(lines, "10년물 금리", tnx)
-                        lines.append(btc_text)
+                        msg = compact_section("🌙 미국장 마감 정리")
+                        msg += f"\n{btc_text}"
+                        if ixic:
+                            msg += f"\n{snapshot_line('나스닥', ixic)}"
+                        if nvda:
+                            msg += f"\n{snapshot_line('엔비디아', nvda)}"
+                        if sox:
+                            msg += f"\n{snapshot_line('필라델피아 반도체', sox)}"
+                        if wti:
+                            msg += f"\n\n{snapshot_line('WTI 유가', wti)}"
+                        if dxy:
+                            msg += f"\n{snapshot_line('달러인덱스', dxy)}"
 
-                        mood = market_direction_label(pct_or_zero(spx), pct_or_zero(ixic), pct_or_zero(dji))
-                        conclusion = us_close_conclusion(pct_or_zero(spx), pct_or_zero(ixic), pct_or_zero(dji))
-                        msg = "\n".join(lines)
-                        msg += f"\n\n📌 오늘 핵심:\n{conclusion}"
-                        msg += f"\n\n🧭 미국장 분위기: {mood}"
-                        msg = add_check_block(
-                            msg,
-                            "한국장 반도체 수급",
-                            "환율 반응",
-                            "외국인 매수 지속 여부",
-                            "AI·데이터센터·전력 테마",
-                        )
+                        msg += f"\n\n📌 오늘 핵심:\n{us_close_focus(snap_pct(ixic), snap_pct(sox), snap_pct(nvda))}"
+                        msg += f"\n\n🧭 미국장 분위기: {market_mood_label(snap_pct(spx), snap_pct(ixic), snap_pct(dji))}"
+                        msg += "\n🔥 현재 시장은 AI 섹터 중심으로 순환매가 이어지는지 확인하는 구간."
 
                         await safe_send(bot, msg, disable_preview=True)
                         state.market_session_sent_dates[key] = now.date()
@@ -1689,7 +1808,6 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
 
             elapsed = (utc_now() - started).total_seconds()
             await asyncio.sleep(max(5, MARKET_SESSION_CHECK_SECONDS - int(elapsed)))
-
 
 async def fear_greed_monitor(bot: Bot, state: State) -> None:
     async with aiohttp.ClientSession() as session:
@@ -1988,6 +2106,7 @@ def extract_entry_image_url(entry) -> Optional[str]:
 
 
 
+
 async def resolve_entry_image_url(session: aiohttp.ClientSession, entry) -> Optional[str]:
     try:
         image_url = extract_entry_image_url(entry)
@@ -1998,18 +2117,11 @@ async def resolve_entry_image_url(session: aiohttp.ClientSession, entry) -> Opti
 
     try:
         summary = getattr(entry, "summary", "") or ""
-
-        m = re.search(
-            r"<img[^>]+src=[\"']([^\"']+)[\"']",
-            summary
-        )
-
+        m = re.search(r"<img[^>]+src=[\"']([^\"']+)[\"']", summary)
         if m:
             url = m.group(1)
-
             if url.startswith("http"):
                 return url
-
     except Exception:
         pass
 
@@ -2097,42 +2209,49 @@ def live_news_header(score: int) -> str:
 
 
 
+
 async def build_live_news_message(session: aiohttp.ClientSession, category_emoji: str, category: str, title: str, summary: str, source: str) -> str:
     title_clean = strip_news_source_tail(title or "")
     title_ko = await ensure_korean_text(session, title_clean)
 
-    impact = build_market_impact_line(category, title_clean, summary)
+    body = clean_news_body_for_message(title_clean, summary, source)
+    impact = impact_one_liner(category, title_clean, summary)
 
-    body = html_clean(summary or "", 240).strip()
-    body = re.sub(r"https?://\S+", "", body)
-
-    if body:
+    if body and not mostly_english(body):
         body_ko = await ensure_korean_text(session, body)
+        if body_ko.strip() == title_ko.strip():
+            body_ko = impact
     else:
-        body_ko = impact
-
-    if body_ko.strip() == title_ko.strip():
         body_ko = impact
 
     score = live_news_score(title_clean, summary, category)
+    header = live_news_header(score)
 
-    if score >= 26:
-        header = "🚨 중요 실시간 시장 이슈"
-    elif score >= 18:
-        header = "⚡ 실시간 시장 이슈"
-    else:
-        header = "🟡 체크 실시간 시장 이슈"
+    btc_line_text = ""
+    try:
+        btc = await get_market_ticker(session, "BTCUSDT")
+        if btc:
+            btc_price = float(btc["lastPrice"])
+            btc_pct = float(btc["priceChangePercent"])
+            btc_line_text = f"
 
-    btc_price = await get_btc_price(session)
-    btc_pct = await get_btc_change_pct(session)
+📊 현재 BTC:
+{btc_price:,.0f} USDT ({fmt_pct(btc_pct)})"
+    except Exception:
+        btc_line_text = ""
 
     return (
-        section_bar(header) + "\n"
-        + f"{category_emoji} {title_ko}\n\n"
-        + f"{body_ko}\n\n"
-        + "📌 시장 영향:\n"
-        + f"{impact}\n\n"
-        + f"📊 현재 BTC:\n{btc_price:,.0f} USDT ({fmt_pct(btc_pct)})"
+        compact_section(header)
+        + f"
+{category_emoji} {title_ko}
+
+"
+        + f"{body_ko}
+
+"
+        + f"📌 시장 영향:
+{impact}"
+        + btc_line_text
     )
 
 
