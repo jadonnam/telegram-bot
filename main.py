@@ -1391,7 +1391,7 @@ def clean_news_body_for_message(title: str, summary: str, source: str = "") -> s
     title_clean = html_clean(strip_news_source_tail(title or ""), 220).strip()
     body = html_clean(summary or "", 280).strip()
     body = re.sub(r"https?://\S+", "", body)
-    body = body.replace("&nbsp;", " ").replace("…", "...").strip()
+    body = body.replace(" ", " ").replace("…", "...").strip()
 
     for s in (source, "Google News", "조선일보", "한국경제", "경향신문", "blog.google", "Korea IT Times"):
         if s:
@@ -1479,6 +1479,101 @@ def impact_one_liner(category: str, title: str, summary: str) -> str:
 
 
 
+
+
+
+# ============================================================
+# POST ERROR QUALITY HELPERS
+# ============================================================
+
+def compact_section(title: str) -> str:
+    return "━━━━━━━━━━━━━━\n" + title + "\n━━━━━━━━━━━━━━"
+
+
+def snap_pct(snap) -> float:
+    try:
+        return float(snap[1]) if snap else 0.0
+    except Exception:
+        return 0.0
+
+
+def snapshot_line(name: str, snap, digits: int = 2) -> str:
+    if not snap:
+        return ""
+    price, pct = snap
+    return f"{move_icon(float(pct))} {name}: {float(price):,.{digits}f} ({fmt_pct(float(pct))})"
+
+
+def btc_brief_line(price: float, pct: float) -> str:
+    return f"{move_icon(pct)} BTC: {price:,.0f} USDT ({fmt_pct(pct)})"
+
+
+def market_mood_label(*pcts: float) -> str:
+    vals = []
+    for x in pcts:
+        try:
+            vals.append(float(x))
+        except Exception:
+            pass
+    if not vals:
+        return "🟡 눈치보기 장세"
+    avg = sum(vals) / len(vals)
+    if avg >= 0.55:
+        return "🟢 위험선호"
+    if avg <= -0.55:
+        return "🔴 리스크오프"
+    if max(vals) - min(vals) >= 1.0:
+        return "🟡 종목장"
+    return "🟡 눈치보기 장세"
+
+
+def clean_news_body_for_message(title: str, summary: str, source: str = "") -> str:
+    title_clean = html_clean(strip_news_source_tail(title or ""), 220).strip()
+    body = html_clean(summary or "", 280).strip()
+    body = re.sub(r"https?://\S+", "", body)
+    body = body.replace(" ", " ").replace("…", "...").strip()
+
+    for s in (source, "Google News", "조선일보", "한국경제", "경향신문", "blog.google", "Korea IT Times", "프라임경제"):
+        if s:
+            body = body.replace(str(s), "").strip()
+
+    if title_clean and body:
+        body_no_space = re.sub(r"\s+", "", body)
+        title_no_space = re.sub(r"\s+", "", title_clean)
+        if body_no_space == title_no_space or title_no_space in body_no_space[: len(title_no_space) + 30]:
+            return ""
+
+    if len(body) < 18:
+        return ""
+    return body.strip()
+
+
+def live_news_header(score: int) -> str:
+    if score >= 28:
+        return "🚨 [시장 속보]"
+    if score >= 20:
+        return "⚡ [실시간 시장 이슈]"
+    return "🟡 [체크할 시장 이슈]"
+
+
+def impact_one_liner(category: str, title: str, summary: str) -> str:
+    impact = build_market_impact_line(category, title, summary)
+    impact = impact.replace("시장 영향은 가격 반응 확인하면서 봐야함.", "가격 반응과 거래량 붙는지 확인 필요.")
+    impact = impact.replace("빅테크 움직임이라 나스닥 분위기 같이 봐야함.", "AI·빅테크 수급 이어지는지 같이 체크해야함.")
+    impact = impact.replace("AI·반도체 쪽 돈 흐름 계속 체크할 자리.", "반도체·AI 관련주 변동성 확대 가능성 체크.")
+    return impact
+
+
+def market_one_liner(btc_24h_pct: float) -> str:
+    if btc_24h_pct >= 2.0:
+        return "매수세가 다시 붙는 구간. 돌파 후 거래량 유지가 핵심."
+    if btc_24h_pct <= -2.0:
+        return "변동성 커진 구간. 지금은 반등보다 지지선 확인이 먼저."
+    if btc_24h_pct >= 0.3:
+        return "위험자산 분위기 살아나는 중. 거래량 붙으면 추가 반등 가능."
+    if btc_24h_pct <= -0.3:
+        return "살짝 눌리는 흐름. 급락보다 지지 확인 구간에 가까움."
+    return "큰 방향은 아직 안 나왔고, 수급 붙는 쪽으로 시장이 움직일 가능성 큼."
 
 
 async def briefing_scheduler(bot: Bot, state: State) -> None:
@@ -1927,7 +2022,7 @@ LIVE_CATEGORY_FEEDS = (
 def html_clean(value: str, limit: int = 500) -> str:
     value = value or ""
     value = re.sub(r"<[^>]+>", " ", value)
-    value = value.replace("&nbsp;", " ").replace("&amp;", "&").replace("&quot;", '"').replace("&#39;", "'")
+    value = value.replace(" ", " ").replace("&amp;", "&").replace("&quot;", '"').replace("&#39;", "'")
     value = re.sub(r"https?://\S+", "", value)
     value = re.sub(r"\s+", " ", value).strip()
     return value[:limit].strip()
@@ -2129,33 +2224,19 @@ async def resolve_entry_image_url(session: aiohttp.ClientSession, entry) -> Opti
 
     try:
         summary = getattr(entry, "summary", "") or ""
-
-        patterns = [
-            'src="',
-            "src='"
-        ]
-
-        for marker in patterns:
+        for marker, quote in (('src="', '"'), ("src='", "'")):
             idx = summary.find(marker)
-
             if idx >= 0:
                 start = idx + len(marker)
-
-                quote = '"' if marker.endswith('"') else "'"
-
                 end = summary.find(quote, start)
-
                 if end > start:
                     url = summary[start:end]
-
                     if url.startswith("http"):
                         return url
-
     except Exception:
         pass
 
     return None
-
 
 def news_importance_label(title: str, summary: str) -> str:
     t = f"{title} {summary}".lower()
@@ -2211,7 +2292,7 @@ def clean_news_body_for_message(title: str, summary: str, source: str = "") -> s
     body = html_clean(summary or "", 260).strip()
 
     body = re.sub(r"https?://\S+", "", body)
-    body = body.replace("&nbsp;", " ").replace("... -", "").strip()
+    body = body.replace(" ", " ").replace("... -", "").strip()
 
     for s in (source, "Google News", "조선일보", "한국경제", "경향신문", "blog.google", "Korea IT Times"):
         if s:
@@ -2266,18 +2347,26 @@ async def build_live_news_message(session: aiohttp.ClientSession, category_emoji
         if btc:
             btc_price = float(btc["lastPrice"])
             btc_pct = float(btc["priceChangePercent"])
-            btc_line_text = "\n\n📊 현재 BTC:\n" + f"{btc_price:,.0f} USDT ({fmt_pct(btc_pct)})"
+            btc_line_text = "
+
+📊 현재 BTC:
+" + f"{btc_price:,.0f} USDT ({fmt_pct(btc_pct)})"
     except Exception:
         btc_line_text = ""
 
     return (
         compact_section(header)
-        + f"\n{category_emoji} {title_ko}\n\n"
-        + f"{body_ko}\n\n"
-        + f"📌 시장 영향:\n{impact}"
+        + f"
+{category_emoji} {title_ko}
+
+"
+        + f"{body_ko}
+
+"
+        + f"📌 시장 영향:
+{impact}"
         + btc_line_text
     )
-
 
 async def send_news_card(bot: Bot, text: str, image_url: Optional[str] = None) -> None:
     if image_url:
@@ -2287,6 +2376,56 @@ async def send_news_card(bot: Bot, text: str, image_url: Optional[str] = None) -
         except Exception:
             logging.warning("이미지 전송 실패. 텍스트로 대체 image=%s", image_url)
     await safe_send(bot, text, disable_preview=True)
+
+
+
+async def btc_key_level_monitor(bot: Bot, state: State) -> None:
+    if not hasattr(state, "btc_key_level_last"):
+        state.btc_key_level_last = {}
+    levels = [80000, 79000, 78000, 75000]
+
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                ticker = await get_market_ticker(session, "BTCUSDT")
+                if ticker:
+                    price = float(ticker["lastPrice"])
+                    pct = float(ticker["priceChangePercent"])
+                    now = utc_now()
+
+                    for level in levels:
+                        key = f"btc_level_{level}"
+                        last = state.btc_key_level_last.get(key, {})
+                        prev_side = last.get("side")
+                        sent_at = last.get("sent_at")
+                        side = "above" if price >= level else "below"
+
+                        cooldown_ok = True
+                        if sent_at:
+                            try:
+                                cooldown_ok = (now - sent_at).total_seconds() >= 20 * 60
+                            except Exception:
+                                cooldown_ok = True
+
+                        if prev_side and prev_side != side and cooldown_ok:
+                            direction = "회복" if side == "above" else "이탈"
+                            icon = "🟢" if side == "above" else "🔴"
+                            msg = (
+                                compact_section("⚠️ BTC 핵심 레벨 감지")
+                                + f"\n{icon} BTC {level:,.0f} USDT {direction}"
+                                + f"\n현재가: {price:,.0f} USDT ({fmt_pct(pct)})"
+                                + "\n\n📌 시장 영향:"
+                                + "\n단기 변동성 확대 구간. 추격보다 거래량 동반 여부 확인 필요."
+                            )
+                            await safe_send(bot, msg, disable_preview=True)
+                            state.btc_key_level_last[key] = {"side": side, "sent_at": now}
+                        elif not prev_side:
+                            state.btc_key_level_last[key] = {"side": side, "sent_at": None}
+
+            except Exception:
+                logging.exception("btc_key_level_monitor 오류")
+
+            await asyncio.sleep(60)
 
 
 async def live_news_monitor(bot: Bot, state: State) -> None:
@@ -2559,6 +2698,7 @@ async def run_forever() -> None:
     tasks = [
         asyncio.create_task(briefing_scheduler(bot, state)),
         asyncio.create_task(market_monitor(bot, state)),
+        asyncio.create_task(btc_key_level_monitor(bot, state)),
         asyncio.create_task(fear_greed_monitor(bot, state)),
         asyncio.create_task(kimchi_monitor(bot, state)),
         asyncio.create_task(whale_monitor(bot, state)),
