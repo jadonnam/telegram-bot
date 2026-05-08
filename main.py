@@ -2558,7 +2558,7 @@ def build_market_impact_line(category: str, title: str, summary: str) -> str:
         return "거래 관점에선 우선순위 낮음. 서비스·이벤트 소식일 수 있음."
 
     if any(k in t for k in ("hormuz", "호르무즈", "oil", "wti", "brent", "유가", "원유", "opec", "해협", "선박", "해운")):
-        return "호르무즈 긴장 완화 기대가 나오면 유가 압력은 잠깐 식을 수 있음. 다만 선박 지연이 남아있으면 해운·물류 비용은 계속 체크해야 함."
+        return "호르무즈 긴장 완화 얘기가 나오면서\n유가는 잠깐 진정되는 분위기.\n\n근데 선박 이동이 완전히 정상화된 건 아니라\n해운쪽 변동성은 아직 남아있음."
     if any(k in t for k in ("iran", "israel", "missile", "strike", "ceasefire", "sanction", "nuclear", "이란", "이스라엘", "미사일", "공습", "휴전", "제재", "핵", "전쟁", "드론")):
         return "지정학 리스크 이슈. 유가·달러·코인 변동성 커질 수 있음."
     if any(k in t for k in ("fed", "fomc", "cpi", "ppi", "interest rate", "rate cut", "powell", "연준", "금리", "물가", "파월", "국채", "수익률", "달러")):
@@ -2678,9 +2678,10 @@ def polish_korean_news_text(text_value: str) -> str:
         "호르무즈 해협 선박 지원": "호르무즈 해협 선박 지원",
         "트럼프의 호르무즈 선박 구조": "호르무즈 긴장 완화 기대",
         "석유 압력": "유가 압력",
+        "압력 완화": "진정",
         "유가 압력": "유가 압력",
-        "공급망 지연은 여전히 남아 있음": "공급망 지연 리스크는 남아있음",
-        "공급망 지연은 여전히 ​​남아 있음": "공급망 지연 리스크는 남아있음",
+        "공급망 지연은 여전히 남아 있음": "공급망 지연 이슈는 남아있음",
+        "공급망 지연은 여전히 ​​남아 있음": "공급망 지연 이슈는 남아있음",
         "위험자산 반응 체크": "위험자산 반응 확인 필요",
         "빅테크 움직임이라 나스닥 분위기 같이 봐야함.": "AI·빅테크 수급이 나스닥 흐름을 좌우할 수 있음.",
         "시장 영향은 가격 반응 확인하면서 봐야함.": "가격 반응과 거래량 동반 여부 확인 필요.",
@@ -2936,10 +2937,10 @@ async def build_live_news_message(
     msg = f"{category_emoji} {category}"
     if flag:
         msg += f" · {flag}"
-    msg += f"\n{title_ko}"
-
-    if show_snippet:
-        msg += f"\n{body_ko}"
+    if not is_geo_oil_news:
+        msg += f"\n{title_ko}"
+        if show_snippet:
+            msg += f"\n{body_ko}"
 
     rel = related_assets_for_news(title_clean, summary)
     if is_geo_oil_news:
