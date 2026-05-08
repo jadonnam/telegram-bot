@@ -1298,7 +1298,7 @@ async def market_monitor(bot: Bot, state: State) -> None:
                         coin = symbol.replace("USDT", "")
                         lines.append(f"{coin} 거래대금 x{ratio:.1f}")
                         lines.append(f"5분 거래대금 {latest_vol/1_000_000:.1f}M USDT")
-                    lines.append("추격보다 80K 유지 여부 먼저 확인.")
+                    lines.append("추격보다 80K 유지 먼저 보자.")
                     await safe_send(bot, "\n".join(lines), disable_preview=True)
             except Exception:
                 logging.exception("market_monitor 오류")
@@ -3009,46 +3009,46 @@ def styled_market_brief(category: str, title: str, summary: str) -> str:
 
     if any(k in t for k in geo_keys):
         l1 = pick_brief_line(seed + ":g1", (
-            "유가는 잠깐 진정되는 분위기.",
+            "유가는 잠깐 진정되는 쪽.",
             "유가가 급하게 튀던 구간은 조금 식는 모습.",
-            "유가가 위로 쏠리던 힘이 잠깐 쉬어가는 중.",
+            "유가가 위로 쏠리던 힘이 잠깐 쉬는 중.",
         ))
         l2 = pick_brief_line(seed + ":g2", (
-            "해운쪽 변동성은 아직 남아있음.",
+            "달러랑 해운쪽은 아직 흔들릴 수 있음.",
             "선박 이슈가 남아있어서 공급망은 계속 봐야함.",
-            "물류쪽이 완전히 풀린 건 아니라 해운은 흔들릴 수 있음.",
+            "물류가 완전히 풀린 건 아니라 해운쪽은 남아있음.",
         ))
         return f"{l1}\n\n{l2}"
 
     if any(k in t for k in semi_keys):
         l1 = pick_brief_line(seed + ":s1", (
-            "반도체쪽으로 다시 돈 들어오는 흐름.",
-            "AI 서버·칩 쪽에 수급이 다시 붙는 구간.",
-            "HBM/서버 투자 라인으로 매수세가 몰리는 모습.",
+            "반도체쪽으로 다시 돈 들어오는 구간.",
+            "AI 서버·칩 쪽으로 수급이 붙는 중.",
+            "HBM/서버 투자 라인으로 매수세가 몰리는 편.",
         ))
         l2 = pick_brief_line(seed + ":s2", (
-            "외국인 수급이 이어지는지가 핵심.",
-            "Capex가 꺾이지 않는지 보면 됨.",
-            "전력·인프라까지 같이 강한지 확인하면 됨.",
+            "외국인 수급이 계속 붙는지가 핵심.",
+            "Capex가 꺾이는지만 보면 됨.",
+            "전력 라인까지 같이 받쳐주면 더 좋음.",
         ))
         return f"{l1}\n\n{l2}"
 
     if category == "코인" and any(k in t for k in coin_keys):
         l1 = pick_brief_line(seed + ":c1", (
             "BTC는 핵심 구간 안착 여부가 더 중요.",
-            "ETF/청산 이슈라 가격대 유지력이 포인트.",
+            "ETF/청산 이슈라 버티는 힘이 포인트.",
             "위아래 흔들려도 지지선 지키는지가 먼저.",
         ))
         l2 = pick_brief_line(seed + ":c2", (
             "알트까지 수급 번지는지 보는 중.",
+            "ETF 쪽 자금이 실제로 들어오는지 봐야함.",
             "거래량이 같이 붙어야 탄력이 이어짐.",
-            "위험자산 심리와 같이 움직이는지 확인하면 됨.",
         ))
         return f"{l1}\n\n{l2}"
 
     if any(k in t for k in earn_keys):
         l1 = pick_brief_line(seed + ":e1", (
-            "가이던스가 상향이면 분위기는 나쁘지 않음.",
+            "가이던스가 상향이면 그림은 나쁘지 않음.",
             "실적 숫자보다 콜에서 나온 톤이 더 중요.",
             "매출보다 다음 분기 가이던스에 반응하는 장.",
         ))
@@ -3062,12 +3062,12 @@ def styled_market_brief(category: str, title: str, summary: str) -> str:
     if category == "한국" or any(k in t for k in kr_keys):
         l1 = pick_brief_line(seed + ":k1", (
             "오늘은 외국인 방향이 중요해보임.",
-            "환율이랑 외국인 수급이 장 색깔을 정할 듯.",
+            "환율이랑 외국인 수급이 장 색깔을 정하는 날.",
             "기관보다 외국인 매매 강도가 먼저 보이는 장.",
         ))
         l2 = pick_brief_line(seed + ":k2", (
-            "반도체가 계속 강하면 코스피도 버틸 가능성이 큼.",
-            "환율만 과하게 튀지 않으면 지수 방어는 가능해보임.",
+            "반도체가 계속 강하면 코스피도 버틸 수 있음.",
+            "환율만 과하게 튀지 않으면 지수는 버틸 만함.",
             "삼성전자·하이닉스만 무너지지 않으면 하단은 지켜질 수 있음.",
         ))
         return f"{l1}\n\n{l2}"
@@ -3207,12 +3207,12 @@ async def build_live_news_message(
     else:
         meta: list[str] = []
         if importance >= 7:
-            meta.append(f"{importance}/10")
+            meta.append(f"중요도 {importance}/10")
         if rel and importance >= 6:
             meta.append(rel)
         if meta:
             msg += "\n" + " · ".join(meta)
-        msg += f"\n브리핑: {brief}"
+        msg += f"\n{brief}"
 
     if category == "코인" and importance >= LIVE_BTC_MIN_IMPORTANCE:
         try:
@@ -3284,8 +3284,7 @@ async def btc_key_level_monitor(bot: Bot, state: State) -> None:
                                 compact_section("⚠️ BTC 핵심 레벨 감지")
                                 + f"\n{icon} BTC {level:,.0f} USDT {direction}"
                                 + f"\n현재가: {price:,.0f} USDT ({fmt_pct(pct)})"
-                                + "\n\n📌 시장 영향:"
-                                + "\n레벨 유지 여부 먼저 확인. 무리한 추격은 보류."
+                                + "\n\n레벨 유지 여부 먼저 보고 움직이자."
                             )
                             await safe_send(bot, msg, disable_preview=True)
                             state.btc_key_level_last[key] = {"side": side, "sent_at": now}
