@@ -1798,7 +1798,7 @@ def market_one_liner(btc_24h_pct: float) -> str:
 async def briefing_scheduler(bot: Bot, state: State) -> None:
     slots = {
         "12": (12, "☀️ 점심 시장 체크"),
-        "21": (21, "🌙 밤 시장 체크"),
+        "23": (23, "🌙 밤 시황정리"),
     }
     async with aiohttp.ClientSession() as session:
         while True:
@@ -2065,8 +2065,10 @@ def final_market_recap_focus(btc_pct: float, eth_pct: float, sol_pct: float, nq_
 
 
 async def market_session_scheduler(bot: Bot, state: State) -> None:
-    def is_exact_time(now: datetime, hour: int, minute: int) -> bool:
-        return now.hour == hour and now.minute == minute
+    def in_time_window(now: datetime, hour: int, minute: int, width_min: int = 5) -> bool:
+        if now.hour != hour:
+            return False
+        return minute <= now.minute < minute + width_min
 
     async def btc_line(session: aiohttp.ClientSession) -> Tuple[str, float]:
         btc = await get_market_ticker(session, "BTCUSDT")
@@ -2082,6 +2084,18 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
             return None
         return float(t["lastPrice"]), float(t["priceChangePercent"])
 
+    def log_slot(slot_key: str, now: datetime, already_sent: bool, kr_closed: bool, us_holiday: bool, weekend: bool, reason: str) -> None:
+        logging.info(
+            "slot_check key=%s now=%s already_sent=%s kr_closed=%s us_holiday=%s weekend=%s reason=%s",
+            slot_key,
+            now.strftime("%Y-%m-%d %H:%M"),
+            already_sent,
+            kr_closed,
+            us_holiday,
+            weekend,
+            reason,
+        )
+
     async with aiohttp.ClientSession() as session:
         while True:
             started = utc_now()
@@ -2090,9 +2104,15 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                 await warm_holiday_cache(session, now.year)
                 await warm_holiday_cache(session, (now - timedelta(days=1)).year)
 
-                if is_korean_market_weekday(now) and is_exact_time(now, 8, 0):
+                if in_time_window(now, 8, 0):
                     key = "kr_pre_0800"
-                    if state.market_session_sent_dates.get(key) != now.date():
+                    already_sent = state.market_session_sent_dates.get(key) == now.date()
+                    kr_closed = not is_korean_market_weekday(now)
+                    us_holiday = not is_us_market_premarket_day(now)
+                    weekend = is_weekend_mode(now)
+                    if already_sent:
+                        log_slot(key, now, True, kr_closed, us_holiday, weekend, "already_sent")
+                    else:
                         kospi = await get_yahoo_snapshot(session, "%5EKS11")
                         kosdaq = await get_yahoo_snapshot(session, "%5EKQ11")
                         usd_krw = await get_usd_krw(session)
@@ -2106,7 +2126,7 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         eth = await coin_snapshot(session, "ETHUSDT")
                         sol = await coin_snapshot(session, "SOLUSDT")
 
-                        msg = session_section("🌅 한국장 오픈 브리핑")
+                        msg = session_section("🌅 한국장 시작 전 브리핑")
                         if usd_krw:
                             msg += f"\n💵 달러/원: {usd_krw:,.2f}원"
                         msg += f"\n{btc_text}"
@@ -2138,16 +2158,27 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                             premium, _, _ = kimchi
                             msg += f"\n🇰🇷 김치프리미엄: {fmt_pct(premium)}"
 
-                        msg += f"\n\n📌 오늘 핵심:\n{final_kr_open_focus(safe_pct_from_snapshot(nq_fut), safe_pct_from_snapshot(sox), usd_krw or 0, safe_pct_from_snapshot(wti))}"
+                        if kr_closed:
+                            msg += "\n\n오늘은 한국장 휴장이라 정규장 데이터는 제한적."
+                            msg += "\n대신 환율·코인·유가 흐름 위주로 보면 됨."
+                        else:
+                            msg += f"\n\n📌 오늘 핵심:\n{final_kr_open_focus(safe_pct_from_snapshot(nq_fut), safe_pct_from_snapshot(sox), usd_krw or 0, safe_pct_from_snapshot(wti))}"
                         msg += f"\n\n🧭 시장 분위기: {session_mood(safe_pct_from_snapshot(sp_fut), safe_pct_from_snapshot(nq_fut), safe_pct_from_snapshot(sox), -safe_pct_from_snapshot(dxy), -safe_pct_from_snapshot(tnx))}"
                         msg += "\n⚠️ 장 초반 추격매수보다 거래량 확인이 우선."
                         await safe_send(bot, msg, disable_preview=True)
                         state.market_session_sent_dates[key] = now.date()
                         state.briefing_sent_dates["08"] = now.date()
+                        log_slot(key, now, False, kr_closed, us_holiday, weekend, "sent")
 
-                if is_us_market_premarket_day(now) and is_exact_time(now, 21, 30):
-                    key = "us_pre_2130"
-                    if state.market_session_sent_dates.get(key) != now.date():
+                if in_time_window(now, 21, 0):
+                    key = "us_pre_2100"
+                    already_sent = state.market_session_sent_dates.get(key) == now.date()
+                    kr_closed = not is_korean_market_weekday(now)
+                    us_holiday = not is_us_market_premarket_day(now)
+                    weekend = is_weekend_mode(now)
+                    if already_sent:
+                        log_slot(key, now, True, kr_closed, us_holiday, weekend, "already_sent")
+                    else:
                         sp_fut = await get_yahoo_snapshot(session, "ES%3DF")
                         nq_fut = await get_yahoo_snapshot(session, "NQ%3DF")
                         sox = await get_yahoo_snapshot(session, "%5ESOX")
@@ -2177,15 +2208,26 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         if sol:
                             msg += f"\n{move_icon(sol[1])} SOL: {sol[0]:,.0f} USDT ({fmt_pct(sol[1])})"
 
-                        msg += f"\n\n📌 오늘 핵심:\n{final_us_pre_focus(safe_pct_from_snapshot(sp_fut), safe_pct_from_snapshot(nq_fut), safe_pct_from_snapshot(dxy), safe_pct_from_snapshot(tnx), safe_pct_from_snapshot(wti))}"
+                        if us_holiday:
+                            msg += "\n\n오늘은 미국장 휴장이라 정규장 데이터는 제한적."
+                            msg += "\n대신 BTC·달러·유가 흐름 위주로 보면 됨."
+                        else:
+                            msg += f"\n\n📌 오늘 핵심:\n{final_us_pre_focus(safe_pct_from_snapshot(sp_fut), safe_pct_from_snapshot(nq_fut), safe_pct_from_snapshot(dxy), safe_pct_from_snapshot(tnx), safe_pct_from_snapshot(wti))}"
                         msg += f"\n\n🧭 미국장 분위기: {session_mood(safe_pct_from_snapshot(sp_fut), safe_pct_from_snapshot(nq_fut), safe_pct_from_snapshot(sox), -safe_pct_from_snapshot(dxy), -safe_pct_from_snapshot(tnx))}"
                         msg += "\n\n체크할 것:\n- S&P500·나스닥 초반 방향\n- 반도체지수 수급\n- 달러·금리 동반 상승 여부\n- BTC 80K/79K 반응"
                         await safe_send(bot, msg, disable_preview=True)
                         state.market_session_sent_dates[key] = now.date()
+                        log_slot(key, now, False, kr_closed, us_holiday, weekend, "sent")
 
-                if is_us_market_close_day(now) and is_exact_time(now, 5, 0):
+                if in_time_window(now, 5, 0):
                     key = "us_close_0500"
-                    if state.market_session_sent_dates.get(key) != now.date():
+                    already_sent = state.market_session_sent_dates.get(key) == now.date()
+                    kr_closed = not is_korean_market_weekday(now)
+                    us_holiday = not is_us_market_close_day(now)
+                    weekend = is_weekend_mode(now)
+                    if already_sent:
+                        log_slot(key, now, True, kr_closed, us_holiday, weekend, "already_sent")
+                    else:
                         spx = await get_yahoo_snapshot(session, "%5EGSPC")
                         ixic = await get_yahoo_snapshot(session, "%5EIXIC")
                         dji = await get_yahoo_snapshot(session, "%5EDJI")
@@ -2220,11 +2262,16 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         if tnx:
                             msg += f"\n{session_snapshot_line('미10년물 금리', tnx)}"
 
-                        msg += f"\n\n📌 오늘 핵심:\n{final_us_close_focus(safe_pct_from_snapshot(spx), safe_pct_from_snapshot(ixic), safe_pct_from_snapshot(dji), safe_pct_from_snapshot(sox), safe_pct_from_snapshot(dxy), safe_pct_from_snapshot(tnx), safe_pct_from_snapshot(wti))}"
+                        if us_holiday:
+                            msg += "\n\n오늘은 미국장 휴장이라 정규장 데이터는 제한적."
+                            msg += "\n대신 BTC, 달러, 유가 흐름 위주로 확인."
+                        else:
+                            msg += f"\n\n📌 오늘 핵심:\n{final_us_close_focus(safe_pct_from_snapshot(spx), safe_pct_from_snapshot(ixic), safe_pct_from_snapshot(dji), safe_pct_from_snapshot(sox), safe_pct_from_snapshot(dxy), safe_pct_from_snapshot(tnx), safe_pct_from_snapshot(wti))}"
                         msg += f"\n\n🧭 미국장 분위기: {session_mood(safe_pct_from_snapshot(spx), safe_pct_from_snapshot(ixic), safe_pct_from_snapshot(dji), safe_pct_from_snapshot(sox), -safe_pct_from_snapshot(dxy), -safe_pct_from_snapshot(tnx))}"
                         msg += "\n\n체크할 것:\n- 한국장 반도체 대형주 수급\n- 환율과 외국인 매매\n- BTC 80K 재안착 여부"
                         await safe_send(bot, msg, disable_preview=True)
                         state.market_session_sent_dates[key] = now.date()
+                        log_slot(key, now, False, kr_closed, us_holiday, weekend, "sent")
 
             except Exception:
                 logging.exception("market_session_scheduler 오류")
