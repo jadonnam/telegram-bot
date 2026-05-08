@@ -1875,6 +1875,10 @@ def is_us_market_close_day(now: datetime) -> bool:
     return us_session_day.weekday() < 5 and not is_us_holiday_day(us_session_day)
 
 
+def is_weekend_mode(now: datetime) -> bool:
+    return now.weekday() >= 5
+
+
 def market_direction_label(*pcts: float) -> str:
     vals = [float(x) for x in pcts if x is not None]
     if not vals:
@@ -2543,6 +2547,19 @@ def recap_market_keyword(title: str, emoji: str) -> str:
     return "시장"
 
 
+def recap_weekend_priority(title: str, emoji: str, source: str) -> int:
+    tl = (title or "").lower()
+    src = (source or "").lower()
+    score = 0
+    if emoji == "🟠" or any(k in tl for k in ("btc", "bitcoin", "비트코인", "이더리움", "etf", "알트", "청산", "crypto")):
+        score += 4
+    if any(k in tl for k in ("호르무즈", "유가", "원유", "해운", "공급망", "hormuz", "oil", "wti", "brent", "iran", "israel", "전쟁", "미사일")):
+        score += 3
+    if "coin" in src or "coindesk" in src or "cointelegraph" in src:
+        score += 2
+    return score
+
+
 async def ensure_korean_text(session: aiohttp.ClientSession, value: str) -> str:
     value = html_clean(value, 220)
     if not value:
@@ -2577,6 +2594,11 @@ def live_news_score(title: str, summary: str, category: str, link: str = "") -> 
         score -= 30
     if category == "한국" and any(k in text_low for k in ("btc", "bitcoin", "비트코인", "ethereum", "eth", "알트")):
         score -= 10
+    now = now_kst()
+    if is_weekend_mode(now) and category == "한국":
+        score -= 8
+    if is_kr_holiday_day(now) and category == "한국":
+        score -= 8
     return score
 
 
@@ -3524,7 +3546,15 @@ async def live_recap_scheduler(bot: Bot, state: State) -> None:
                 if key not in state.recap_sent_keys and hasattr(state, "live_recent_items"):
                     items = list(state.live_recent_items)[-8:]
                     if items:
-                        top = sorted(items, key=lambda x: x[-1], reverse=True)[:3]
+                        weekend_mode = is_weekend_mode(now)
+                        if weekend_mode:
+                            top = sorted(
+                                items,
+                                key=lambda x: (recap_weekend_priority(x[2], x[1], x[3]), x[-1]),
+                                reverse=True,
+                            )[:3]
+                        else:
+                            top = sorted(items, key=lambda x: x[-1], reverse=True)[:3]
                         blocked_sources = {"Korea IT Times", "재외동포신문", "한민족센터", "코리아넷뉴스"}
                         lines = ["👀 지금 시장에서 보는 흐름"]
                         idx = 1
@@ -3760,6 +3790,18 @@ async def run_forever() -> None:
 
     bot = Bot(token=token)
     state = State()
+    now = now_kst()
+
+    market_mode_lines = []
+    if not is_korean_market_weekday(now):
+        market_mode_lines.append("KR market closed")
+    us_closed = (not is_us_market_premarket_day(now)) and (not is_us_market_close_day(now))
+    if us_closed:
+        market_mode_lines.append("US market holiday")
+    if is_weekend_mode(now):
+        market_mode_lines.append("Weekend crypto mode enabled")
+    if market_mode_lines:
+        logging.info("Market mode:\n- %s", "\n- ".join(market_mode_lines))
 
     flags = {
         "ENABLE_LIVE_NEWS": env_bool("ENABLE_LIVE_NEWS", True),
