@@ -39,6 +39,12 @@ MARKET_SESSION_CHECK_SECONDS = 30
 PRICE_CHANGE_THRESHOLD = 1.5
 VOLUME_SURGE_THRESHOLD = 4.0
 WHALE_NOTIONAL_THRESHOLD = 3_000_000
+VOLUME_SURGE_MIN_NOTIONAL = {
+    "BTCUSDT": 5_000_000,
+    "ETHUSDT": 3_000_000,
+    "SOLUSDT": 1_000_000,
+}
+VOLUME_SURGE_COOLDOWN_SEC = 60 * 60
 
 SIGNAL_COOLDOWN = timedelta(minutes=45)
 FUTURES_SIGNAL_COOLDOWN = timedelta(minutes=90)
@@ -207,6 +213,7 @@ class State:
 
         self.last_market_price: Dict[str, float] = {}
         self.price_milestone_cooldowns: Dict[str, datetime] = {}
+        self.volume_surge_last: Dict[str, datetime] = {}
 
         self.whale_seen_ids: Deque[str] = deque(maxlen=8000)
         self.whale_seen_set = set()
@@ -1239,6 +1246,7 @@ async def market_monitor(bot: Bot, state: State) -> None:
         while True:
             started = utc_now()
             try:
+                surge_rows = []
                 for symbol in SYMBOLS:
                     now = utc_now()
                     ticker = await get_market_ticker(session, symbol)
@@ -1277,17 +1285,21 @@ async def market_monitor(bot: Bot, state: State) -> None:
                         latest_vol = float(klines[-1][7])
                         if prev_vol > 0:
                             ratio = latest_vol / prev_vol
-                            if ratio >= VOLUME_SURGE_THRESHOLD:
-                                signal_key = f"vol:{symbol}"
-                                if not state.is_on_cooldown(signal_key, now):
-                                    msg = (
-                                        "🔥 [거래량 급증]\n"
-                                        f"{symbol.replace('USDT', '')} 거래대금 x{ratio:.2f}\n"
-                                        f"최근 5분 거래대금 {latest_vol:,.0f} USDT\n\n"
-                                        "대응: 변동성 확대 구간. 무리한 추격보다 확인 우선."
-                                    )
-                                    await safe_send(bot, msg, disable_preview=True)
-                                    state.touch_cooldown(signal_key, now)
+                            min_notional = float(VOLUME_SURGE_MIN_NOTIONAL.get(symbol, 1_000_000))
+                            if ratio >= VOLUME_SURGE_THRESHOLD and latest_vol >= min_notional:
+                                last_sent = state.volume_surge_last.get(symbol)
+                                if not last_sent or (now - last_sent).total_seconds() >= VOLUME_SURGE_COOLDOWN_SEC:
+                                    surge_rows.append((symbol, ratio, latest_vol))
+                                    state.volume_surge_last[symbol] = now
+                if surge_rows:
+                    surge_rows.sort(key=lambda x: x[1], reverse=True)
+                    lines = ["🔥 거래량 급증"]
+                    for symbol, ratio, latest_vol in surge_rows[:3]:
+                        coin = symbol.replace("USDT", "")
+                        lines.append(f"{coin} 거래대금 x{ratio:.1f}")
+                        lines.append(f"5분 거래대금 {latest_vol/1_000_000:.1f}M USDT")
+                    lines.append("추격보다 80K 유지 여부 먼저 확인.")
+                    await safe_send(bot, "\n".join(lines), disable_preview=True)
             except Exception:
                 logging.exception("market_monitor 오류")
 
@@ -2263,14 +2275,14 @@ async def kimchi_monitor(bot: Bot, state: State) -> None:
 
 LIVE_NEWS_DAILY_LIMIT = 48
 LIVE_NEWS_MAX_PER_SCAN = 1
-LIVE_NEWS_MIN_INTERVAL = timedelta(minutes=25)
+LIVE_NEWS_MIN_INTERVAL = timedelta(minutes=30)
 LIVE_NIGHT_NEWS_MIN_INTERVAL = timedelta(minutes=35)
-LIVE_TITLE_SIMILARITY_BLOCK_HOURS = 18
-LIVE_TITLE_SIMILARITY_THRESHOLD = 0.52
+LIVE_TITLE_SIMILARITY_BLOCK_HOURS = 24
+LIVE_TITLE_SIMILARITY_THRESHOLD = 0.5
 LIVE_RECAP_HOURS = (9, 13, 18, 23)
 LIVE_BTC_MIN_IMPORTANCE = 8
 LIVE_MESSAGE_SOFT_LIMIT = 900
-BTC_LEVEL_ALERT_COOLDOWN_SEC = 45 * 60
+BTC_LEVEL_ALERT_COOLDOWN_SEC = 3 * 60 * 60
 
 MARKET_IMPACT_TERMS = (
     "nasdaq", "s&p", "dow", "stock", "shares", "pre-market", "after hours", "earnings", "guidance",
@@ -2313,6 +2325,8 @@ LIVE_HARD_BLOCK_TERMS = (
     "입시", "수능", "논술", "내신", "홍보", "프로모션", "promotional", "advertorial",
     "press release", "media kit", "제휴 안내", "보도자료",
     "학회", "첫 공개", "서비스 공개", "병원용", "피부", "모발", "의료 ai", "전시",
+    "친구 부럽지만", "기초과학", "과제 맡는다", "홍보성",
+    "코리아넷뉴스", "재외동포신문", "한민족센터", "aipick", "ai픽",
 )
 
 LIVE_AI_MARKET_ANCHORS = (
@@ -2407,10 +2421,13 @@ def is_live_ai_without_market_anchor(title: str, summary: str) -> bool:
 
 
 def effective_live_news_category(category_emoji: str, category: str, title: str, summary: str, link: str) -> Tuple[str, str]:
-    if category == "코인":
-        return category_emoji, category
     blob = f"{title} {summary}"
+    blob_l = blob.lower()
     lk = (link or "").lower()
+    if any(k in blob_l for k in ("coindesk", "cointelegraph", "crypto", "bitcoin", "btc", "ethereum", "eth", "solana", "sol", "etf", "청산", "거래소", "비트코인", "이더리움")):
+        return "🟠", "코인"
+    if any(k in blob_l for k in ("hormuz", "iran", "israel", "oil", "wti", "brent", "호르무즈", "이란", "이스라엘", "유가", "원유")):
+        return "🌍", "세계"
     kr_hosts = (
         ".kr/",
         ".co.kr",
@@ -2433,7 +2450,7 @@ def effective_live_news_category(category_emoji: str, category: str, title: str,
     latin = len(re.findall(r"[A-Za-z]", title or ""))
     if hangul >= 10 and hangul >= max(8, latin * 0.25):
         return "🇰🇷", "한국"
-    if any(k in blob for k in ("삼성전자", "SK하이닉스", "현대차", "네이버", "카카오", "서울", "코스피", "코스닥", "대한민국")):
+    if any(k in blob for k in ("삼성전자", "SK하이닉스", "삼성SDI", "현대차", "네이버", "카카오", "서울", "코스피", "코스닥", "환율", "산업부", "대한민국", "한국 기업")):
         return "🇰🇷", "한국"
     return category_emoji, category
 
@@ -2519,6 +2536,8 @@ def live_news_score(title: str, summary: str, category: str, link: str = "") -> 
         score += 6
     if is_live_ai_without_market_anchor(title, summary):
         score -= 30
+    if category == "한국" and any(k in text_low for k in ("btc", "bitcoin", "비트코인", "ethereum", "eth", "알트")):
+        score -= 10
     return score
 
 
@@ -2679,6 +2698,8 @@ def news_importance_label(title: str, summary: str) -> str:
 
 def build_market_impact_line(category: str, title: str, summary: str) -> str:
     t = f"{title} {summary}".lower()
+    if category == "한국" and any(k in t for k in ("bitcoin", "btc", "ethereum", "eth", "알트", "etf")):
+        return "한국장은 환율과 외국인 수급이 먼저. 코인 해석은 분리해서 보는 편이 좋음."
 
     if is_live_ai_without_market_anchor(title, summary):
         return "거래 관점에선 우선순위 낮음. 서비스·이벤트 소식일 수 있음."
@@ -2884,7 +2905,7 @@ def live_news_tier_a_hit(title: str, summary: str) -> bool:
 
 def is_live_news_allowed(title: str, summary: str, category: str, now: datetime, link: str = "") -> bool:
     score = live_news_score(title, summary, category, link)
-    if score < 8:
+    if score < 6:
         return False
     combined = live_news_combined_score(title, summary, category, link)
     imp = normalize_news_importance(combined)
@@ -2906,7 +2927,7 @@ def clean_news_body_for_message(title: str, summary: str, source: str = "") -> s
     body = re.sub(r"https?://\S+", "", body)
     body = body.replace(" ", " ").replace("…", "...").strip()
 
-    for s in (source, "Google News", "조선일보", "한국경제", "경향신문", "blog.google", "Korea IT Times", "프라임경제", "Reuters", "로이터"):
+    for s in (source, "Google News", "조선일보", "한국경제", "경향신문", "blog.google", "Korea IT Times", "프라임경제", "Reuters", "로이터", "v.daum.net", "n.news.naver.com"):
         if s:
             body = body.replace(str(s), "").strip()
 
@@ -2916,6 +2937,8 @@ def clean_news_body_for_message(title: str, summary: str, source: str = "") -> s
         body_no_space = re.sub(r"\s+", "", body)
         title_no_space = re.sub(r"\s+", "", title_clean)
         if body_no_space == title_no_space or title_no_space in body_no_space[: len(title_no_space) + 30]:
+            return ""
+        if title_similarity(title_clean, body) >= 0.65:
             return ""
 
     if len(body) < 18:
@@ -2929,24 +2952,15 @@ def related_assets_for_news(title: str, summary: str = "") -> str:
     txt = f"{title} {summary}".lower()
     if any(k in txt for k in ("hormuz", "호르무즈", "oil", "wti", "brent", "유가", "원유", "해운", "선박", "supply chain", "공급망")):
         return "유가 · 해운 · 공급망"
-    tags: list[str] = []
-
+    if any(k in txt for k in ("코스피", "kospi", "환율", "외국인", "기관", "연기금", "국민연금", "삼성전자", "sk하이닉스", "삼성sdi", "현대차")):
+        return "KOSPI · 환율 · 외국인"
+    if any(k in txt for k in ("반도체", "semiconductor", "hbm", "엔비디아", "nvidia", "데이터센터", "ai server", "ai 서버")):
+        return "반도체 · HBM · 데이터센터"
+    if any(k in txt for k in ("bitcoin", "btc", "ethereum", "eth", "sol", "etf", "청산", "liquidation", "알트")):
+        return "BTC · ETF · 알트"
     if any(k in txt for k in ("fed", "fomc", "cpi", "pce", "ppi", "금리", "연준", "파월", "국채", "달러", "dxy")):
-        tags.append("금리·달러")
-    if any(k in txt for k in ("oil", "wti", "brent", "유가", "원유", "opec", "호르무즈", "해운")):
-        tags.append("유가·해운")
-    if any(k in txt for k in ("nvidia", "엔비디아", "hbm", "반도체", "semiconductor", "tsmc", "asml", "마이크론", "브로드컴")):
-        tags.append("반도체")
-    if any(k in txt for k in ("bitcoin", "btc", "ethereum", "eth", "sol", "etf", "청산", "liquidation")):
-        tags.append("코인")
-    if any(k in txt for k in ("kospi", "코스피", "외국인", "국민연금", "기관", "연기금")):
-        tags.append("KOSPI·수급")
-    if any(k in txt for k in ("earnings", "guidance", "실적", "가이던스", "eps")):
-        tags.append("실적")
-    if not any(k in txt for k in ("hormuz", "호르무즈", "oil", "wti", "brent", "유가", "원유", "해운", "선박", "supply chain", "공급망")) and any(k in txt for k in ("google", "alphabet", "amazon", "microsoft", "meta", "apple", "tesla", "구글", "아마존", "테슬라")):
-        tags.append("나스닥 성장주")
-
-    return " · ".join(dict.fromkeys(tags[:3]))
+        return "금리 · 달러 · 나스닥"
+    return ""
 
 
 def pick_brief_line(seed: str, options: Tuple[str, ...]) -> str:
@@ -2993,7 +3007,7 @@ def styled_market_brief(category: str, title: str, summary: str) -> str:
         ))
         return f"{l1}\n\n{l2}"
 
-    if any(k in t for k in coin_keys):
+    if category == "코인" and any(k in t for k in coin_keys):
         l1 = pick_brief_line(seed + ":c1", (
             "BTC는 핵심 구간 안착 여부가 더 중요.",
             "ETF/청산 이슈라 가격대 유지력이 포인트.",
@@ -3174,7 +3188,7 @@ async def build_live_news_message(
             msg += "\n" + " · ".join(meta)
         msg += f"\n브리핑: {brief}"
 
-    if importance >= LIVE_BTC_MIN_IMPORTANCE:
+    if category == "코인" and importance >= LIVE_BTC_MIN_IMPORTANCE:
         try:
             btc = await get_market_ticker(session, "BTCUSDT")
             if btc:
@@ -3221,6 +3235,8 @@ async def btc_key_level_monitor(bot: Bot, state: State) -> None:
                         prev_side = last.get("side")
                         sent_at = last.get("sent_at")
                         buffer = max(80, level * 0.001)
+                        if level == 80000:
+                            buffer = max(buffer, 250)
                         if price >= level + buffer:
                             side = "above"
                         elif price <= level - buffer:
@@ -3243,7 +3259,7 @@ async def btc_key_level_monitor(bot: Bot, state: State) -> None:
                                 + f"\n{icon} BTC {level:,.0f} USDT {direction}"
                                 + f"\n현재가: {price:,.0f} USDT ({fmt_pct(pct)})"
                                 + "\n\n📌 시장 영향:"
-                                + "\n단기 변동성 확대 구간. 추격보다 거래량 동반 여부 확인 필요."
+                                + "\n레벨 유지 여부 먼저 확인. 무리한 추격은 보류."
                             )
                             await safe_send(bot, msg, disable_preview=True)
                             state.btc_key_level_last[key] = {"side": side, "sent_at": now}
@@ -3339,13 +3355,13 @@ async def btc_move_chart_monitor(bot: Bot, state: State) -> None:
 
 async def live_news_monitor(bot: Bot, state: State) -> None:
     if not hasattr(state, "live_news_seen_set"):
-        state.live_news_seen_ids = deque(maxlen=5000)
+        state.live_news_seen_ids = deque(maxlen=12000)
         state.live_news_seen_set = set()
         state.live_last_sent_at = None
         state.live_news_daily_date = None
         state.live_news_daily_count = 0
-        state.live_recent_items = deque(maxlen=30)
-        state.live_recent_titles = deque(maxlen=160)
+        state.live_recent_items = deque(maxlen=80)
+        state.live_recent_titles = deque(maxlen=600)
     async with aiohttp.ClientSession() as session:
         while True:
             try:
@@ -3382,7 +3398,26 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                         continue
                     candidates.sort(key=lambda x: x[0], reverse=True)
                     score, entry, raw_title, raw_summary, raw_link, cand_emoji, cand_category = candidates[0]
+                    combined_score = max(score, newsroom_keyword_score(raw_title, raw_summary, cand_category))
+                    importance = normalize_news_importance(combined_score)
+                    if importance <= 5:
+                        remember_live_news_hashes(state, raw_title, raw_link)
+                        state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
+                        continue
                     source = source_name_from_entry(entry)
+                    title_for_recap = strip_news_source_tail(raw_title)
+                    try:
+                        title_for_recap = await ensure_korean_text(session, title_for_recap)
+                    except Exception:
+                        pass
+                    if mostly_english(title_for_recap):
+                        title_for_recap = strip_news_source_tail(raw_title)
+                    state.live_recent_items.append((now, cand_emoji, title_for_recap, source, combined_score))
+
+                    if importance < 8:
+                        remember_live_news_hashes(state, raw_title, raw_link)
+                        state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
+                        continue
                     image_url = await resolve_entry_image_url(session, entry)
                     msg = await build_live_news_message(
                         session, cand_emoji, cand_category, raw_title, raw_summary, source, raw_link
@@ -3390,7 +3425,6 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                     await send_news_card(bot, msg, image_url=image_url)
                     remember_live_news_hashes(state, raw_title, raw_link)
                     state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
-                    state.live_recent_items.append((now, category_emoji, strip_news_source_tail(raw_title), source, score))
                     state.live_last_sent_at = now
                     state.live_news_daily_count += 1
                     sent_this_scan += 1
@@ -3453,9 +3487,12 @@ async def live_recap_scheduler(bot: Bot, state: State) -> None:
                         top = sorted(items, key=lambda x: x[-1], reverse=True)[:3]
                         lines = ["👀 지금 시장에서 많이 보는 것"]
                         for i, (_ts, emoji, title, source, _score) in enumerate(top, 1):
+                            if mostly_english(title):
+                                continue
                             lines.append(f"{i}. {emoji} {strip_news_source_tail(title)}\n {source}")
-                        await safe_send(bot, "\n\n".join(lines), disable_preview=True)
-                        state.recap_sent_keys.add(key)
+                        if len(lines) > 1:
+                            await safe_send(bot, "\n\n".join(lines), disable_preview=True)
+                            state.recap_sent_keys.add(key)
             await asyncio.sleep(60)
         except Exception:
             logging.exception("live_recap_scheduler 오류")
