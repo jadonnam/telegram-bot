@@ -2558,7 +2558,7 @@ def build_market_impact_line(category: str, title: str, summary: str) -> str:
         return "거래 관점에선 우선순위 낮음. 서비스·이벤트 소식일 수 있음."
 
     if any(k in t for k in ("hormuz", "호르무즈", "oil", "wti", "brent", "유가", "원유", "opec", "해협", "선박", "해운")):
-        return "유가·해운·인플레 압력으로 번질 수 있어서 위험자산 반응 체크."
+        return "호르무즈 긴장 완화 기대가 나오면 유가 압력은 잠깐 식을 수 있음. 다만 선박 지연이 남아있으면 해운·물류 비용은 계속 체크해야 함."
     if any(k in t for k in ("iran", "israel", "missile", "strike", "ceasefire", "sanction", "nuclear", "이란", "이스라엘", "미사일", "공습", "휴전", "제재", "핵", "전쟁", "드론")):
         return "지정학 리스크 이슈. 유가·달러·코인 변동성 커질 수 있음."
     if any(k in t for k in ("fed", "fomc", "cpi", "ppi", "interest rate", "rate cut", "powell", "연준", "금리", "물가", "파월", "국채", "수익률", "달러")):
@@ -2676,6 +2676,8 @@ def polish_korean_news_text(text_value: str) -> str:
     s = text_value or ""
     fixes = {
         "호르무즈 해협 선박 지원": "호르무즈 해협 선박 지원",
+        "트럼프의 호르무즈 선박 구조": "호르무즈 긴장 완화 기대",
+        "석유 압력": "유가 압력",
         "유가 압력": "유가 압력",
         "공급망 지연은 여전히 남아 있음": "공급망 지연 리스크는 남아있음",
         "공급망 지연은 여전히 ​​남아 있음": "공급망 지연 리스크는 남아있음",
@@ -2798,6 +2800,8 @@ def related_assets_for_news(title: str, summary: str = "") -> str:
     if is_live_ai_without_market_anchor(title, summary):
         return ""
     txt = f"{title} {summary}".lower()
+    if any(k in txt for k in ("hormuz", "호르무즈", "oil", "wti", "brent", "유가", "원유", "해운", "선박", "supply chain", "공급망")):
+        return "유가 · 해운 · 공급망"
     tags: list[str] = []
 
     if any(k in txt for k in ("fed", "fomc", "cpi", "pce", "ppi", "금리", "연준", "파월", "국채", "달러", "dxy")):
@@ -2812,7 +2816,7 @@ def related_assets_for_news(title: str, summary: str = "") -> str:
         tags.append("KOSPI·수급")
     if any(k in txt for k in ("earnings", "guidance", "실적", "가이던스", "eps")):
         tags.append("실적")
-    if any(k in txt for k in ("google", "alphabet", "amazon", "microsoft", "meta", "apple", "tesla", "구글", "아마존", "테슬라")):
+    if not any(k in txt for k in ("hormuz", "호르무즈", "oil", "wti", "brent", "유가", "원유", "해운", "선박", "supply chain", "공급망")) and any(k in txt for k in ("google", "alphabet", "amazon", "microsoft", "meta", "apple", "tesla", "구글", "아마존", "테슬라")):
         tags.append("나스닥 성장주")
 
     return " · ".join(dict.fromkeys(tags[:3]))
@@ -2915,6 +2919,11 @@ async def build_live_news_message(
     importance = normalize_news_importance(raw_score)
 
     brief = trader_brief_from_article(category, title_clean, summary)
+    merged_text = f"{title_clean} {summary}".lower()
+    is_geo_oil_news = any(
+        k in merged_text
+        for k in ("hormuz", "호르무즈", "oil", "wti", "brent", "유가", "원유", "해운", "선박", "supply chain", "공급망")
+    )
 
     title_ns = re.sub(r"\s+", "", title_ko or "")
     body_ns = re.sub(r"\s+", "", body_ko or "")
@@ -2932,16 +2941,21 @@ async def build_live_news_message(
     if show_snippet:
         msg += f"\n{body_ko}"
 
-    meta: list[str] = []
-    if importance >= 7:
-        meta.append(f"{importance}/10")
     rel = related_assets_for_news(title_clean, summary)
-    if rel and importance >= 6:
-        meta.append(rel)
-    if meta:
-        msg += "\n" + " · ".join(meta)
-
-    msg += f"\n→ {brief}"
+    if is_geo_oil_news:
+        msg += "\n\n" + brief
+        msg += f"\n\n중요도 {importance}/10"
+        if rel:
+            msg += f"\n관련: {rel}"
+    else:
+        meta: list[str] = []
+        if importance >= 7:
+            meta.append(f"{importance}/10")
+        if rel and importance >= 6:
+            meta.append(rel)
+        if meta:
+            msg += "\n" + " · ".join(meta)
+        msg += f"\n브리핑: {brief}"
 
     if importance >= LIVE_BTC_MIN_IMPORTANCE:
         try:
@@ -3138,23 +3152,23 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                         raw_title = getattr(entry, "title", "") or ""
                         raw_summary = getattr(entry, "summary", "") or ""
                         raw_link = getattr(entry, "link", "") or raw_title
-                        category_emoji, category = effective_live_news_category(
+                        cand_emoji, cand_category = effective_live_news_category(
                             category_emoji, category, raw_title, raw_summary, raw_link
                         )
                         if is_duplicate_live_news(state, raw_title, raw_link, now):
                             continue
-                        if not is_live_news_allowed(raw_title, raw_summary, category, now, raw_link):
+                        if not is_live_news_allowed(raw_title, raw_summary, cand_category, now, raw_link):
                             continue
-                        score = live_news_score(raw_title, raw_summary, category, raw_link)
-                        candidates.append((score, entry, raw_title, raw_summary, raw_link))
+                        score = live_news_score(raw_title, raw_summary, cand_category, raw_link)
+                        candidates.append((score, entry, raw_title, raw_summary, raw_link, cand_emoji, cand_category))
                     if not candidates:
                         continue
                     candidates.sort(key=lambda x: x[0], reverse=True)
-                    score, entry, raw_title, raw_summary, raw_link = candidates[0]
+                    score, entry, raw_title, raw_summary, raw_link, cand_emoji, cand_category = candidates[0]
                     source = source_name_from_entry(entry)
                     image_url = await resolve_entry_image_url(session, entry)
                     msg = await build_live_news_message(
-                        session, category_emoji, category, raw_title, raw_summary, source, raw_link
+                        session, cand_emoji, cand_category, raw_title, raw_summary, source, raw_link
                     )
                     await send_news_card(bot, msg, image_url=image_url)
                     remember_live_news_hashes(state, raw_title, raw_link)
