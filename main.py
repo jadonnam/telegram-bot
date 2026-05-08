@@ -1,5 +1,7 @@
 import asyncio
 import hashlib
+import html
+import html
 import logging
 import os
 import re
@@ -378,7 +380,11 @@ async def send_message(bot: Bot, text: str, disable_preview: bool = False) -> No
 async def safe_send(bot: Bot, text: str, disable_preview: bool = False) -> None:
     try:
         await send_message(bot, text, disable_preview=disable_preview)
-    except Exception:
+    except Exception as e:
+        err = str(e)
+        if "Unauthorized" in err or "InvalidToken" in err:
+            logging.error("Telegram 토큰 인증 실패. BotFather에서 새 토큰 발급 후 TELEGRAM_TOKEN 교체 필요.")
+            return
         logging.exception("Telegram 전송 실패 chat_id=%s", CHANNEL_ID)
 
 
@@ -2124,8 +2130,8 @@ async def kimchi_monitor(bot: Bot, state: State) -> None:
 # ============================================================
 
 LIVE_NEWS_DAILY_LIMIT = 48
-LIVE_NEWS_MAX_PER_SCAN = 2
-LIVE_NEWS_MIN_INTERVAL = timedelta(minutes=7)
+LIVE_NEWS_MAX_PER_SCAN = 1
+LIVE_NEWS_MIN_INTERVAL = timedelta(minutes=25)
 LIVE_NIGHT_NEWS_MIN_INTERVAL = timedelta(minutes=35)
 LIVE_RECAP_HOURS = (9, 13, 18, 23)
 
@@ -2157,6 +2163,9 @@ MARKET_IMPACT_TERMS = (
 )
 
 LIVE_HARD_BLOCK_TERMS = (
+    "coinmarketcap", "price chart", "market cap", "가격, 차트", "시가총액",
+    "swift student challenge", "google for korea", "구글 포 코리아",
+    "맛집", "학생", "challenge", "행사", "성과급 논란",
     "migrant worker", "migrant workers", "shelter", "laboring", "human rights", "refugee",
     "celebrity", "sports", "movie", "music", "crime", "accident", "weather",
     "이주 노동자", "노동자", "쉼터", "인권", "난민", "연예", "스포츠", "범죄", "사고", "날씨",
@@ -2173,8 +2182,9 @@ LIVE_CATEGORY_FEEDS = (
 
 def html_clean(value: str, limit: int = 500) -> str:
     value = value or ""
+    value = html.unescape(value)
+    value = value.replace("\xa0", " ").replace("&nbsp;", " ")
     value = re.sub(r"<[^>]+>", " ", value)
-    value = value.replace(" ", " ").replace("&amp;", "&").replace("&quot;", '"').replace("&#39;", "'")
     value = re.sub(r"https?://\S+", "", value)
     value = re.sub(r"\s+", " ", value).strip()
     return value[:limit].strip()
@@ -2609,6 +2619,46 @@ def clean_news_body_for_message(title: str, summary: str, source: str = "") -> s
 
 def related_assets_for_news(title: str, summary: str = "") -> str:
     txt = f"{title} {summary}".lower()
+    found = []
+
+    if any(k in txt for k in ("nvidia","엔비디아","hbm","반도체","semiconductor","sk하이닉스","삼성전자")):
+        found.append("AI · 반도체 · 나스닥")
+    if any(k in txt for k in ("oil","wti","brent","유가","원유","호르무즈","해운")):
+        found.append("유가 · 달러 · 인플레")
+    if any(k in txt for k in ("fed","fomc","cpi","pce","금리","연준","파월","국채")):
+        found.append("금리 · 달러 · 나스닥")
+    if any(k in txt for k in ("bitcoin","btc","ethereum","eth","solana","sol","비트코인","이더리움","솔라나","청산","etf")):
+        found.append("BTC · ETH · SOL")
+    if any(k in txt for k in ("kospi","코스피","환율","외국인","국민연금")):
+        found.append("KOSPI · 환율 · 외국인")
+    if any(k in txt for k in ("tesla","테슬라","apple","애플","meta","메타","amazon","아마존","microsoft","마이크로소프트")):
+        found.append("빅테크 · 나스닥")
+    if any(k in txt for k in ("ionq","아이온큐","quantum","양자")):
+        found.append("양자 · 성장주")
+
+    if found:
+        return " / ".join(dict.fromkeys(found[:3]))
+
+    found = []
+
+    if any(k in txt for k in ("nvidia","엔비디아","hbm","반도체","semiconductor","sk하이닉스","삼성전자")):
+        found.append("AI · 반도체 · 나스닥")
+    if any(k in txt for k in ("oil","wti","brent","유가","원유","호르무즈","해운")):
+        found.append("유가 · 달러 · 인플레")
+    if any(k in txt for k in ("fed","fomc","cpi","pce","금리","연준","파월","국채")):
+        found.append("금리 · 달러 · 나스닥")
+    if any(k in txt for k in ("bitcoin","btc","ethereum","eth","solana","sol","비트코인","이더리움","솔라나","청산","etf")):
+        found.append("BTC · ETH · SOL")
+    if any(k in txt for k in ("kospi","코스피","환율","외국인","국민연금")):
+        found.append("KOSPI · 환율 · 외국인")
+    if any(k in txt for k in ("tesla","테슬라","apple","애플","meta","메타","amazon","아마존","microsoft","마이크로소프트")):
+        found.append("빅테크 · 나스닥")
+    if any(k in txt for k in ("ionq","아이온큐","quantum","양자")):
+        found.append("양자 · 성장주")
+
+    if found:
+        return " / ".join(dict.fromkeys(found[:3]))
+
 
     if any(k in txt for k in ("호르무즈","이란","중동","원유","유가","wti","brent","석유","해운","선박","공급망")):
         found = ["WTI · 에너지 · 해운"]
@@ -2795,7 +2845,13 @@ async def btc_key_level_monitor(bot: Bot, state: State) -> None:
                         last = state.btc_key_level_last.get(key, {})
                         prev_side = last.get("side")
                         sent_at = last.get("sent_at")
-                        side = "above" if price >= level else "below"
+                        buffer = max(80, level * 0.001)
+                        if price >= level + buffer:
+                            side = "above"
+                        elif price <= level - buffer:
+                            side = "below"
+                        else:
+                            continue
 
                         cooldown_ok = True
                         if sent_at:
@@ -3236,7 +3292,6 @@ async def run_forever() -> None:
     state = State()
 
     tasks = [
-        asyncio.create_task(briefing_scheduler(bot, state)),
         asyncio.create_task(market_monitor(bot, state)),
         asyncio.create_task(btc_key_level_monitor(bot, state)),
         asyncio.create_task(fear_greed_monitor(bot, state)),
@@ -3245,7 +3300,6 @@ async def run_forever() -> None:
         asyncio.create_task(live_news_monitor(bot, state)),
         asyncio.create_task(ops_health_monitor(bot, state)),
         asyncio.create_task(btc_move_chart_monitor(bot, state)),
-        asyncio.create_task(daily_digest_scheduler(bot, state)),
         asyncio.create_task(macro_pulse_monitor(bot, state)),
         asyncio.create_task(live_recap_scheduler(bot, state)),
         asyncio.create_task(futures_flow_monitor(bot, state)),
