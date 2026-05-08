@@ -2504,6 +2504,32 @@ def mostly_english(text_value: str) -> bool:
     return len(letters) > max(20, len(korean) * 2)
 
 
+def is_recap_title_natural(title: str) -> bool:
+    t = html_clean(title or "", 180)
+    if not t or len(t) < 12:
+        return False
+    if "http" in t.lower() or ".com" in t.lower():
+        return False
+    if t.count("/") >= 2 or t.count("|") >= 2:
+        return False
+    return len(re.findall(r"[가-힣]", t)) >= 6
+
+
+def recap_market_keyword(title: str, emoji: str) -> str:
+    tl = (title or "").lower()
+    if any(k in tl for k in ("호르무즈", "유가", "원유", "해운", "공급망", "hormuz", "oil", "wti", "brent")):
+        return "유가"
+    if emoji == "🟠" or any(k in tl for k in ("btc", "bitcoin", "비트코인", "이더리움", "etf", "알트", "청산")):
+        return "코인"
+    if any(k in tl for k in ("코스피", "환율", "외국인", "기관", "연기금", "삼성전자", "하이닉스", "한국")):
+        return "한국장"
+    if any(k in tl for k in ("반도체", "hbm", "데이터센터", "엔비디아", "nvidia")):
+        return "반도체"
+    if any(k in tl for k in ("금리", "연준", "달러", "fomc", "cpi", "pce")):
+        return "금리"
+    return "시장"
+
+
 async def ensure_korean_text(session: aiohttp.ClientSession, value: str) -> str:
     value = html_clean(value, 220)
     if not value:
@@ -3411,8 +3437,10 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                     except Exception:
                         pass
                     if mostly_english(title_for_recap):
-                        title_for_recap = strip_news_source_tail(raw_title)
-                    state.live_recent_items.append((now, cand_emoji, title_for_recap, source, combined_score))
+                        continue
+                    if not is_recap_title_natural(title_for_recap):
+                        continue
+                    state.live_recent_items.append((now, cand_emoji, html_clean(title_for_recap, 150), source, combined_score))
 
                     if importance < 8:
                         remember_live_news_hashes(state, raw_title, raw_link)
@@ -3485,11 +3513,21 @@ async def live_recap_scheduler(bot: Bot, state: State) -> None:
                     items = list(state.live_recent_items)[-8:]
                     if items:
                         top = sorted(items, key=lambda x: x[-1], reverse=True)[:3]
-                        lines = ["👀 지금 시장에서 많이 보는 것"]
-                        for i, (_ts, emoji, title, source, _score) in enumerate(top, 1):
+                        blocked_sources = {"Korea IT Times", "재외동포신문", "한민족센터", "코리아넷뉴스"}
+                        lines = ["👀 지금 시장에서 보는 흐름"]
+                        idx = 1
+                        for _ts, emoji, title, source, _score in top:
+                            if source in blocked_sources:
+                                continue
                             if mostly_english(title):
                                 continue
-                            lines.append(f"{i}. {emoji} {strip_news_source_tail(title)}\n {source}")
+                            if not is_recap_title_natural(title):
+                                continue
+                            keyword = recap_market_keyword(title, emoji)
+                            lines.append(f"{idx}. {keyword}\n{strip_news_source_tail(title)}")
+                            idx += 1
+                            if idx > 3:
+                                break
                         if len(lines) > 1:
                             await safe_send(bot, "\n\n".join(lines), disable_preview=True)
                             state.recap_sent_keys.add(key)
