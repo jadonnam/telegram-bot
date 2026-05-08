@@ -410,7 +410,11 @@ async def fetch_json(session: aiohttp.ClientSession, url: str, params: Optional[
                         response.status in (403, 451)
                         and ("binance.com" in url or "bybit.com" in url)
                     )
-                    if is_geo_block:
+                    is_okx_funding_bad_req = (
+                        response.status == 400
+                        and "okx.com/api/v5/public/funding-rate" in url
+                    )
+                    if is_geo_block or is_okx_funding_bad_req:
                         logging.debug("fetch_json 제한 status=%s url=%s", response.status, url)
                     else:
                         logging.warning("fetch_json 실패 status=%s url=%s", response.status, url)
@@ -605,7 +609,7 @@ async def get_funding_rate(session: aiohttp.ClientSession, symbol: str) -> Optio
     except Exception:
         pass
 
-    okx_symbol = OKX_SYMBOLS.get(symbol)
+    okx_symbol = OKX_FUNDING_SYMBOLS.get(symbol) or f"{symbol.replace('USDT', '-USDT')}-SWAP"
     if okx_symbol:
         data = await fetch_json(session, "https://www.okx.com/api/v5/public/funding-rate", {"instId": okx_symbol})
         try:
@@ -614,7 +618,7 @@ async def get_funding_rate(session: aiohttp.ClientSession, symbol: str) -> Optio
             LAST_GOOD_FUNDING[symbol] = val
             return val
         except Exception:
-            pass
+            logging.debug("OKX funding-rate fallback 실패 symbol=%s instId=%s", symbol, okx_symbol)
 
     return LAST_GOOD_FUNDING.get(symbol)
 
@@ -800,6 +804,12 @@ OKX_SYMBOLS = {
     "BTCUSDT": "BTC-USDT",
     "ETHUSDT": "ETH-USDT",
     "SOLUSDT": "SOL-USDT",
+}
+
+OKX_FUNDING_SYMBOLS = {
+    "BTCUSDT": "BTC-USDT-SWAP",
+    "ETHUSDT": "ETH-USDT-SWAP",
+    "SOLUSDT": "SOL-USDT-SWAP",
 }
 
 LAST_GOOD_TICKER: Dict[str, dict] = {}
