@@ -2186,6 +2186,36 @@ LIVE_HARD_BLOCK_TERMS = (
     "사설", "칼럼", "인터뷰", "기고", "op-ed", "oped",
     "입시", "수능", "논술", "내신", "홍보", "프로모션", "promotional", "advertorial",
     "press release", "media kit", "제휴 안내", "보도자료",
+    "학회", "첫 공개", "서비스 공개", "병원용", "피부", "모발", "의료 ai", "전시",
+)
+
+LIVE_AI_MARKET_ANCHORS = (
+    "엔비디아",
+    "nvidia",
+    "반도체",
+    "semiconductor",
+    "데이터센터",
+    "클라우드",
+    "aws",
+    "microsoft",
+    "msft",
+    "google",
+    "alphabet",
+    "googl",
+    "meta",
+    "oracle",
+    "capex",
+    "gpu",
+    "hbm",
+    "전력",
+    "원전",
+    "실적",
+    "가이던스",
+    "earnings",
+    "guidance",
+    "투자",
+    "인수",
+    "공급계약",
 )
 
 LIVE_CATEGORY_FEEDS = (
@@ -2224,6 +2254,62 @@ def is_hard_blocked_live_news(title: str, summary: str, link: str = "") -> bool:
     if "coinmarketcap.com" in host or "coinpaprika.com" in host or "coingecko.com" in host:
         return True
     return False
+
+
+def has_live_ai_market_anchor(text: str) -> bool:
+    tl = (text or "").lower()
+    return any(a.lower() in tl for a in LIVE_AI_MARKET_ANCHORS)
+
+
+def text_suggests_generic_ai_product(title: str, summary: str) -> bool:
+    raw = f"{title} {summary}"
+    tl = raw.lower()
+    if re.search(r"\bai\b", tl):
+        return True
+    if any(k in raw for k in ("인공지능", "생성형")):
+        return True
+    compact = tl.replace(" ", "")
+    if "의료ai" in compact or "ai서비스" in compact:
+        return True
+    return False
+
+
+def is_live_ai_without_market_anchor(title: str, summary: str) -> bool:
+    if not text_suggests_generic_ai_product(title, summary):
+        return False
+    return not has_live_ai_market_anchor(f"{title} {summary}")
+
+
+def effective_live_news_category(category_emoji: str, category: str, title: str, summary: str, link: str) -> Tuple[str, str]:
+    if category == "코인":
+        return category_emoji, category
+    blob = f"{title} {summary}"
+    lk = (link or "").lower()
+    kr_hosts = (
+        ".kr/",
+        ".co.kr",
+        "naver.com",
+        "daum.net",
+        "yna.co.kr",
+        "chosun.com",
+        "joins.com",
+        "mk.co.kr",
+        "sedaily.com",
+        "hankyung.com",
+        "etnews.co.kr",
+        "zdnet.co.kr",
+        "hani.co.kr",
+        "mt.co.kr",
+    )
+    if any(h in lk for h in kr_hosts):
+        return "🇰🇷", "한국"
+    hangul = len(re.findall(r"[가-힣]", title or ""))
+    latin = len(re.findall(r"[A-Za-z]", title or ""))
+    if hangul >= 10 and hangul >= max(8, latin * 0.25):
+        return "🇰🇷", "한국"
+    if any(k in blob for k in ("삼성전자", "SK하이닉스", "현대차", "네이버", "카카오", "서울", "코스피", "코스닥", "대한민국")):
+        return "🇰🇷", "한국"
+    return category_emoji, category
 
 
 def strip_news_source_tail(title: str) -> str:
@@ -2305,6 +2391,8 @@ def live_news_score(title: str, summary: str, category: str, link: str = "") -> 
         score += 8
     if any(k in text_low for k in ("유가", "wti", "brent", "opec", "원유")):
         score += 6
+    if is_live_ai_without_market_anchor(title, summary):
+        score -= 30
     return score
 
 
@@ -2465,6 +2553,9 @@ def news_importance_label(title: str, summary: str) -> str:
 
 def build_market_impact_line(category: str, title: str, summary: str) -> str:
     t = f"{title} {summary}".lower()
+
+    if is_live_ai_without_market_anchor(title, summary):
+        return "거래 관점에선 우선순위 낮음. 서비스·이벤트 소식일 수 있음."
 
     if any(k in t for k in ("hormuz", "호르무즈", "oil", "wti", "brent", "유가", "원유", "opec", "해협", "선박", "해운")):
         return "유가·해운·인플레 압력으로 번질 수 있어서 위험자산 반응 체크."
@@ -2642,6 +2733,8 @@ def newsroom_keyword_score(title: str, summary: str, category: str = "") -> int:
         score += 4
     if any(k in txt for k in ("cpi","pce","fomc","fed","파월","연준","금리")):
         score += 4
+    if is_live_ai_without_market_anchor(title, summary):
+        score -= 18
     return max(1, min(35, score))
 
 
@@ -2702,6 +2795,8 @@ def clean_news_body_for_message(title: str, summary: str, source: str = "") -> s
 
 
 def related_assets_for_news(title: str, summary: str = "") -> str:
+    if is_live_ai_without_market_anchor(title, summary):
+        return ""
     txt = f"{title} {summary}".lower()
     tags: list[str] = []
 
@@ -3043,6 +3138,9 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                         raw_title = getattr(entry, "title", "") or ""
                         raw_summary = getattr(entry, "summary", "") or ""
                         raw_link = getattr(entry, "link", "") or raw_title
+                        category_emoji, category = effective_live_news_category(
+                            category_emoji, category, raw_title, raw_summary, raw_link
+                        )
                         if is_duplicate_live_news(state, raw_title, raw_link, now):
                             continue
                         if not is_live_news_allowed(raw_title, raw_summary, category, now, raw_link):
