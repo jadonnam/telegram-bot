@@ -1,7 +1,6 @@
 import asyncio
 import hashlib
 import html
-import html
 import logging
 import os
 import re
@@ -16,6 +15,7 @@ import aiohttp
 from aiohttp import web
 import feedparser
 from telegram import Bot
+from telegram.error import InvalidToken
 
 
 # ============================================================
@@ -373,6 +373,13 @@ def mark_news_sent_strict(state: State, title: str, link: str, published: str, n
     state.news_recent_titles.append((now, title))
 
 
+def is_telegram_auth_failure(exc: BaseException) -> bool:
+    if isinstance(exc, InvalidToken):
+        return True
+    err = str(exc)
+    return "Unauthorized" in err or "InvalidToken" in err
+
+
 async def send_message(bot: Bot, text: str, disable_preview: bool = False) -> None:
     await bot.send_message(chat_id=CHANNEL_ID, text=text, disable_web_page_preview=disable_preview)
 
@@ -381,8 +388,7 @@ async def safe_send(bot: Bot, text: str, disable_preview: bool = False) -> None:
     try:
         await send_message(bot, text, disable_preview=disable_preview)
     except Exception as e:
-        err = str(e)
-        if "Unauthorized" in err or "InvalidToken" in err:
+        if is_telegram_auth_failure(e):
             logging.error("Telegram 토큰 인증 실패. BotFather에서 새 토큰 발급 후 TELEGRAM_TOKEN 교체 필요.")
             return
         logging.exception("Telegram 전송 실패 chat_id=%s", CHANNEL_ID)
@@ -1640,7 +1646,6 @@ def market_one_liner(btc_24h_pct: float) -> str:
 
 async def briefing_scheduler(bot: Bot, state: State) -> None:
     slots = {
-        "08": (8, "🌅 오전 시장 체크"),
         "12": (12, "☀️ 점심 시장 체크"),
         "21": (21, "🌙 밤 시장 체크"),
     }
@@ -1650,7 +1655,7 @@ async def briefing_scheduler(bot: Bot, state: State) -> None:
             try:
                 now = now_kst()
                 for slot_key, (hour, title) in slots.items():
-                    if now.hour == hour and now.minute == 0:
+                    if now.hour == hour and now.minute < 5:
                         if state.briefing_sent_dates.get(slot_key) == now.date():
                             continue
 
@@ -1983,6 +1988,7 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         msg += "\n⚠️ 장 초반 추격매수보다 거래량 확인이 우선."
                         await safe_send(bot, msg, disable_preview=True)
                         state.market_session_sent_dates[key] = now.date()
+                        state.briefing_sent_dates["08"] = now.date()
 
                 if is_us_market_premarket_day(now) and is_exact_time(now, 21, 30):
                     key = "us_pre_2130"
@@ -2133,7 +2139,10 @@ LIVE_NEWS_DAILY_LIMIT = 48
 LIVE_NEWS_MAX_PER_SCAN = 1
 LIVE_NEWS_MIN_INTERVAL = timedelta(minutes=25)
 LIVE_NIGHT_NEWS_MIN_INTERVAL = timedelta(minutes=35)
+LIVE_TITLE_SIMILARITY_BLOCK_HOURS = 18
+LIVE_TITLE_SIMILARITY_THRESHOLD = 0.52
 LIVE_RECAP_HOURS = (9, 13, 18, 23)
+BTC_LEVEL_ALERT_COOLDOWN_SEC = 45 * 60
 
 MARKET_IMPACT_TERMS = (
     "nasdaq", "s&p", "dow", "stock", "shares", "pre-market", "after hours", "earnings", "guidance",
@@ -2163,9 +2172,12 @@ MARKET_IMPACT_TERMS = (
 )
 
 LIVE_HARD_BLOCK_TERMS = (
-    "coinmarketcap", "price chart", "market cap", "가격, 차트", "시가총액",
+    "coinmarketcap",
+    "price chart", "market cap", "가격, 차트", "시가총액",
     "swift student challenge", "google for korea", "구글 포 코리아",
+    "google news", "구글 뉴스", "via google news",
     "맛집", "학생", "challenge", "행사", "성과급 논란",
+    "webinar", "summit", "booth", "fan meeting", "박람회", "컨퍼런스", "세미나", "축제", "초청행사", "티켓 오픈",
     "migrant worker", "migrant workers", "shelter", "laboring", "human rights", "refugee",
     "celebrity", "sports", "movie", "music", "crime", "accident", "weather",
     "이주 노동자", "노동자", "쉼터", "인권", "난민", "연예", "스포츠", "범죄", "사고", "날씨",
@@ -2183,6 +2195,8 @@ LIVE_CATEGORY_FEEDS = (
 def html_clean(value: str, limit: int = 500) -> str:
     value = value or ""
     value = html.unescape(value)
+    value = re.sub(r"&#x[0-9a-fA-F]{1,8};", " ", value)
+    value = re.sub(r"&#\d{1,8};", " ", value)
     value = value.replace("\xa0", " ").replace("&nbsp;", " ")
     value = re.sub(r"<[^>]+>", " ", value)
     value = re.sub(r"https?://\S+", "", value)
@@ -2195,9 +2209,17 @@ def has_market_impact(title: str, summary: str) -> bool:
     return any(k.lower() in text_value for k in MARKET_IMPACT_TERMS)
 
 
-def is_hard_blocked_live_news(title: str, summary: str) -> bool:
+def is_hard_blocked_live_news(title: str, summary: str, link: str = "") -> bool:
     text_value = f"{title} {summary}".lower()
-    return any(k.lower() in text_value for k in LIVE_HARD_BLOCK_TERMS)
+    if any(k.lower() in text_value for k in LIVE_HARD_BLOCK_TERMS):
+        return True
+    try:
+        host = urlparse(link or "").netloc.lower()
+    except Exception:
+        host = ""
+    if "coinmarketcap.com" in host or "coinpaprika.com" in host or "coingecko.com" in host:
+        return True
+    return False
 
 
 def strip_news_source_tail(title: str) -> str:
@@ -2205,6 +2227,40 @@ def strip_news_source_tail(title: str) -> str:
     if " - " in title:
         title = title.rsplit(" - ", 1)[0].strip()
     return title
+
+
+def live_news_dedup_hashes(title: str, link: str) -> Tuple[str, str]:
+    nu = normalize_news_url(link)
+    url_hash = hashlib.sha256(nu.encode("utf-8")).hexdigest()
+    tn = normalize_title_for_dedup(html_clean(title or "", 400))
+    combo_hash = hashlib.sha256(f"{tn}|{nu}".encode("utf-8")).hexdigest()
+    return url_hash, combo_hash
+
+
+def is_duplicate_live_news(state: State, title: str, link: str, now: datetime) -> bool:
+    url_hash, combo_hash = live_news_dedup_hashes(title, link)
+    if url_hash in state.live_news_seen_set or combo_hash in state.live_news_seen_set:
+        return True
+    if not getattr(state, "live_recent_titles", None):
+        return False
+    cutoff = now - timedelta(hours=LIVE_TITLE_SIMILARITY_BLOCK_HOURS)
+    while state.live_recent_titles and state.live_recent_titles[0][0] < cutoff:
+        state.live_recent_titles.popleft()
+    cand = strip_news_source_tail(title or "")
+    for _, old_title in state.live_recent_titles:
+        if title_similarity(cand, old_title) >= LIVE_TITLE_SIMILARITY_THRESHOLD:
+            return True
+    return False
+
+
+def remember_live_news_hashes(state: State, title: str, link: str) -> None:
+    url_hash, combo_hash = live_news_dedup_hashes(title, link)
+    for nid in (url_hash, combo_hash):
+        if len(state.live_news_seen_ids) == state.live_news_seen_ids.maxlen:
+            old = state.live_news_seen_ids.popleft()
+            state.live_news_seen_set.discard(old)
+        state.live_news_seen_ids.append(nid)
+        state.live_news_seen_set.add(nid)
 
 
 def mostly_english(text_value: str) -> bool:
@@ -2224,9 +2280,9 @@ async def ensure_korean_text(session: aiohttp.ClientSession, value: str) -> str:
     return html_clean(value, 220)
 
 
-def live_news_score(title: str, summary: str, category: str) -> int:
+def live_news_score(title: str, summary: str, category: str, link: str = "") -> int:
     text_low = f"{title} {summary}".lower()
-    if is_hard_blocked_live_news(title, summary):
+    if is_hard_blocked_live_news(title, summary, link):
         return -100
     if not has_market_impact(title, summary):
         return -30
@@ -2246,8 +2302,8 @@ def is_night_kst(now: datetime) -> bool:
     return 1 <= now.astimezone(KST).hour < 7
 
 
-def is_live_news_allowed(title: str, summary: str, category: str, now: datetime) -> bool:
-    score = live_news_score(title, summary, category)
+def is_live_news_allowed(title: str, summary: str, category: str, now: datetime, link: str = "") -> bool:
+    score = live_news_score(title, summary, category, link)
     if score < 8:
         return False
     if is_night_kst(now):
@@ -2635,30 +2691,15 @@ def related_assets_for_news(title: str, summary: str = "") -> str:
         found.append("빅테크 · 나스닥")
     if any(k in txt for k in ("ionq","아이온큐","quantum","양자")):
         found.append("양자 · 성장주")
+    if any(k in txt for k in ("tsmc","台積電","반도체 장비","asml","실리콘 포토닉스")):
+        found.append("TSMC · 장비 · 반도체")
+    if any(k in txt for k in ("rare earth","희토류","tariff","관세","supply chain")):
+        found.append("공급망 · 희토류 · 무역")
+    if any(k in txt for k in ("uranium","우라늄","nuclear","원전","pwr")):
+        found.append("우라늄 · 원전 · 에너지")
 
     if found:
         return " / ".join(dict.fromkeys(found[:3]))
-
-    found = []
-
-    if any(k in txt for k in ("nvidia","엔비디아","hbm","반도체","semiconductor","sk하이닉스","삼성전자")):
-        found.append("AI · 반도체 · 나스닥")
-    if any(k in txt for k in ("oil","wti","brent","유가","원유","호르무즈","해운")):
-        found.append("유가 · 달러 · 인플레")
-    if any(k in txt for k in ("fed","fomc","cpi","pce","금리","연준","파월","국채")):
-        found.append("금리 · 달러 · 나스닥")
-    if any(k in txt for k in ("bitcoin","btc","ethereum","eth","solana","sol","비트코인","이더리움","솔라나","청산","etf")):
-        found.append("BTC · ETH · SOL")
-    if any(k in txt for k in ("kospi","코스피","환율","외국인","국민연금")):
-        found.append("KOSPI · 환율 · 외국인")
-    if any(k in txt for k in ("tesla","테슬라","apple","애플","meta","메타","amazon","아마존","microsoft","마이크로소프트")):
-        found.append("빅테크 · 나스닥")
-    if any(k in txt for k in ("ionq","아이온큐","quantum","양자")):
-        found.append("양자 · 성장주")
-
-    if found:
-        return " / ".join(dict.fromkeys(found[:3]))
-
 
     if any(k in txt for k in ("호르무즈","이란","중동","원유","유가","wti","brent","석유","해운","선박","공급망")):
         found = ["WTI · 에너지 · 해운"]
@@ -2749,7 +2790,15 @@ def kr_close_focus(kospi_pct: float, kosdaq_pct: float, usd_krw: float) -> str:
     return "지수보다 종목장 성격이 강한 하루. 강한 섹터만 살아남는 흐름."
 
 
-async def build_live_news_message(session: aiohttp.ClientSession, category_emoji: str, category: str, title: str, summary: str, source: str) -> str:
+async def build_live_news_message(
+    session: aiohttp.ClientSession,
+    category_emoji: str,
+    category: str,
+    title: str,
+    summary: str,
+    source: str,
+    link: str = "",
+) -> str:
     title_clean = strip_news_source_tail(title or "")
     title_ko = await ensure_korean_text(session, polish_korean_news_text(title_clean))
 
@@ -2779,7 +2828,7 @@ async def build_live_news_message(session: aiohttp.ClientSession, category_emoji
         show_body = False
 
     try:
-        raw_score = live_news_score(title_clean, summary, category)
+        raw_score = live_news_score(title_clean, summary, category, link)
     except Exception:
         raw_score = 18
 
@@ -2819,7 +2868,10 @@ async def send_news_card(bot: Bot, text: str, image_url: Optional[str] = None) -
         try:
             await bot.send_photo(chat_id=CHANNEL_ID, photo=image_url, caption=text[:1024], parse_mode=None)
             return
-        except Exception:
+        except Exception as e:
+            if is_telegram_auth_failure(e):
+                logging.error("Telegram 토큰 인증 실패. BotFather에서 새 토큰 발급 후 TELEGRAM_TOKEN 교체 필요.")
+                return
             logging.warning("이미지 전송 실패. 텍스트로 대체 image=%s", image_url)
     await safe_send(bot, text, disable_preview=True)
 
@@ -2856,7 +2908,7 @@ async def btc_key_level_monitor(bot: Bot, state: State) -> None:
                         cooldown_ok = True
                         if sent_at:
                             try:
-                                cooldown_ok = (now - sent_at).total_seconds() >= 20 * 60
+                                cooldown_ok = (now - sent_at).total_seconds() >= BTC_LEVEL_ALERT_COOLDOWN_SEC
                             except Exception:
                                 cooldown_ok = True
 
@@ -2942,13 +2994,19 @@ async def btc_move_chart_monitor(bot: Bot, state: State) -> None:
                             + "\\n거래량 동반 여부와 80K/79K 레벨 반응 확인."
                         )
 
+                        skip_cooldown_bump = False
                         try:
                             await bot.send_photo(chat_id=CHANNEL_ID, photo=chart_url, caption=msg[:1024], parse_mode=None)
-                        except Exception:
-                            await safe_send(bot, msg, disable_preview=True)
+                        except Exception as e:
+                            if is_telegram_auth_failure(e):
+                                logging.error("Telegram 토큰 인증 실패. BotFather에서 새 토큰 발급 후 TELEGRAM_TOKEN 교체 필요.")
+                                skip_cooldown_bump = True
+                            else:
+                                await safe_send(bot, msg, disable_preview=True)
 
-                        state.btc_move_chart_last_sent = now
-                        state.btc_move_chart_last_side = side
+                        if not skip_cooldown_bump:
+                            state.btc_move_chart_last_sent = now
+                            state.btc_move_chart_last_side = side
 
             except Exception:
                 logging.exception("btc_move_chart_monitor 오류")
@@ -2964,6 +3022,7 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
         state.live_news_daily_date = None
         state.live_news_daily_count = 0
         state.live_recent_items = deque(maxlen=30)
+        state.live_recent_titles = deque(maxlen=160)
     async with aiohttp.ClientSession() as session:
         while True:
             try:
@@ -2987,26 +3046,24 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                         raw_title = getattr(entry, "title", "") or ""
                         raw_summary = getattr(entry, "summary", "") or ""
                         raw_link = getattr(entry, "link", "") or raw_title
-                        news_key = hashlib.sha256(normalize_news_url(raw_link).encode("utf-8")).hexdigest()
-                        if news_key in state.live_news_seen_set:
+                        if is_duplicate_live_news(state, raw_title, raw_link, now):
                             continue
-                        if not is_live_news_allowed(raw_title, raw_summary, category, now):
+                        if not is_live_news_allowed(raw_title, raw_summary, category, now, raw_link):
                             continue
-                        score = live_news_score(raw_title, raw_summary, category)
-                        candidates.append((score, entry, raw_title, raw_summary, news_key))
+                        score = live_news_score(raw_title, raw_summary, category, raw_link)
+                        candidates.append((score, entry, raw_title, raw_summary, raw_link))
                     if not candidates:
                         continue
                     candidates.sort(key=lambda x: x[0], reverse=True)
-                    score, entry, raw_title, raw_summary, news_key = candidates[0]
+                    score, entry, raw_title, raw_summary, raw_link = candidates[0]
                     source = source_name_from_entry(entry)
                     image_url = await resolve_entry_image_url(session, entry)
-                    msg = await build_live_news_message(session, category_emoji, category, raw_title, raw_summary, source)
+                    msg = await build_live_news_message(
+                        session, category_emoji, category, raw_title, raw_summary, source, raw_link
+                    )
                     await send_news_card(bot, msg, image_url=image_url)
-                    if len(state.live_news_seen_ids) == state.live_news_seen_ids.maxlen:
-                        old = state.live_news_seen_ids.popleft()
-                        state.live_news_seen_set.discard(old)
-                    state.live_news_seen_ids.append(news_key)
-                    state.live_news_seen_set.add(news_key)
+                    remember_live_news_hashes(state, raw_title, raw_link)
+                    state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
                     state.live_recent_items.append((now, category_emoji, strip_news_source_tail(raw_title), source, score))
                     state.live_last_sent_at = now
                     state.live_news_daily_count += 1
@@ -3306,6 +3363,7 @@ async def run_forever() -> None:
         asyncio.create_task(alpha_flow_monitor(bot, state)),
         asyncio.create_task(liquidation_monitor(bot, state)),
         asyncio.create_task(market_session_scheduler(bot, state)),
+        asyncio.create_task(briefing_scheduler(bot, state)),
         asyncio.create_task(overnight_recap_scheduler(bot, state)),
     ]
 
