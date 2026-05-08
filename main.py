@@ -101,6 +101,9 @@ REQUEST_HEADERS = {
     "Accept": "application/json,text/plain,*/*",
 }
 
+FETCH_WARN_COOLDOWN = timedelta(minutes=10)
+FETCH_WARN_LAST_AT: Dict[str, datetime] = {}
+
 # ============================================================
 # HOLIDAY FILTER
 # ============================================================
@@ -398,7 +401,19 @@ async def fetch_json(session: aiohttp.ClientSession, url: str, params: Optional[
     try:
         async with session.get(url, params=params, timeout=20, headers=REQUEST_HEADERS) as response:
             if response.status != 200:
-                logging.warning("fetch_json 실패 status=%s url=%s", response.status, url)
+                key = f"{response.status}:{url}"
+                now = utc_now()
+                last = FETCH_WARN_LAST_AT.get(key)
+                if not last or now - last >= FETCH_WARN_COOLDOWN:
+                    FETCH_WARN_LAST_AT[key] = now
+                    is_geo_block = (
+                        response.status in (403, 451)
+                        and ("binance.com" in url or "bybit.com" in url)
+                    )
+                    if is_geo_block:
+                        logging.debug("fetch_json 제한 status=%s url=%s", response.status, url)
+                    else:
+                        logging.warning("fetch_json 실패 status=%s url=%s", response.status, url)
                 return None
             return await response.json()
     except Exception:
@@ -532,15 +547,40 @@ async def get_recent_klines(session: aiohttp.ClientSession, symbol: str) -> Opti
             ts, o, h, l, c, vol, turnover = r[:7]
             converted.append([ts, o, h, l, c, vol, ts, turnover])
         if converted:
+            LAST_GOOD_KLINES[symbol] = converted
             return converted
     except Exception:
         pass
 
-    return await fetch_json(
+    data = await fetch_json(
         session,
         "https://api.binance.com/api/v3/klines",
         {"symbol": symbol, "interval": "5m", "limit": 3},
     )
+    if data:
+        LAST_GOOD_KLINES[symbol] = data
+        return data
+
+    okx_symbol = OKX_SYMBOLS.get(symbol)
+    if okx_symbol:
+        okx_data = await fetch_json(
+            session,
+            "https://www.okx.com/api/v5/market/candles",
+            {"instId": okx_symbol, "bar": "5m", "limit": "3"},
+        )
+        try:
+            rows = list(reversed(okx_data.get("data", [])))
+            converted = []
+            for r in rows:
+                ts, o, h, l, c, _, vol_ccy, vol = r[:8]
+                converted.append([ts, o, h, l, c, vol_ccy, ts, vol])
+            if converted:
+                LAST_GOOD_KLINES[symbol] = converted
+                return converted
+        except Exception:
+            pass
+
+    return LAST_GOOD_KLINES.get(symbol)
 
 
 async def get_funding_rate(session: aiohttp.ClientSession, symbol: str) -> Optional[float]:
@@ -551,15 +591,32 @@ async def get_funding_rate(session: aiohttp.ClientSession, symbol: str) -> Optio
     )
     try:
         item = (data.get("result") or {}).get("list", [])[0]
-        return float(item.get("fundingRate", 0)) * 100
+        val = float(item.get("fundingRate", 0)) * 100
+        LAST_GOOD_FUNDING[symbol] = val
+        return val
     except Exception:
         pass
 
     data = await fetch_json(session, "https://fapi.binance.com/fapi/v1/premiumIndex", {"symbol": symbol})
     try:
-        return float(data["lastFundingRate"]) * 100
+        val = float(data["lastFundingRate"]) * 100
+        LAST_GOOD_FUNDING[symbol] = val
+        return val
     except Exception:
-        return None
+        pass
+
+    okx_symbol = OKX_SYMBOLS.get(symbol)
+    if okx_symbol:
+        data = await fetch_json(session, "https://www.okx.com/api/v5/public/funding-rate", {"instId": okx_symbol})
+        try:
+            row = (data.get("data") or [])[0]
+            val = float(row.get("fundingRate", 0)) * 100
+            LAST_GOOD_FUNDING[symbol] = val
+            return val
+        except Exception:
+            pass
+
+    return LAST_GOOD_FUNDING.get(symbol)
 
 
 async def get_open_interest(session: aiohttp.ClientSession, symbol: str) -> Optional[float]:
@@ -570,15 +627,32 @@ async def get_open_interest(session: aiohttp.ClientSession, symbol: str) -> Opti
     )
     try:
         item = (data.get("result") or {}).get("list", [])[0]
-        return float(item.get("openInterest", 0))
+        val = float(item.get("openInterest", 0))
+        LAST_GOOD_OPEN_INTEREST[symbol] = val
+        return val
     except Exception:
         pass
 
     data = await fetch_json(session, "https://fapi.binance.com/fapi/v1/openInterest", {"symbol": symbol})
     try:
-        return float(data["openInterest"])
+        val = float(data["openInterest"])
+        LAST_GOOD_OPEN_INTEREST[symbol] = val
+        return val
     except Exception:
-        return None
+        pass
+
+    okx_symbol = OKX_SYMBOLS.get(symbol)
+    if okx_symbol:
+        data = await fetch_json(session, "https://www.okx.com/api/v5/public/open-interest", {"instId": okx_symbol})
+        try:
+            row = (data.get("data") or [])[0]
+            val = float(row.get("oi", 0))
+            LAST_GOOD_OPEN_INTEREST[symbol] = val
+            return val
+        except Exception:
+            pass
+
+    return LAST_GOOD_OPEN_INTEREST.get(symbol)
 
 
 async def get_orderbook_imbalance(session: aiohttp.ClientSession, symbol: str) -> Optional[Tuple[float, float, float]]:
@@ -728,6 +802,55 @@ OKX_SYMBOLS = {
     "SOLUSDT": "SOL-USDT",
 }
 
+LAST_GOOD_TICKER: Dict[str, dict] = {}
+LAST_GOOD_KLINES: Dict[str, list] = {}
+LAST_GOOD_FUNDING: Dict[str, float] = {}
+LAST_GOOD_OPEN_INTEREST: Dict[str, float] = {}
+
+
+async def get_binance_market_ticker(session: aiohttp.ClientSession, symbol: str):
+    data = await fetch_json(
+        session,
+        "https://api.binance.com/api/v3/ticker/24hr",
+        {"symbol": symbol},
+    )
+    try:
+        return {
+            "symbol": symbol,
+            "lastPrice": str(float(data["lastPrice"])),
+            "priceChangePercent": str(float(data["priceChangePercent"])),
+            "volume24h": float(data.get("quoteVolume", 0) or 0),
+            "source": "Binance",
+        }
+    except Exception:
+        return None
+
+
+async def get_bybit_market_ticker(session: aiohttp.ClientSession, symbol: str):
+    data = await fetch_json(
+        session,
+        "https://api.bybit.com/v5/market/tickers",
+        {"category": "linear", "symbol": symbol},
+    )
+    try:
+        item = (data.get("result") or {}).get("list", [])[0]
+        last = float(item["lastPrice"])
+        pct_raw = item.get("price24hPcnt")
+        if pct_raw is not None:
+            pct = float(pct_raw) * 100
+        else:
+            prev_price = float(item.get("prevPrice24h") or 0)
+            pct = ((last - prev_price) / prev_price) * 100 if prev_price > 0 else 0.0
+        return {
+            "symbol": symbol,
+            "lastPrice": str(last),
+            "priceChangePercent": str(pct),
+            "volume24h": float(item.get("turnover24h", 0) or 0),
+            "source": "Bybit",
+        }
+    except Exception:
+        return None
+
 
 async def get_okx_market_ticker(session: aiohttp.ClientSession, symbol: str):
     inst_id = OKX_SYMBOLS.get(symbol)
@@ -775,32 +898,25 @@ async def get_coingecko_market_ticker(session: aiohttp.ClientSession, symbol: st
         return None
 
 
-_BASE_GET_MARKET_TICKER = get_market_ticker
-
-
 async def get_market_ticker(session: aiohttp.ClientSession, symbol: str):
-    try:
-        primary = await _BASE_GET_MARKET_TICKER(session, symbol)
-        if primary:
-            return primary
-    except Exception:
-        logging.warning("primary get_market_ticker 실패 symbol=%s", symbol)
+    # Railway 지역 제한 대비 순서:
+    # Binance -> Bybit -> OKX -> CoinGecko -> last good cache
+    sources = (
+        get_binance_market_ticker,
+        get_bybit_market_ticker,
+        get_okx_market_ticker,
+        get_coingecko_market_ticker,
+    )
+    for fn in sources:
+        try:
+            row = await fn(session, symbol)
+            if row:
+                LAST_GOOD_TICKER[symbol] = row
+                return row
+        except Exception:
+            logging.debug("ticker fallback 실패 symbol=%s source=%s", symbol, fn.__name__)
 
-    try:
-        okx = await get_okx_market_ticker(session, symbol)
-        if okx:
-            return okx
-    except Exception:
-        logging.warning("OKX fallback 실패 symbol=%s", symbol)
-
-    try:
-        cg = await get_coingecko_market_ticker(session, symbol)
-        if cg:
-            return cg
-    except Exception:
-        logging.warning("CoinGecko fallback 실패 symbol=%s", symbol)
-
-    return None
+    return LAST_GOOD_TICKER.get(symbol)
 
 
 async def get_okx_btc_candles(session: aiohttp.ClientSession, bar: str = "5m", limit: int = 40):
