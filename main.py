@@ -109,6 +109,7 @@ REQUEST_HEADERS = {
 
 FETCH_WARN_COOLDOWN = timedelta(minutes=10)
 FETCH_WARN_LAST_AT: Dict[str, datetime] = {}
+RUNTIME_ENABLE_VOLUME_ALERT = True
 
 # ============================================================
 # HOLIDAY FILTER
@@ -315,6 +316,18 @@ def sentiment_label(*pcts: float) -> str:
     if avg <= -0.35:
         return "🔴 리스크오프 우위"
     return "🟡 혼조"
+
+
+def env_bool(name: str, default: bool = True) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in ("1", "true", "yes", "on", "y"):
+        return True
+    if value in ("0", "false", "no", "off", "n"):
+        return False
+    return default
 
 
 def format_price_level(level: float) -> str:
@@ -1280,7 +1293,7 @@ async def market_monitor(bot: Bot, state: State) -> None:
                                 state.touch_cooldown(signal_key, now)
 
                     klines = await get_recent_klines(session, symbol)
-                    if klines and len(klines) >= 2:
+                    if RUNTIME_ENABLE_VOLUME_ALERT and klines and len(klines) >= 2:
                         prev_vol = float(klines[-2][7])
                         latest_vol = float(klines[-1][7])
                         if prev_vol > 0:
@@ -3748,29 +3761,70 @@ async def run_forever() -> None:
     bot = Bot(token=token)
     state = State()
 
-    tasks = [
-        asyncio.create_task(market_monitor(bot, state)),
-        asyncio.create_task(btc_key_level_monitor(bot, state)),
-        asyncio.create_task(fear_greed_monitor(bot, state)),
-        asyncio.create_task(kimchi_monitor(bot, state)),
-        asyncio.create_task(whale_monitor(bot, state)),
-        asyncio.create_task(live_news_monitor(bot, state)),
-        asyncio.create_task(ops_health_monitor(bot, state)),
-        asyncio.create_task(btc_move_chart_monitor(bot, state)),
-        asyncio.create_task(macro_pulse_monitor(bot, state)),
-        asyncio.create_task(live_recap_scheduler(bot, state)),
-        asyncio.create_task(futures_flow_monitor(bot, state)),
-        asyncio.create_task(alpha_flow_monitor(bot, state)),
-        asyncio.create_task(liquidation_monitor(bot, state)),
-        asyncio.create_task(market_session_scheduler(bot, state)),
-        asyncio.create_task(briefing_scheduler(bot, state)),
-        asyncio.create_task(overnight_recap_scheduler(bot, state)),
-    ]
+    flags = {
+        "ENABLE_LIVE_NEWS": env_bool("ENABLE_LIVE_NEWS", True),
+        "ENABLE_MARKET_MONITOR": env_bool("ENABLE_MARKET_MONITOR", True),
+        "ENABLE_BRIEFING": env_bool("ENABLE_BRIEFING", True),
+        "ENABLE_BTC_LEVEL": env_bool("ENABLE_BTC_LEVEL", True),
+        "ENABLE_VOLUME_ALERT": env_bool("ENABLE_VOLUME_ALERT", True),
+        "ENABLE_RECAP": env_bool("ENABLE_RECAP", True),
+        "ENABLE_FUTURES_FLOW": env_bool("ENABLE_FUTURES_FLOW", True),
+        "ENABLE_ALPHA_FLOW": env_bool("ENABLE_ALPHA_FLOW", True),
+        "ENABLE_WHALE": env_bool("ENABLE_WHALE", True),
+        "ENABLE_HEALTH": env_bool("ENABLE_HEALTH", True),
+    }
+
+    global RUNTIME_ENABLE_VOLUME_ALERT
+    RUNTIME_ENABLE_VOLUME_ALERT = flags["ENABLE_VOLUME_ALERT"]
+
+    tasks = []
+    enabled_workers = []
+
+    if flags["ENABLE_MARKET_MONITOR"]:
+        tasks.append(asyncio.create_task(market_monitor(bot, state)))
+        enabled_workers.append("market_monitor")
+    if flags["ENABLE_BTC_LEVEL"]:
+        tasks.append(asyncio.create_task(btc_key_level_monitor(bot, state)))
+        tasks.append(asyncio.create_task(btc_move_chart_monitor(bot, state)))
+        enabled_workers.extend(["btc_key_level_monitor", "btc_move_chart_monitor"])
+
+    # 유지 모니터는 기본 True (현 운영 동일)
+    tasks.append(asyncio.create_task(fear_greed_monitor(bot, state)))
+    tasks.append(asyncio.create_task(kimchi_monitor(bot, state)))
+    tasks.append(asyncio.create_task(liquidation_monitor(bot, state)))
+    tasks.append(asyncio.create_task(macro_pulse_monitor(bot, state)))
+    enabled_workers.extend(["fear_greed_monitor", "kimchi_monitor", "liquidation_monitor", "macro_pulse_monitor"])
+
+    if flags["ENABLE_WHALE"]:
+        tasks.append(asyncio.create_task(whale_monitor(bot, state)))
+        enabled_workers.append("whale_monitor")
+    if flags["ENABLE_LIVE_NEWS"]:
+        tasks.append(asyncio.create_task(live_news_monitor(bot, state)))
+        enabled_workers.append("live_news_monitor")
+    if flags["ENABLE_RECAP"]:
+        tasks.append(asyncio.create_task(live_recap_scheduler(bot, state)))
+        enabled_workers.append("live_recap_scheduler")
+    if flags["ENABLE_FUTURES_FLOW"]:
+        tasks.append(asyncio.create_task(futures_flow_monitor(bot, state)))
+        enabled_workers.append("futures_flow_monitor")
+    if flags["ENABLE_ALPHA_FLOW"]:
+        tasks.append(asyncio.create_task(alpha_flow_monitor(bot, state)))
+        enabled_workers.append("alpha_flow_monitor")
+    if flags["ENABLE_BRIEFING"]:
+        tasks.append(asyncio.create_task(market_session_scheduler(bot, state)))
+        tasks.append(asyncio.create_task(briefing_scheduler(bot, state)))
+        tasks.append(asyncio.create_task(overnight_recap_scheduler(bot, state)))
+        enabled_workers.extend(["market_session_scheduler", "briefing_scheduler", "overnight_recap_scheduler"])
+    if flags["ENABLE_HEALTH"]:
+        tasks.append(asyncio.create_task(ops_health_monitor(bot, state)))
+        enabled_workers.append("ops_health_monitor")
 
     if os.getenv("PORT"):
         tasks.append(asyncio.create_task(railway_port_health_server()))
+        enabled_workers.append("railway_port_health_server")
 
     logging.info("워커 루프 시작 CHANNEL=%s", CHANNEL_ID)
+    logging.info("활성 워커: %s", ", ".join(enabled_workers))
     await asyncio.gather(*tasks)
 
 
