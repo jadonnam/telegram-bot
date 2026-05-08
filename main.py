@@ -2823,7 +2823,97 @@ def related_assets_for_news(title: str, summary: str = "") -> str:
     return " · ".join(dict.fromkeys(tags[:3]))
 
 
+def pick_brief_line(seed: str, options: Tuple[str, ...]) -> str:
+    if not options:
+        return ""
+    hv = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+    idx = int(hv[:8], 16) % len(options)
+    return options[idx]
+
+
+def styled_market_brief(category: str, title: str, summary: str) -> str:
+    t = f"{title} {summary} {category}".lower()
+    seed = f"{title}|{summary}|{category}"
+
+    geo_keys = ("hormuz", "호르무즈", "oil", "wti", "brent", "유가", "원유", "해운", "선박", "supply chain", "공급망", "iran", "israel", "missile", "공습")
+    semi_keys = ("반도체", "semiconductor", "hbm", "nvidia", "엔비디아", "데이터센터", "cloud", "클라우드", "capex", "gpu", "ai server", "ai 서버", "전력", "원전")
+    coin_keys = ("bitcoin", "btc", "ethereum", "eth", "etf", "청산", "liquidation", "alt", "알트", "지지", "저항")
+    earn_keys = ("earnings", "guidance", "실적", "가이던스", "eps", "매출", "margin", "마진", "capex", "성장률", "어닝콜")
+    kr_keys = ("코스피", "kospi", "코스닥", "환율", "외국인", "기관", "연기금", "국민연금", "삼성전자", "하이닉스")
+
+    if any(k in t for k in geo_keys):
+        l1 = pick_brief_line(seed + ":g1", (
+            "유가는 잠깐 진정되는 분위기.",
+            "유가가 급하게 튀던 구간은 조금 식는 모습.",
+            "유가가 위로 쏠리던 힘이 잠깐 쉬어가는 중.",
+        ))
+        l2 = pick_brief_line(seed + ":g2", (
+            "해운쪽 변동성은 아직 남아있음.",
+            "선박 이슈가 남아있어서 공급망은 계속 봐야함.",
+            "물류쪽이 완전히 풀린 건 아니라 해운은 흔들릴 수 있음.",
+        ))
+        return f"{l1}\n\n{l2}"
+
+    if any(k in t for k in semi_keys):
+        l1 = pick_brief_line(seed + ":s1", (
+            "반도체쪽으로 다시 돈 들어오는 흐름.",
+            "AI 서버·칩 쪽에 수급이 다시 붙는 구간.",
+            "HBM/서버 투자 라인으로 매수세가 몰리는 모습.",
+        ))
+        l2 = pick_brief_line(seed + ":s2", (
+            "외국인 수급이 이어지는지가 핵심.",
+            "Capex가 꺾이지 않는지 보면 됨.",
+            "전력·인프라까지 같이 강한지 확인하면 됨.",
+        ))
+        return f"{l1}\n\n{l2}"
+
+    if any(k in t for k in coin_keys):
+        l1 = pick_brief_line(seed + ":c1", (
+            "BTC는 핵심 구간 안착 여부가 더 중요.",
+            "ETF/청산 이슈라 가격대 유지력이 포인트.",
+            "위아래 흔들려도 지지선 지키는지가 먼저.",
+        ))
+        l2 = pick_brief_line(seed + ":c2", (
+            "알트까지 수급 번지는지 보는 중.",
+            "거래량이 같이 붙어야 탄력이 이어짐.",
+            "위험자산 심리와 같이 움직이는지 확인하면 됨.",
+        ))
+        return f"{l1}\n\n{l2}"
+
+    if any(k in t for k in earn_keys):
+        l1 = pick_brief_line(seed + ":e1", (
+            "가이던스가 상향이면 분위기는 나쁘지 않음.",
+            "실적 숫자보다 콜에서 나온 톤이 더 중요.",
+            "매출보다 다음 분기 가이던스에 반응하는 장.",
+        ))
+        l2 = pick_brief_line(seed + ":e2", (
+            "Capex 유지 여부가 핵심.",
+            "마진 방어가 확인되면 수급이 붙기 쉬움.",
+            "성장률 둔화 신호만 없으면 매수 쪽이 유리.",
+        ))
+        return f"{l1}\n\n{l2}"
+
+    if category == "한국" or any(k in t for k in kr_keys):
+        l1 = pick_brief_line(seed + ":k1", (
+            "오늘은 외국인 방향이 중요해보임.",
+            "환율이랑 외국인 수급이 장 색깔을 정할 듯.",
+            "기관보다 외국인 매매 강도가 먼저 보이는 장.",
+        ))
+        l2 = pick_brief_line(seed + ":k2", (
+            "반도체가 계속 강하면 코스피도 버틸 가능성이 큼.",
+            "환율만 과하게 튀지 않으면 지수 방어는 가능해보임.",
+            "삼성전자·하이닉스만 무너지지 않으면 하단은 지켜질 수 있음.",
+        ))
+        return f"{l1}\n\n{l2}"
+
+    return ""
+
+
 def trader_brief_from_article(category: str, title: str, summary: str) -> str:
+    styled = styled_market_brief(category, title, summary)
+    if styled:
+        return styled
+
     title_clean = html_clean(strip_news_source_tail(title or ""), 160).strip()
     snippet = html_clean(summary or "", 280).strip()
     snippet = re.sub(r"https?://\S+", "", snippet)
