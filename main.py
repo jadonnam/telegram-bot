@@ -3179,6 +3179,77 @@ def related_assets_for_news(title: str, summary: str = "") -> str:
     return ""
 
 
+def classify_coin_news_type(title: str, summary: str) -> str:
+    txt = f"{title} {summary}".lower()
+    if any(k in txt for k in ("eth", "ethereum", "이더리움", "l2", "layer 2", "보안", "security", "양자", "quantum")):
+        return "eth_security"
+    if any(k in txt for k in ("sol", "solana", "솔라나", "sol etf", "jpmorgan", "jp morgan", "jp모건", "알트")):
+        return "sol_alt_flow"
+    if any(k in txt for k in ("스테이블코인", "stablecoin", "usdc", "circle", "coinbase", "stripe", "aws")):
+        return "stablecoin_payment"
+    if any(k in txt for k in ("청산", "liquidation", "급락", "급등", "volatility", "변동성", "거래량")):
+        return "volatility"
+    if any(k in txt for k in ("btc", "bitcoin", "비트코인", "현물 etf", "spot etf")):
+        return "btc_flow"
+    if any(k in txt for k in ("etf", "sec", "승인", "유입", "inflow")):
+        return "etf_flow"
+    return "coin_general"
+
+
+def related_assets_for_coin_news(title: str, summary: str) -> str:
+    news_type = classify_coin_news_type(title, summary)
+    if news_type == "eth_security":
+        return "ETH · SOL · 양자보안"
+    if news_type == "sol_alt_flow":
+        txt = f"{title} {summary}".lower()
+        if any(k in txt for k in ("jpmorgan", "jp morgan", "jp모건")):
+            return "SOL · ETF · 기관수급"
+        return "SOL · ETF · 알트"
+    if news_type == "btc_flow":
+        return "BTC · ETF · 기관수급"
+    if news_type == "stablecoin_payment":
+        return "USDC · Coinbase · 결제"
+    if news_type == "volatility":
+        return "BTC · 청산 · 변동성"
+    if news_type == "etf_flow":
+        return "ETF · 유입 · 수급"
+    return "BTC · ETH · SOL"
+
+
+def coin_news_brief(news_type: str, title: str, summary: str) -> str:
+    if news_type == "eth_security":
+        return "당장 가격을 움직일 이슈라기보단\nETH 생태계 보안 narrative 쪽으로 봐야함."
+    if news_type == "sol_alt_flow":
+        txt = f"{title} {summary}".lower()
+        if any(k in txt for k in ("jpmorgan", "jp morgan", "jp모건")):
+            return "알트 ETF narrative는 살아있지만\n돈이 실제로 들어오는지는 따로 봐야함."
+        return "알트 ETF 기대는 살아있지만\n실제 자금 유입 확인 전까진 기대감 구간에 가까움."
+    if news_type == "btc_flow":
+        return "BTC 수급 이슈라\n단기 가격보다 현물 자금 유입 강도가 핵심."
+    if news_type == "stablecoin_payment":
+        return "결제·스테이블코인 채택 뉴스라\n거래소 가격보다 실사용 확장 속도가 중요."
+    if news_type == "volatility":
+        return "단기 변동성 이슈라\n추격보다 청산 이후 수급 안정 확인이 우선."
+    if news_type == "etf_flow":
+        return "ETF 기대와 승인 헤드라인은 강하지만\n실제 유입 속도로 강도를 확인해야함."
+    return "코인 단일 재료보다\n자금이 어디로 이동하는지 같이 확인이 필요."
+
+
+def should_attach_btc_price(news_type: str, title: str, summary: str) -> bool:
+    txt = f"{title} {summary}".lower()
+    if news_type in ("btc_flow", "volatility"):
+        return True
+    return any(k in txt for k in ("market-wide", "시장 전반", "risk-on", "risk off"))
+
+
+def coin_news_flag(news_type: str, importance: int) -> str:
+    if importance >= 9:
+        return "중대"
+    if news_type in ("volatility", "btc_flow") and importance >= 7:
+        return "속보"
+    return "체크"
+
+
 def pick_brief_line(seed: str, options: Tuple[str, ...]) -> str:
     if not options:
         return ""
@@ -3345,6 +3416,7 @@ async def build_live_news_message(
     title_clean = strip_news_source_tail(title or "")
     title_ko = await ensure_korean_text(session, polish_korean_news_text(html_clean(title_clean, 150)))
     display_title = title_ko
+    coin_type = ""
 
     try:
         body = clean_news_body_for_message(title_clean, summary, source)
@@ -3370,6 +3442,7 @@ async def build_live_news_message(
         display_title = rewrite_coin_news_title(title_ko, title_clean, summary)
         if "solana나의" in display_title.lower():
             return ""
+        coin_type = classify_coin_news_type(title_clean, summary)
 
     brief = trader_brief_from_article(category, title_clean, summary)
     merged_text = f"{title_clean} {summary}".lower()
@@ -3377,6 +3450,8 @@ async def build_live_news_message(
         k in merged_text
         for k in ("hormuz", "호르무즈", "oil", "wti", "brent", "유가", "원유", "해운", "선박", "supply chain", "공급망")
     )
+    if category == "코인":
+        is_geo_oil_news = False
 
     title_ns = re.sub(r"\s+", "", title_ko or "")
     body_ns = re.sub(r"\s+", "", body_ko or "")
@@ -3386,6 +3461,8 @@ async def build_live_news_message(
         show_snippet = False
 
     flag = live_news_header(raw_score)
+    if category == "코인":
+        flag = coin_news_flag(coin_type, importance)
     msg = f"{category_emoji} {category}"
     if flag:
         msg += f" · {flag}"
@@ -3408,9 +3485,12 @@ async def build_live_news_message(
             meta.append(rel)
         if meta:
             msg += "\n" + " · ".join(meta)
-        msg += f"\n{brief}"
+        if category == "코인":
+            msg += "\n\n" + coin_news_brief(coin_type, title_clean, summary)
+        else:
+            msg += f"\n{brief}"
 
-    if category == "코인" and importance >= LIVE_BTC_MIN_IMPORTANCE:
+    if category == "코인" and importance >= LIVE_BTC_MIN_IMPORTANCE and should_attach_btc_price(coin_type, title_clean, summary):
         try:
             btc = await get_market_ticker(session, "BTCUSDT")
             if btc:
@@ -3421,10 +3501,10 @@ async def build_live_news_message(
             pass
 
     if category == "코인":
-        msg += f"\n중요도 {importance}/10"
-        rel = related_assets_for_news(title_clean, summary)
+        rel = related_assets_for_coin_news(title_clean, summary)
         if rel:
-            msg += f"\n관련: {rel}"
+            msg += f"\n\n관련: {rel}"
+        msg += f"\n중요도 {importance}/10"
 
     return compact_message(msg, LIVE_MESSAGE_SOFT_LIMIT)
 
