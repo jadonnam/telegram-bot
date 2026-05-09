@@ -48,6 +48,17 @@ VOLUME_SURGE_COOLDOWN_SEC = 90 * 60
 VOLUME_SURGE_DAILY_LIMIT = 5
 VOLUME_SURGE_REPEAT_COIN_COOLDOWN_SEC = 90 * 60
 COIN_TOPIC_COOLDOWN = timedelta(hours=3)
+TOPIC_DEFAULT_COOLDOWN = timedelta(minutes=90)
+TOPIC_COOLDOWNS = {
+    "sol_etf": timedelta(hours=3),
+    "btc_etf": timedelta(hours=2),
+    "eth_security": timedelta(hours=3),
+    "oil_hormuz": timedelta(hours=2),
+    "korea_semiconductor": timedelta(hours=2),
+    "korea_flow": timedelta(hours=1),
+    "rates_macro": timedelta(hours=2),
+    "liquidation": timedelta(hours=1),
+}
 
 SIGNAL_COOLDOWN = timedelta(minutes=45)
 FUTURES_SIGNAL_COOLDOWN = timedelta(minutes=90)
@@ -231,6 +242,7 @@ class State:
         self.recap_used_news_date: Optional[date] = None
         self.recap_used_topics: set[str] = set()
         self.coin_topic_last_sent: Dict[str, datetime] = {}
+        self.topic_last_sent: Dict[str, datetime] = {}
 
     def is_on_cooldown(self, signal_key: str, now: datetime) -> bool:
         expires_at = self.cooldowns.get(signal_key)
@@ -3253,6 +3265,60 @@ def coin_topic_key(title: str, summary: str) -> str:
     return "coin_general"
 
 
+def topic_key_for_news(title: str, summary: str, category: str) -> str:
+    txt = f"{title} {summary}".lower()
+    if category == "코인":
+        return coin_topic_key(title, summary)
+    if any(k in txt for k in ("hormuz", "호르무즈", "유가", "wti", "brent", "전쟁", "미사일")):
+        return "oil_hormuz"
+    if any(k in txt for k in ("fomc", "cpi", "pce", "금리", "연준", "달러", "dxy")):
+        return "rates_macro"
+    if category == "한국" and any(k in txt for k in ("반도체", "hbm", "하이닉스", "삼성전자")):
+        return "korea_semiconductor"
+    if category == "한국" and any(k in txt for k in ("외국인", "기관", "수급", "환율", "코스피")):
+        return "korea_flow"
+    if any(k in txt for k in ("hack", "해킹", "exploit", "거래소")):
+        return "exchange_hack"
+    if any(k in txt for k in ("청산", "liquidation", "급락", "급등")):
+        return "liquidation"
+    return "default"
+
+
+def topic_cooldown_for_key(topic_key: str) -> timedelta:
+    return TOPIC_COOLDOWNS.get(topic_key, TOPIC_DEFAULT_COOLDOWN)
+
+
+def classify_news_grade(title: str, summary: str, category: str) -> str:
+    txt = f"{title} {summary}".lower()
+    if low_quality_block_reason(title, summary):
+        return "C"
+    c_terms = (
+        "가격 예측", "price prediction", "forecast", "행사", "홍보", "인터뷰", "칼럼",
+        "스포츠", "셀럽", "범죄", "사고", "보도자료", "추천 종목",
+    )
+    if any(k in txt for k in c_terms):
+        return "C"
+
+    s_terms = (
+        "etf 승인", "etf 거절", "sec", "fomc", "cpi", "pce", "금리", "대형 청산",
+        "거래소 해킹", "hack", "hormuz", "호르무즈", "유가 급등", "btc 급등", "btc 급락",
+    )
+    if any(k in txt for k in s_terms):
+        return "S"
+
+    a_terms = (
+        "반도체", "hbm", "ai 데이터센터", "데이터센터", "기관 수급", "실적", "etf 유입",
+        "달러", "금리 흐름", "외국인",
+    )
+    if any(k in txt for k in a_terms):
+        return "A"
+
+    b_terms = ("전망", "코멘트", "해설", "분위기", "관측")
+    if any(k in txt for k in b_terms):
+        return "B"
+    return "B"
+
+
 def related_assets_for_coin_news(title: str, summary: str) -> str:
     news_type = classify_coin_news_type(title, summary)
     if news_type == "eth_security":
@@ -3762,8 +3828,14 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                         cand_emoji, cand_category = effective_live_news_category(
                             category_emoji, category, raw_title, raw_summary, raw_link
                         )
+                        grade = classify_news_grade(raw_title, raw_summary, cand_category)
+                        topic_key = topic_key_for_news(raw_title, raw_summary, cand_category)
+                        topic_cd = topic_cooldown_for_key(topic_key)
                         if is_duplicate_live_news(state, raw_title, raw_link, now):
                             logging.info("live_news blocked reason=duplicate title=%s", clean_text(raw_title, 90))
+                            continue
+                        if grade == "C":
+                            logging.info("live_news blocked reason=grade_c title=%s category=%s", clean_text(raw_title, 90), cand_category)
                             continue
                         hard_reason = low_quality_block_reason(raw_title, raw_summary)
                         if hard_reason:
@@ -3774,20 +3846,23 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                             if coin_reason:
                                 logging.info("live_news blocked reason=%s title=%s", coin_reason, clean_text(raw_title, 90))
                                 continue
-                            topic_key = coin_topic_key(raw_title, raw_summary)
                             topic_last = state.coin_topic_last_sent.get(topic_key)
                             if topic_last and (now - topic_last) < COIN_TOPIC_COOLDOWN:
                                 logging.info("live_news blocked reason=coin_topic_cooldown topic=%s title=%s", topic_key, clean_text(raw_title, 90))
                                 continue
+                        topic_last_global = state.topic_last_sent.get(topic_key)
+                        topic_on_cooldown = bool(topic_last_global and (now - topic_last_global) < topic_cd)
+                        if topic_on_cooldown:
+                            logging.info("live_news blocked reason=topic_cooldown topic=%s title=%s", topic_key, clean_text(raw_title, 90))
                         if not is_live_news_allowed(raw_title, raw_summary, cand_category, now, raw_link):
                             logging.info("live_news blocked reason=policy_filter title=%s category=%s", clean_text(raw_title, 90), cand_category)
                             continue
                         score = live_news_score(raw_title, raw_summary, cand_category, raw_link)
-                        candidates.append((score, entry, raw_title, raw_summary, raw_link, cand_emoji, cand_category))
+                        candidates.append((score, entry, raw_title, raw_summary, raw_link, cand_emoji, cand_category, grade, topic_key, topic_on_cooldown))
                     if not candidates:
                         continue
                     candidates.sort(key=lambda x: x[0], reverse=True)
-                    score, entry, raw_title, raw_summary, raw_link, cand_emoji, cand_category = candidates[0]
+                    score, entry, raw_title, raw_summary, raw_link, cand_emoji, cand_category, grade, topic_key, topic_on_cooldown = candidates[0]
                     combined_score = max(score, newsroom_keyword_score(raw_title, raw_summary, cand_category))
                     importance = normalize_news_importance(combined_score)
                     if importance <= 5:
@@ -3805,9 +3880,19 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                         continue
                     if not is_recap_title_natural(title_for_recap):
                         continue
-                    state.live_recent_items.append((now, cand_emoji, html_clean(title_for_recap, 150), source, combined_score))
+                    if grade in ("A", "B") or topic_on_cooldown:
+                        recap_grade = grade if grade in ("A", "B") else "A"
+                        state.live_recent_items.append((now, cand_emoji, html_clean(title_for_recap, 150), source, combined_score, recap_grade, topic_key))
 
-                    if importance < 8:
+                    if grade == "B":
+                        remember_live_news_hashes(state, raw_title, raw_link)
+                        state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
+                        continue
+                    if topic_on_cooldown:
+                        remember_live_news_hashes(state, raw_title, raw_link)
+                        state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
+                        continue
+                    if importance < 8 or grade not in ("S", "A"):
                         remember_live_news_hashes(state, raw_title, raw_link)
                         state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
                         continue
@@ -3823,6 +3908,7 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                     await send_news_card(bot, msg, image_url=image_url)
                     if cand_category == "코인":
                         state.coin_topic_last_sent[coin_topic_key(raw_title, raw_summary)] = now
+                    state.topic_last_sent[topic_key] = now
                     remember_live_news_hashes(state, raw_title, raw_link)
                     state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
                     state.live_last_sent_at = now
@@ -3899,11 +3985,11 @@ async def live_recap_scheduler(bot: Bot, state: State) -> None:
                         if weekend_mode:
                             top = sorted(
                                 items,
-                                key=lambda x: (recap_weekend_priority(x[2], x[1], x[3]), x[-1]),
+                                key=lambda x: (recap_weekend_priority(x[2], x[1], x[3]), x[4] if len(x) > 4 else 0),
                                 reverse=True,
                             )[:3]
                         else:
-                            top = sorted(items, key=lambda x: x[-1], reverse=True)[:3]
+                            top = sorted(items, key=lambda x: x[4] if len(x) > 4 else 0, reverse=True)[:3]
                         blocked_sources = {"Korea IT Times", "재외동포신문", "한민족센터", "코리아넷뉴스"}
                         lines = ["👀 지금 시장에서 보는 흐름"]
                         idx = 1
@@ -3911,7 +3997,10 @@ async def live_recap_scheduler(bot: Bot, state: State) -> None:
                         coin_count = 0
                         picked_hashes: list[str] = []
                         picked_topics: list[str] = []
-                        for _ts, emoji, title, source, _score in top:
+                        for item in top:
+                            _ts, emoji, title, source, _score, *extra = item
+                            recap_grade = extra[0] if len(extra) >= 1 else "A"
+                            recap_topic = extra[1] if len(extra) >= 2 else normalize_recap_bucket(recap_market_keyword(title, emoji))
                             if source in blocked_sources:
                                 logging.info("recap skipped reason=blocked_source title=%s source=%s", clean_text(title, 90), source)
                                 continue
@@ -3924,11 +4013,12 @@ async def live_recap_scheduler(bot: Bot, state: State) -> None:
                             if low_quality_block_reason(title, ""):
                                 logging.info("recap skipped reason=low_quality title=%s", clean_text(title, 90))
                                 continue
+                            if recap_grade not in ("A", "B"):
+                                logging.info("recap skipped reason=grade_filter grade=%s title=%s", recap_grade, clean_text(title, 90))
+                                continue
                             keyword = recap_market_keyword(title, emoji)
                             bucket = normalize_recap_bucket(keyword)
-                            topic_key = bucket
-                            if bucket == "코인":
-                                topic_key = coin_topic_key(title, "")
+                            topic_key = recap_topic if recap_topic else bucket
                             title_hash = recap_title_hash(title)
                             if title_hash in state.recap_used_news_titles:
                                 logging.info("recap skipped reason=already_used_today title=%s", clean_text(title, 90))
