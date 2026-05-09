@@ -1307,11 +1307,15 @@ async def market_monitor(bot: Bot, state: State) -> None:
                 if surge_rows:
                     surge_rows.sort(key=lambda x: x[1], reverse=True)
                     lines = ["🔥 거래량 급증"]
+                    top_symbol = surge_rows[0][0] if surge_rows else ""
                     for symbol, ratio, latest_vol in surge_rows[:3]:
                         coin = symbol.replace("USDT", "")
                         lines.append(f"{coin} 거래대금 x{ratio:.1f}")
                         lines.append(f"5분 거래대금 {latest_vol/1_000_000:.1f}M USDT")
-                    lines.append("추격보다 80K 유지 먼저 보자.")
+                    if top_symbol == "BTCUSDT":
+                        lines.append("추격보다 80K 유지 먼저 보자.")
+                    else:
+                        lines.append("알트 수급이 이어지는지 보자.")
                     await safe_send(bot, "\n".join(lines), disable_preview=True)
             except Exception:
                 logging.exception("market_monitor 오류")
@@ -2126,7 +2130,13 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         eth = await coin_snapshot(session, "ETHUSDT")
                         sol = await coin_snapshot(session, "SOLUSDT")
 
-                        msg = session_section("🌅 한국장 시작 전 브리핑")
+                        if weekend:
+                            msg = session_section("🌅 주말 시장 체크")
+                        elif kr_closed:
+                            msg = session_section("🌅 휴장일 시장 체크")
+                        else:
+                            msg = session_section("🌅 한국장 시작 전 브리핑")
+
                         if usd_krw:
                             msg += f"\n💵 달러/원: {usd_krw:,.2f}원"
                         msg += f"\n{btc_text}"
@@ -2136,18 +2146,26 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                             msg += f"\n{move_icon(sol[1])} SOL: {sol[0]:,.0f} USDT ({fmt_pct(sol[1])})"
 
                         msg += "\n"
-                        if sp_fut:
-                            msg += f"\n{session_snapshot_line('S&P500 선물', sp_fut)}"
-                        if nq_fut:
-                            msg += f"\n{session_snapshot_line('나스닥 선물', nq_fut)}"
-                        if sox:
-                            msg += f"\n{session_snapshot_line('필라델피아 반도체지수', sox)}"
-                        if wti:
-                            msg += f"\n{session_snapshot_line('WTI 유가', wti)}"
-                        if dxy:
-                            msg += f"\n{session_snapshot_line('달러인덱스', dxy)}"
-                        if tnx:
-                            msg += f"\n{session_snapshot_line('미10년물 금리', tnx)}"
+                        if weekend or kr_closed:
+                            if wti:
+                                msg += f"\n{session_snapshot_line('WTI 유가', wti)}"
+                            if dxy:
+                                msg += f"\n{session_snapshot_line('달러인덱스', dxy)}"
+                            if sp_fut:
+                                msg += f"\n{session_snapshot_line('미국 ETF 선물(S&P500)', sp_fut)}"
+                        else:
+                            if sp_fut:
+                                msg += f"\n{session_snapshot_line('S&P500 선물', sp_fut)}"
+                            if nq_fut:
+                                msg += f"\n{session_snapshot_line('나스닥 선물', nq_fut)}"
+                            if sox:
+                                msg += f"\n{session_snapshot_line('필라델피아 반도체지수', sox)}"
+                            if wti:
+                                msg += f"\n{session_snapshot_line('WTI 유가', wti)}"
+                            if dxy:
+                                msg += f"\n{session_snapshot_line('달러인덱스', dxy)}"
+                            if tnx:
+                                msg += f"\n{session_snapshot_line('미10년물 금리', tnx)}"
 
                         fng = await get_fear_greed(session)
                         kimchi = await get_kimchi_premium(session)
@@ -2158,13 +2176,20 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                             premium, _, _ = kimchi
                             msg += f"\n🇰🇷 김치프리미엄: {fmt_pct(premium)}"
 
-                        if kr_closed:
-                            msg += "\n\n오늘은 한국장 휴장이라 정규장 데이터는 제한적."
-                            msg += "\n대신 환율·코인·유가 흐름 위주로 보면 됨."
+                        if weekend:
+                            msg += "\n\n오늘은 한국장 휴장이라"
+                            msg += "\n국내 주식 수급 체크는 쉬어가는 날."
+                            msg += "\n\n대신 코인, ETF, 유가, 달러 흐름만 봅니다."
+                        elif kr_closed:
+                            msg += "\n\n오늘은 한국장 휴장일이라"
+                            msg += "\n정규장 수급 대신 코인·ETF·유가·달러 흐름만 체크."
                         else:
                             msg += f"\n\n📌 오늘 핵심:\n{final_kr_open_focus(safe_pct_from_snapshot(nq_fut), safe_pct_from_snapshot(sox), usd_krw or 0, safe_pct_from_snapshot(wti))}"
                         msg += f"\n\n🧭 시장 분위기: {session_mood(safe_pct_from_snapshot(sp_fut), safe_pct_from_snapshot(nq_fut), safe_pct_from_snapshot(sox), -safe_pct_from_snapshot(dxy), -safe_pct_from_snapshot(tnx))}"
-                        msg += "\n⚠️ 장 초반 추격매수보다 거래량 확인이 우선."
+                        if not (weekend or kr_closed):
+                            msg += "\n⚠️ 장 초반 추격매수보다 거래량 확인이 우선."
+                        else:
+                            msg += "\n⚠️ 변동성 큰 자산은 추격보다 거래량 확인이 우선."
                         await safe_send(bot, msg, disable_preview=True)
                         state.market_session_sent_dates[key] = now.date()
                         state.briefing_sent_dates["08"] = now.date()
@@ -2214,7 +2239,10 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         else:
                             msg += f"\n\n📌 오늘 핵심:\n{final_us_pre_focus(safe_pct_from_snapshot(sp_fut), safe_pct_from_snapshot(nq_fut), safe_pct_from_snapshot(dxy), safe_pct_from_snapshot(tnx), safe_pct_from_snapshot(wti))}"
                         msg += f"\n\n🧭 미국장 분위기: {session_mood(safe_pct_from_snapshot(sp_fut), safe_pct_from_snapshot(nq_fut), safe_pct_from_snapshot(sox), -safe_pct_from_snapshot(dxy), -safe_pct_from_snapshot(tnx))}"
-                        msg += "\n\n체크할 것:\n- S&P500·나스닥 초반 방향\n- 반도체지수 수급\n- 달러·금리 동반 상승 여부\n- BTC 80K/79K 반응"
+                        if us_holiday or weekend:
+                            msg += "\n\n체크할 것:\n- BTC/ETH/SOL 변동성\n- ETF 관련 헤드라인 강도\n- 유가·달러 동반 방향"
+                        else:
+                            msg += "\n\n체크할 것:\n- S&P500·나스닥 초반 방향\n- 반도체지수 수급\n- 달러·금리 동반 상승 여부\n- BTC 80K/79K 반응"
                         await safe_send(bot, msg, disable_preview=True)
                         state.market_session_sent_dates[key] = now.date()
                         log_slot(key, now, False, kr_closed, us_holiday, weekend, "sent")
@@ -2268,7 +2296,10 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         else:
                             msg += f"\n\n📌 오늘 핵심:\n{final_us_close_focus(safe_pct_from_snapshot(spx), safe_pct_from_snapshot(ixic), safe_pct_from_snapshot(dji), safe_pct_from_snapshot(sox), safe_pct_from_snapshot(dxy), safe_pct_from_snapshot(tnx), safe_pct_from_snapshot(wti))}"
                         msg += f"\n\n🧭 미국장 분위기: {session_mood(safe_pct_from_snapshot(spx), safe_pct_from_snapshot(ixic), safe_pct_from_snapshot(dji), safe_pct_from_snapshot(sox), -safe_pct_from_snapshot(dxy), -safe_pct_from_snapshot(tnx))}"
-                        msg += "\n\n체크할 것:\n- 한국장 반도체 대형주 수급\n- 환율과 외국인 매매\n- BTC 80K 재안착 여부"
+                        if weekend or kr_closed:
+                            msg += "\n\n체크할 것:\n- BTC 80K 재안착 여부\n- 알트 수급 유지 여부\n- 유가·달러 방향"
+                        else:
+                            msg += "\n\n체크할 것:\n- 한국장 반도체 대형주 수급\n- 환율과 외국인 매매\n- BTC 80K 재안착 여부"
                         await safe_send(bot, msg, disable_preview=True)
                         state.market_session_sent_dates[key] = now.date()
                         log_slot(key, now, False, kr_closed, us_holiday, weekend, "sent")
@@ -2581,6 +2612,10 @@ def is_recap_title_natural(title: str) -> bool:
 
 def recap_market_keyword(title: str, emoji: str) -> str:
     tl = (title or "").lower()
+    if any(k in tl for k in ("etf", "비트코인 etf", "현물 etf", "승인", "상장지수")):
+        return "ETF"
+    if any(k in tl for k in ("달러", "dxy", "환율", "10년물", "국채", "금리", "연준", "fomc", "cpi", "pce")):
+        return "달러"
     if any(k in tl for k in ("호르무즈", "유가", "원유", "해운", "공급망", "hormuz", "oil", "wti", "brent")):
         return "유가"
     if emoji == "🟠" or any(k in tl for k in ("btc", "bitcoin", "비트코인", "이더리움", "etf", "알트", "청산")):
@@ -2592,6 +2627,12 @@ def recap_market_keyword(title: str, emoji: str) -> str:
     if any(k in tl for k in ("금리", "연준", "달러", "fomc", "cpi", "pce")):
         return "금리"
     return "시장"
+
+
+def normalize_recap_bucket(keyword: str) -> str:
+    if keyword in ("코인", "BTC", "ETH", "SOL", "알트"):
+        return "코인"
+    return keyword
 
 
 def recap_weekend_priority(title: str, emoji: str, source: str) -> int:
@@ -2614,6 +2655,28 @@ async def ensure_korean_text(session: aiohttp.ClientSession, value: str) -> str:
     if mostly_english(value):
         value = await translate_to_korean(session, value)
     return html_clean(value, 220)
+
+
+def rewrite_coin_news_title(title_ko: str, title: str, summary: str) -> str:
+    text = html_clean(f"{title_ko} {title} {summary}", 420)
+    text = re.sub(r"\s+", " ", text).strip()
+    text = text.replace("Solana나의", "솔라나")
+    text = re.sub(r"^(암호화폐\s*상승\s*이유|암호화폐\s*하락\s*이유|why\s+crypto\s+is\s+(up|down))\s*[:\-]\s*", "", text, flags=re.I)
+
+    if any(k in text.lower() for k in ("solana", "솔라나")) and any(k in text.lower() for k in ("ethereum", "이더리움", "l2", "layer 2")) and any(k in text.lower() for k in ("quantum", "양자", "보안", "security")):
+        return "솔라나 공동창업자가\n이더리움 L2의 양자 보안 리스크를 언급."
+    if any(k in text.lower() for k in ("jp morgan", "jpmorgan", "jp모건")):
+        return "JP모건 발언이 나오며\n리스크자산 심리가 다시 흔들리는 구간."
+    if any(k in text.lower() for k in ("sec", "규제", "승인", "거절")):
+        return "SEC·규제 이슈가 재부각되며\n코인 시장 변동성이 커질 수 있는 뉴스."
+    if any(k in text.lower() for k in ("etf",)):
+        if any(k in text.lower() for k in ("sol", "solana", "솔라나")):
+            return "솔라나 ETF 기대감이 유지되는지\n실제 자금 유입으로 확인이 필요한 구간."
+        return "ETF 관련 이슈라\n가격보다 자금 유입 속도가 핵심."
+
+    fallback = html_clean(strip_news_source_tail(title_ko or title), 90)
+    fallback = re.sub(r"\s+", " ", fallback).strip(" -–—:·.")
+    return fallback
 
 
 def live_news_score(title: str, summary: str, category: str, link: str = "") -> int:
@@ -3236,6 +3299,7 @@ async def build_live_news_message(
 ) -> str:
     title_clean = strip_news_source_tail(title or "")
     title_ko = await ensure_korean_text(session, polish_korean_news_text(html_clean(title_clean, 150)))
+    display_title = title_ko
 
     try:
         body = clean_news_body_for_message(title_clean, summary, source)
@@ -3257,6 +3321,9 @@ async def build_live_news_message(
     raw_score = max(raw_score, newsroom_keyword_score(title_clean, summary, category))
     importance = normalize_news_importance(raw_score)
 
+    if category == "코인":
+        display_title = rewrite_coin_news_title(title_ko, title_clean, summary)
+
     brief = trader_brief_from_article(category, title_clean, summary)
     merged_text = f"{title_clean} {summary}".lower()
     is_geo_oil_news = any(
@@ -3276,7 +3343,7 @@ async def build_live_news_message(
     if flag:
         msg += f" · {flag}"
     if not is_geo_oil_news:
-        msg += f"\n{title_ko}"
+        msg += f"\n{display_title}"
         if show_snippet:
             msg += f"\n{body_ko}"
 
@@ -3288,9 +3355,9 @@ async def build_live_news_message(
             msg += f"\n관련: {rel}"
     else:
         meta: list[str] = []
-        if importance >= 7:
+        if category != "코인" and importance >= 7:
             meta.append(f"중요도 {importance}/10")
-        if rel and importance >= 6:
+        if category != "코인" and rel and importance >= 6:
             meta.append(rel)
         if meta:
             msg += "\n" + " · ".join(meta)
@@ -3305,6 +3372,12 @@ async def build_live_news_message(
                 msg += f"\nBTC {btc_price:,.0f} ({fmt_pct(btc_pct)})"
         except Exception:
             pass
+
+    if category == "코인":
+        msg += f"\n중요도 {importance}/10"
+        rel = related_assets_for_news(title_clean, summary)
+        if rel:
+            msg += f"\n관련: {rel}"
 
     return compact_message(msg, LIVE_MESSAGE_SOFT_LIMIT)
 
@@ -3605,6 +3678,8 @@ async def live_recap_scheduler(bot: Bot, state: State) -> None:
                         blocked_sources = {"Korea IT Times", "재외동포신문", "한민족센터", "코리아넷뉴스"}
                         lines = ["👀 지금 시장에서 보는 흐름"]
                         idx = 1
+                        seen_buckets: set[str] = set()
+                        coin_count = 0
                         for _ts, emoji, title, source, _score in top:
                             if source in blocked_sources:
                                 continue
@@ -3613,7 +3688,24 @@ async def live_recap_scheduler(bot: Bot, state: State) -> None:
                             if not is_recap_title_natural(title):
                                 continue
                             keyword = recap_market_keyword(title, emoji)
-                            lines.append(f"{idx}. {keyword}\n{strip_news_source_tail(title)}")
+                            bucket = normalize_recap_bucket(keyword)
+                            if bucket in seen_buckets:
+                                continue
+                            if bucket == "코인" and coin_count >= 2:
+                                continue
+                            seen_buckets.add(bucket)
+                            if bucket == "코인":
+                                coin_count += 1
+                            title_line = strip_news_source_tail(title)
+                            if bucket == "코인":
+                                title_line = "핵심 코인 이슈는 기대감 대비 실제 자금 유입이 확인되는지 점검 구간."
+                            elif bucket == "유가":
+                                title_line = "유가와 해운 변수는 단기 진정과 재확대 가능성을 함께 봐야 하는 흐름."
+                            elif bucket in ("금리", "달러"):
+                                title_line = "금리·달러 방향이 위험자산 변동성을 키우는지 확인이 필요한 구간."
+                            elif bucket in ("ETF",):
+                                title_line = "ETF 이슈는 헤드라인보다 실제 수급 반응을 먼저 확인할 구간."
+                            lines.append(f"{idx}. {bucket}\n{title_line}")
                             idx += 1
                             if idx > 3:
                                 break
