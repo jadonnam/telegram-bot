@@ -44,7 +44,10 @@ VOLUME_SURGE_MIN_NOTIONAL = {
     "ETHUSDT": 3_000_000,
     "SOLUSDT": 1_000_000,
 }
-VOLUME_SURGE_COOLDOWN_SEC = 60 * 60
+VOLUME_SURGE_COOLDOWN_SEC = 90 * 60
+VOLUME_SURGE_DAILY_LIMIT = 5
+VOLUME_SURGE_REPEAT_COIN_COOLDOWN_SEC = 90 * 60
+COIN_TOPIC_COOLDOWN = timedelta(hours=3)
 
 SIGNAL_COOLDOWN = timedelta(minutes=45)
 FUTURES_SIGNAL_COOLDOWN = timedelta(minutes=90)
@@ -215,6 +218,9 @@ class State:
         self.last_market_price: Dict[str, float] = {}
         self.price_milestone_cooldowns: Dict[str, datetime] = {}
         self.volume_surge_last: Dict[str, datetime] = {}
+        self.volume_surge_daily_date: Optional[date] = None
+        self.volume_surge_daily_count = 0
+        self.volume_surge_last_coins: Dict[str, datetime] = {}
 
         self.whale_seen_ids: Deque[str] = deque(maxlen=8000)
         self.whale_seen_set = set()
@@ -223,6 +229,8 @@ class State:
         self.alpha_seen_set = set()
         self.recap_used_news_titles: set[str] = set()
         self.recap_used_news_date: Optional[date] = None
+        self.recap_used_topics: set[str] = set()
+        self.coin_topic_last_sent: Dict[str, datetime] = {}
 
     def is_on_cooldown(self, signal_key: str, now: datetime) -> bool:
         expires_at = self.cooldowns.get(signal_key)
@@ -316,7 +324,7 @@ def sentiment_label(*pcts: float) -> str:
     if avg >= 0.35:
         return "🟢 위험선호 우위"
     if avg <= -0.35:
-        return "🔴 리스크오프 우위"
+        return "🔴 관망 우위"
     return "🟡 혼조"
 
 
@@ -1261,6 +1269,10 @@ async def market_monitor(bot: Bot, state: State) -> None:
         while True:
             started = utc_now()
             try:
+                kst_today = now_kst().date()
+                if state.volume_surge_daily_date != kst_today:
+                    state.volume_surge_daily_date = kst_today
+                    state.volume_surge_daily_count = 0
                 surge_rows = []
                 for symbol in SYMBOLS:
                     now = utc_now()
@@ -1303,6 +1315,13 @@ async def market_monitor(bot: Bot, state: State) -> None:
                             min_notional = float(VOLUME_SURGE_MIN_NOTIONAL.get(symbol, 1_000_000))
                             if ratio >= VOLUME_SURGE_THRESHOLD and latest_vol >= min_notional:
                                 last_sent = state.volume_surge_last.get(symbol)
+                                repeat_last = state.volume_surge_last_coins.get(symbol)
+                                if state.volume_surge_daily_count >= VOLUME_SURGE_DAILY_LIMIT:
+                                    logging.info("volume_surge skipped reason=daily_limit symbol=%s", symbol)
+                                    continue
+                                if repeat_last and (now - repeat_last).total_seconds() < VOLUME_SURGE_REPEAT_COIN_COOLDOWN_SEC:
+                                    logging.info("volume_surge skipped reason=repeat_coin_cooldown symbol=%s", symbol)
+                                    continue
                                 if not last_sent or (now - last_sent).total_seconds() >= VOLUME_SURGE_COOLDOWN_SEC:
                                     surge_rows.append((symbol, ratio, latest_vol))
                                     state.volume_surge_last[symbol] = now
@@ -1310,10 +1329,20 @@ async def market_monitor(bot: Bot, state: State) -> None:
                     surge_rows.sort(key=lambda x: x[1], reverse=True)
                     lines = ["🔥 거래량 급증"]
                     top_symbol = surge_rows[0][0] if surge_rows else ""
-                    for symbol, ratio, latest_vol in surge_rows[:3]:
-                        coin = symbol.replace("USDT", "")
-                        lines.append(f"{coin} 거래대금 x{ratio:.1f}")
-                        lines.append(f"5분 거래대금 {latest_vol/1_000_000:.1f}M USDT")
+                    top_symbols = [x[0] for x in surge_rows[:3]]
+                    if {"BTCUSDT", "ETHUSDT", "SOLUSDT"}.issubset(set(top_symbols)):
+                        lines.append("BTC·ETH·SOL 거래량이 같이 들어오는 중.")
+                        lines.append("단기 반등 시도는 나오고 있지만")
+                        lines.append("추격보다 유지 여부 먼저 확인.")
+                    else:
+                        for symbol, ratio, latest_vol in surge_rows[:3]:
+                            coin = symbol.replace("USDT", "")
+                            lines.append(f"{coin} 거래대금 x{ratio:.1f}")
+                            lines.append(f"5분 거래대금 {latest_vol/1_000_000:.1f}M USDT")
+                    for symbol, _ratio, _latest in surge_rows[:3]:
+                        state.volume_surge_last_coins[symbol] = utc_now()
+                    state.volume_surge_daily_count += 1
+                    logging.info("volume_surge sent count_today=%s symbols=%s", state.volume_surge_daily_count, ",".join(top_symbols))
                     if top_symbol == "BTCUSDT":
                         lines.append("추격보다 80K 유지 먼저 보자.")
                     else:
@@ -1746,7 +1775,7 @@ def market_mood_label(*pcts: float) -> str:
     if avg >= 0.55:
         return "🟢 위험선호"
     if avg <= -0.55:
-        return "🔴 리스크오프"
+        return "🔴 관망 우위"
     if max(vals) - min(vals) >= 1.0:
         return "🟡 종목장"
     return "🟡 눈치보기 장세"
@@ -1893,7 +1922,7 @@ def market_direction_label(*pcts: float) -> str:
     if avg >= 0.45:
         return "🟢 위험선호"
     if avg <= -0.45:
-        return "🔴 리스크오프"
+        return "🔴 관망 우위"
     if max(vals) - min(vals) >= 0.9:
         return "🟡 종목장"
     return "🟡 눈치보기"
@@ -2012,7 +2041,7 @@ def session_mood(*pcts: float) -> str:
     if avg >= 0.55:
         return "🟢 위험선호"
     if avg <= -0.55:
-        return "🔴 리스크오프"
+        return "🔴 관망 우위"
     if max(vals) - min(vals) >= 1.2:
         return "🟡 지수별 온도차"
     return "🟡 눈치보기 장세"
@@ -2194,6 +2223,7 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                             msg += "\n⚠️ 장 초반 추격매수보다 거래량 확인이 우선."
                         else:
                             msg += "\n\n체크할 것:\n- BTC 80K 유지 여부\n- 알트 수급 이어지는지\n- 유가·달러 흐름"
+                            msg += f"\n{briefing_variation(f'kr_pre:{now.date()}')}"
                         await safe_send(bot, msg, disable_preview=True)
                         state.market_session_sent_dates[key] = now.date()
                         state.briefing_sent_dates["08"] = now.date()
@@ -2245,6 +2275,7 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         msg += f"\n\n🧭 미국장 분위기: {session_mood(safe_pct_from_snapshot(sp_fut), safe_pct_from_snapshot(nq_fut), safe_pct_from_snapshot(sox), -safe_pct_from_snapshot(dxy), -safe_pct_from_snapshot(tnx))}"
                         if us_holiday or weekend:
                             msg += "\n\n체크할 것:\n- BTC 80K 유지 여부\n- 달러·유가 흐름\n- 다음 미국장 전 선물 반응"
+                            msg += f"\n{briefing_variation(f'us_pre:{now.date()}')}"
                         else:
                             msg += "\n\n체크할 것:\n- S&P500·나스닥 초반 방향\n- 반도체지수 수급\n- 달러·금리 동반 상승 여부\n- BTC 80K/79K 반응"
                         await safe_send(bot, msg, disable_preview=True)
@@ -2302,6 +2333,7 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         msg += f"\n\n🧭 미국장 분위기: {session_mood(safe_pct_from_snapshot(spx), safe_pct_from_snapshot(ixic), safe_pct_from_snapshot(dji), safe_pct_from_snapshot(sox), -safe_pct_from_snapshot(dxy), -safe_pct_from_snapshot(tnx))}"
                         if weekend or kr_closed:
                             msg += "\n\n체크할 것:\n- BTC 80K 유지 여부\n- 알트 수급 이어지는지\n- 유가·달러 흐름"
+                            msg += f"\n{briefing_variation(f'us_close:{now.date()}')}"
                         else:
                             msg += "\n\n체크할 것:\n- 한국장 반도체 대형주 수급\n- 환율과 외국인 매매\n- BTC 80K 재안착 여부"
                         await safe_send(bot, msg, disable_preview=True)
@@ -2428,11 +2460,13 @@ LIVE_HARD_BLOCK_TERMS = (
     "코리아넷뉴스", "재외동포신문", "한민족센터", "aipick", "ai픽",
     "불법 고용", "외국인 선원", "해경", "어선", "적발", "경찰",
     "가격 예측", "price prediction", "forecast", "전망 기사", "sponsored",
+    "ufc", "열병식", "백악관 이벤트", "추천 종목", "왜 오르나", "급등 이유", "클릭",
 )
 
 EXTRA_LOW_QUALITY_BLOCK_TERMS = (
     "불법 고용", "외국인 선원", "해경", "어선", "적발", "사고", "범죄", "경찰",
     "학회", "가격 예측", "price prediction", "forecast", "전망 기사", "sponsored", "보도자료",
+    "ufc", "열병식", "단순 행사", "셀럽", "스포츠", "백악관 이벤트", "클릭유도", "왜 오르나", "급등 이유", "추천 종목",
 )
 
 COIN_REQUIRED_KEYWORDS = (
@@ -2703,11 +2737,15 @@ def rewrite_coin_news_title(title_ko: str, title: str, summary: str) -> str:
     text = re.sub(r"\s+", " ", text).strip()
     text = text.replace("Solana나의", "솔라나")
     text = re.sub(r"^(암호화폐\s*상승\s*이유|암호화폐\s*하락\s*이유|why\s+crypto\s+is\s+(up|down))\s*[:\-]\s*", "", text, flags=re.I)
+    text = re.sub(r"(가격\s*예측|전망|분석|보고서)\s*[:\-]?\s*", "", text, flags=re.I)
+    text = text.replace("공동 창립자는", "공동창업자는")
+    text = text.replace("라고 경고했습니다", "라고 봤습니다")
+    text = text.replace("가능성 제기", "가능성이 있다는 의견")
 
     if any(k in text.lower() for k in ("solana", "솔라나")) and any(k in text.lower() for k in ("ethereum", "이더리움", "l2", "layer 2")) and any(k in text.lower() for k in ("quantum", "양자", "보안", "security")):
-        return "솔라나 공동창업자가\n이더리움 L2의 양자 보안 리스크를 언급."
+        return "솔라나 쪽에서\n이더리움 L2의 양자 보안 이슈를 짚은 뉴스."
     if any(k in text.lower() for k in ("jp morgan", "jpmorgan", "jp모건")):
-        return "JP모건 발언이 나오며\n리스크자산 심리가 다시 흔들리는 구간."
+        return "JP모건은\n초기 자금 반응이 생각보다 약할 수 있다고 보는 분위기."
     if any(k in text.lower() for k in ("sec", "규제", "승인", "거절")):
         return "SEC·규제 이슈가 재부각되며\n코인 시장 변동성이 커질 수 있는 뉴스."
     if any(k in text.lower() for k in ("etf",)):
@@ -2717,6 +2755,7 @@ def rewrite_coin_news_title(title_ko: str, title: str, summary: str) -> str:
 
     fallback = html_clean(strip_news_source_tail(title_ko or title), 90)
     fallback = re.sub(r"\s+", " ", fallback).strip(" -–—:·.")
+    fallback = re.sub(r"(공동\s*창립자는|가격\s*예측|전망|분석|보고서|경고했습니다|가능성\s*제기)", "", fallback).strip()
     return fallback
 
 
@@ -3025,7 +3064,7 @@ def market_mood_label(*pcts: float) -> str:
     if avg >= 0.55:
         return "🟢 위험선호"
     if avg <= -0.55:
-        return "🔴 리스크오프"
+        return "🔴 관망 우위"
     if max(vals) - min(vals) >= 1.0:
         return "🟡 종목장"
     return "🟡 눈치보기 장세"
@@ -3196,6 +3235,24 @@ def classify_coin_news_type(title: str, summary: str) -> str:
     return "coin_general"
 
 
+def coin_topic_key(title: str, summary: str) -> str:
+    txt = f"{title} {summary}".lower()
+    news_type = classify_coin_news_type(title, summary)
+    if news_type == "sol_alt_flow" and "etf" in txt:
+        return "sol_etf"
+    if news_type == "eth_security":
+        return "eth_security"
+    if news_type == "stablecoin_payment":
+        return "stablecoin_payment"
+    if news_type == "btc_flow":
+        return "btc_flow"
+    if news_type == "volatility":
+        return "volatility"
+    if news_type == "etf_flow":
+        return "etf_flow"
+    return "coin_general"
+
+
 def related_assets_for_coin_news(title: str, summary: str) -> str:
     news_type = classify_coin_news_type(title, summary)
     if news_type == "eth_security":
@@ -3218,11 +3275,11 @@ def related_assets_for_coin_news(title: str, summary: str) -> str:
 
 def coin_news_brief(news_type: str, title: str, summary: str) -> str:
     if news_type == "eth_security":
-        return "당장 가격을 움직일 이슈라기보단\nETH 생태계 보안 narrative 쪽으로 봐야함."
+        return "당장 가격보다\nETH 생태계 보안 이슈로 보는 게 맞는 구간."
     if news_type == "sol_alt_flow":
         txt = f"{title} {summary}".lower()
         if any(k in txt for k in ("jpmorgan", "jp morgan", "jp모건")):
-            return "알트 ETF narrative는 살아있지만\n돈이 실제로 들어오는지는 따로 봐야함."
+            return "알트 ETF 기대감은 남아있지만\n돈이 실제로 붙는지는 따로 확인이 필요."
         return "알트 ETF 기대는 살아있지만\n실제 자금 유입 확인 전까진 기대감 구간에 가까움."
     if news_type == "btc_flow":
         return "BTC 수급 이슈라\n단기 가격보다 현물 자금 유입 강도가 핵심."
@@ -3248,6 +3305,16 @@ def coin_news_flag(news_type: str, importance: int) -> str:
     if news_type in ("volatility", "btc_flow") and importance >= 7:
         return "속보"
     return "체크"
+
+
+def briefing_variation(seed: str) -> str:
+    return pick_brief_line(seed, (
+        "눈치보기 장세라 수급 유지 여부를 먼저 보자.",
+        "단기 숨고르기 구간이라 매물대 반응을 확인할 때.",
+        "방향 탐색 구간이라 거래량 붙는 자산 위주로 확인.",
+        "과열 없이 버티는 흐름인지 체크가 먼저.",
+        "변동성 줄어드는 중인지, 자금 반응이 살아있는지 보자.",
+    ))
 
 
 def pick_brief_line(seed: str, options: Tuple[str, ...]) -> str:
@@ -3707,6 +3774,11 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                             if coin_reason:
                                 logging.info("live_news blocked reason=%s title=%s", coin_reason, clean_text(raw_title, 90))
                                 continue
+                            topic_key = coin_topic_key(raw_title, raw_summary)
+                            topic_last = state.coin_topic_last_sent.get(topic_key)
+                            if topic_last and (now - topic_last) < COIN_TOPIC_COOLDOWN:
+                                logging.info("live_news blocked reason=coin_topic_cooldown topic=%s title=%s", topic_key, clean_text(raw_title, 90))
+                                continue
                         if not is_live_news_allowed(raw_title, raw_summary, cand_category, now, raw_link):
                             logging.info("live_news blocked reason=policy_filter title=%s category=%s", clean_text(raw_title, 90), cand_category)
                             continue
@@ -3719,6 +3791,7 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                     combined_score = max(score, newsroom_keyword_score(raw_title, raw_summary, cand_category))
                     importance = normalize_news_importance(combined_score)
                     if importance <= 5:
+                        logging.info("live_news blocked reason=score_cutoff importance=%s title=%s", importance, clean_text(raw_title, 90))
                         remember_live_news_hashes(state, raw_title, raw_link)
                         state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
                         continue
@@ -3748,6 +3821,8 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                         state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
                         continue
                     await send_news_card(bot, msg, image_url=image_url)
+                    if cand_category == "코인":
+                        state.coin_topic_last_sent[coin_topic_key(raw_title, raw_summary)] = now
                     remember_live_news_hashes(state, raw_title, raw_link)
                     state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
                     state.live_last_sent_at = now
@@ -3804,18 +3879,23 @@ async def live_recap_scheduler(bot: Bot, state: State) -> None:
     if not hasattr(state, "recap_used_news_titles"):
         state.recap_used_news_titles = set()
         state.recap_used_news_date = None
+    if not hasattr(state, "recap_used_topics"):
+        state.recap_used_topics = set()
     while True:
         try:
             now = now_kst()
             if state.recap_used_news_date != now.date():
                 state.recap_used_news_titles = set()
                 state.recap_used_news_date = now.date()
+                state.recap_used_topics = set()
             if now.hour in LIVE_RECAP_HOURS and now.minute < 5:
                 key = f"recap:{now.date()}:{now.hour}"
                 if key not in state.recap_sent_keys and hasattr(state, "live_recent_items"):
                     items = list(state.live_recent_items)[-8:]
                     if items:
                         weekend_mode = is_weekend_mode(now)
+                        holiday_mode = is_kr_holiday_day(now)
+                        logging.info("recap mode weekend=%s holiday_mode=%s key=%s", weekend_mode, holiday_mode, key)
                         if weekend_mode:
                             top = sorted(
                                 items,
@@ -3830,6 +3910,7 @@ async def live_recap_scheduler(bot: Bot, state: State) -> None:
                         seen_buckets: set[str] = set()
                         coin_count = 0
                         picked_hashes: list[str] = []
+                        picked_topics: list[str] = []
                         for _ts, emoji, title, source, _score in top:
                             if source in blocked_sources:
                                 logging.info("recap skipped reason=blocked_source title=%s source=%s", clean_text(title, 90), source)
@@ -3845,9 +3926,15 @@ async def live_recap_scheduler(bot: Bot, state: State) -> None:
                                 continue
                             keyword = recap_market_keyword(title, emoji)
                             bucket = normalize_recap_bucket(keyword)
+                            topic_key = bucket
+                            if bucket == "코인":
+                                topic_key = coin_topic_key(title, "")
                             title_hash = recap_title_hash(title)
                             if title_hash in state.recap_used_news_titles:
                                 logging.info("recap skipped reason=already_used_today title=%s", clean_text(title, 90))
+                                continue
+                            if topic_key in state.recap_used_topics:
+                                logging.info("recap skipped reason=topic_used_today topic=%s title=%s", topic_key, clean_text(title, 90))
                                 continue
                             if bucket in seen_buckets:
                                 logging.info("recap skipped reason=duplicate_bucket bucket=%s title=%s", bucket, clean_text(title, 90))
@@ -3859,6 +3946,7 @@ async def live_recap_scheduler(bot: Bot, state: State) -> None:
                             if bucket == "코인":
                                 coin_count += 1
                             picked_hashes.append(title_hash)
+                            picked_topics.append(topic_key)
                             title_line = strip_news_source_tail(title)
                             if bucket == "코인":
                                 title_line = "핵심 코인 이슈는 기대감 대비 실제 자금 유입이 확인되는지 점검 구간."
@@ -3880,6 +3968,8 @@ async def live_recap_scheduler(bot: Bot, state: State) -> None:
                             await safe_send(bot, "\n\n".join(lines), disable_preview=True)
                             for h in picked_hashes:
                                 state.recap_used_news_titles.add(h)
+                            for t in picked_topics:
+                                state.recap_used_topics.add(t)
                             state.recap_sent_keys.add(key)
             await asyncio.sleep(60)
         except Exception:
