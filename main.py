@@ -2639,6 +2639,117 @@ def live_news_category_label(category: str, title: str, summary: str) -> str:
     return category
 
 
+def is_major_domestic_semi_catalyst(title: str, summary: str) -> bool:
+    """삼성전자·SK하이닉스 직접 실적·수주·대형 설비/캡스 등일 때만 중요도 상단(8+) 허용."""
+    raw = f"{title} {summary}"
+    t = raw.lower()
+    if not any(k in t for k in ("삼성전자", "sk하이닉스", "하이닉스", "samsung", "hynix", "sk hynix")):
+        return False
+    keys = (
+        "실적",
+        "earnings",
+        "가이던스",
+        "guidance",
+        "eps",
+        "영업이익",
+        "수주",
+        "contract",
+        "납품",
+        "capex",
+        "설비",
+        "투자",
+        "대규모",
+        "증설",
+        "가동",
+    )
+    return any(k in t for k in keys)
+
+
+def _live_news_has_domestic_etf_brand(title_ko: str) -> bool:
+    tk = (title_ko or "").lower()
+    return any(
+        k in tk
+        for k in (
+            "hanaro",
+            "하나로",
+            "kodex",
+            "코덱스",
+            "tiger",
+            "타이거",
+            "ace ",
+            "nh아문디",
+            "아문디",
+            "solidx",
+            "kb스타",
+            "미래에셋",
+            "한국투자",
+        )
+    )
+
+
+def kr_equity_etf_depth_paragraph(ek: str, title_ko: str, event_line: str, fact_lines: list[str]) -> str:
+    """국내 상장 반도체·AI·지수형 ETF용 4~7줄 분량 정보방 톤."""
+    chunks: list[str] = []
+    ev = (event_line or "").strip()
+    if ev:
+        chunks.append(ev)
+
+    brand = _live_news_has_domestic_etf_brand(title_ko or "")
+    if brand:
+        chunks.append(
+            "국내 거래소에 상장돼 환전 부담 없이 테마를 담을 수 있어,\n개인·기관 체감 수급에 바로 붙는 상품임."
+        )
+
+    seen = set()
+    for ln in fact_lines:
+        s = (ln or "").strip()
+        if not s or len(s) < 10 or s in seen:
+            continue
+        if ev and s in ev:
+            continue
+        seen.add(s)
+        chunks.append(s)
+        if len(chunks) >= 5:
+            break
+
+    tlk = (title_ko or "").lower()
+    memory_chain = any(
+        k in tlk for k in ("메모리", "memory", "hbm", "ai메모리", "미국ai", "micron", "마이크론", "broadcom", "브로드컴", "nvidia", "엔비디아")
+    )
+
+    if ek == "semiconductor_etf":
+        if not any(("hbm" in c.lower() or "메모리" in c or "엔비디아" in c or "마이크론" in c) for c in chunks):
+            if memory_chain:
+                chunks.append(
+                    "엔비디아·마이크론·브로드컴 같은 AI 메모리 밸류체인에 노출되는 상품이면,\nHBM·고대역폭 메모리 수요 기대와 같이 엮이는 뉴스로 보면 됨."
+                )
+            else:
+                chunks.append(
+                    "해외 반도체 대표주에 분산 노출되는 구조라,\nAI 메모리·GPU 쪽 기대와 함께 읽히는 경우가 많음."
+                )
+        chunks.append(
+            "국내에선 삼성전자·SK하이닉스 수급이 먼저이고,\n밤에 SOX·NVDA 프리가 크게 움직일 때 같은 방향으로 붙는지 보조로 같이 보면 됨."
+        )
+    elif ek == "ai_etf":
+        chunks.append(
+            "데이터센터·GPU·전력 쪽 기대가 한 덩어리로 움직일 때가 많아,\n국내에선 AI 인프라·반도체 대장주 수급이 같은 축으로 보이는지 보면 됨."
+        )
+        chunks.append(
+            "나스닥 선물·빅테크 프리는 참고용으로 두고,\n환율·외국인 순매수가 붙는지 같이 보면 됨."
+        )
+    else:  # korea_stock_etf
+        chunks.append(
+            "국내 상장 ETF는 코스피·코스닥 비중과 외국인·기관 자금 배분이 바로 연결되는 경우가 많음."
+        )
+        chunks.append(
+            "장 초반 체결·환율만 같이 보면 방향 잡기가 수월함."
+        )
+
+    if len(chunks) > 7:
+        chunks = chunks[:7]
+    return "\n\n".join(x.strip() for x in chunks if x.strip()).strip()
+
+
 LIVE_AI_MARKET_ANCHORS = (
     "엔비디아",
     "nvidia",
@@ -3269,7 +3380,7 @@ def market_watch_line(event_type: str, category: str, title: str, summary: str) 
     if event_type in ("etf", "crypto_etf"):
         return "ETF 순유입·SEC 서류·기관 수급 통계를 같이 보면 됨."
     if event_type == "semiconductor_etf":
-        return "SOX·NVDA 프리마켓과 국내 반도체 동조 여부를 보면 됨."
+        return "삼성전자·SK하이닉스 수급을 먼저 보고, 밤엔 SOX·NVDA 프리가 같은 방향으로 붙는지만 보조로 확인하면 됨."
     if event_type == "ai_etf":
         return "나스닥 AI·데이터센터 캡스와 GPU 공급 논의를 같이 보면 됨."
     if event_type in ("korea_stock_etf", "unknown_equity_etf"):
@@ -3385,7 +3496,7 @@ def impact_channels_block(event_type: str, category: str) -> str:
     if event_type in ("etf", "crypto_etf"):
         lines = ("자금 유입·유출", "승인·규제 서류", "기관 수급", "BTC·ETH 현물")
     elif event_type == "semiconductor_etf":
-        lines = ("HBM", "AI 서버", "GPU", "삼성전자·SK하이닉스", "SOX·NVDA")
+        lines = ("삼성전자·SK하이닉스", "HBM·AI메모리", "AI 서버·GPU", "SOX·NVDA(참고)")
     elif event_type == "ai_etf":
         lines = ("나스닥 AI", "데이터센터", "GPU", "전력·냉각")
     elif event_type in ("korea_stock_etf", "unknown_equity_etf"):
@@ -3683,13 +3794,13 @@ def related_assets_for_news(title: str, summary: str = "") -> str:
     txt = f"{title} {summary}".lower()
     ek = etf_asset_kind(title, summary)
     if ek == "semiconductor_etf":
-        return "SOX · NVDA · HBM · 국내 반도체"
+        return "HBM · AI메모리 · 삼성전자·SK하이닉스"
     if ek == "crypto_etf":
         return "BTC · ETH · ETF 자금"
     if ek == "ai_etf":
-        return "나스닥 · AI 인프라 · 반도체"
+        return "AI메모리 · 데이터센터 · 삼성전자·SK하이닉스"
     if ek in ("korea_stock_etf", "unknown_equity_etf"):
-        return "KOSPI · 환율 · 외국인"
+        return "KOSPI · 외국인·기관 · 삼성전자·SK하이닉스"
     if ek == "commodity_etf":
         return "원자재 · 인플레 · 달러"
     if ek == "bond_etf":
@@ -4052,7 +4163,7 @@ def importance_narrative_line(event_type: str) -> str:
     if event_type in ("etf", "crypto_etf"):
         return "순매수·순매도와 SEC 문구가 먼저 움직이고, 가격은 그 다음에 붙는 경우가 많음."
     if event_type == "semiconductor_etf":
-        return "HBM·GPU 공급과 레버리지형 ETF 자금이 겹치면 SOX·국내 반도체가 같은 박자로 튈 수 있음."
+        return "국내 투자자에겐 메모리·HBM 이익 민감도가 큰 삼성전자·SK하이닉스가 앞에 오고, SOX·NVDA는 해외 벤치마크로 두는 편이 맞음."
     if event_type == "ai_etf":
         return "AI 인프라 테마 ETF는 데이터센터 CAPEX·GPU 수급 기대와 같이 묶여 움직이기 쉬움."
     if event_type in ("korea_stock_etf", "unknown_equity_etf"):
@@ -4099,17 +4210,23 @@ async def build_live_news_message(
     raw_score = max(raw_score, newsroom_keyword_score(title_clean, summary, category))
     importance = normalize_news_importance(raw_score)
     ek_cap = etf_asset_kind(title_clean, summary)
-    if ek_cap == "semiconductor_etf" and not is_crypto_etf_content(title_clean, summary):
-        importance = min(importance, 7)
-    if ek_cap in ("ai_etf", "korea_stock_etf", "unknown_equity_etf") and not is_crypto_etf_content(title_clean, summary):
-        importance = min(importance, 7)
+    if ek_cap in ("semiconductor_etf", "ai_etf", "korea_stock_etf") and not is_crypto_etf_content(title_clean, summary):
+        if is_major_domestic_semi_catalyst(title_clean, summary):
+            importance = min(importance, 9)
+        else:
+            importance = min(importance, 7)
 
     coin_type = ""
     if category == "코인":
         coin_type = classify_coin_news_type(title_clean, summary)
 
     explanatory = is_explanatory_live_news(title_clean, summary) and importance >= 8
-    summary_limit = 520 if explanatory else 260
+    if explanatory:
+        summary_limit = 520
+    elif ek_cap in ("semiconductor_etf", "ai_etf", "korea_stock_etf"):
+        summary_limit = 400
+    else:
+        summary_limit = 260
     try:
         body = clean_news_body_for_message(title_clean, summary, source, summary_limit=summary_limit)
     except Exception:
@@ -4119,7 +4236,8 @@ async def build_live_news_message(
     if body and not mostly_english(body):
         try:
             body_ko = await ensure_korean_text(session, polish_korean_news_text(body))
-            body_ko = html_clean(body_ko, 580 if explanatory else 240)
+            bk_lim = 900 if explanatory else (560 if ek_cap in ("semiconductor_etf", "ai_etf", "korea_stock_etf") else 240)
+            body_ko = html_clean(body_ko, bk_lim)
         except Exception:
             body_ko = ""
 
@@ -4146,14 +4264,20 @@ async def build_live_news_message(
         msg = f"{category_emoji} {cat_line} · {mode}\n\n사건\n{event_line}"
         if fact_lines:
             msg += "\n\n핵심\n" + "\n".join(fact_lines)
-        msg += f"\n\n왜 중요한지\n{narrative}\n\n시장 포인트\n{watch_line}\n\n시장 영향\n{impact_lines}"
+        msg += f"\n\n왜 중요한지\n{narrative}\n\n{watch_line}\n\n시장 영향\n{impact_lines}"
     else:
         mode = "속보"
-        fact_lines = split_body_fact_lines(body_for_facts, 2, 200)
-        msg = f"{category_emoji} {cat_line} · {mode}\n\n{event_line}"
-        if fact_lines:
-            msg += "\n" + "\n".join(fact_lines)
-        msg += f"\n\n시장 포인트\n{watch_line}"
+        ek_depth = etf_asset_kind(title_clean, summary)
+        if ek_depth in ("semiconductor_etf", "ai_etf", "korea_stock_etf") and not is_crypto_etf_content(title_clean, summary):
+            fact_lines = split_body_fact_lines(body_for_facts, 6, 260)
+            depth = kr_equity_etf_depth_paragraph(ek_depth, title_ko, event_line, fact_lines)
+            msg = f"{category_emoji} {cat_line}\n\n{depth}"
+        else:
+            fact_lines = split_body_fact_lines(body_for_facts, 2, 200)
+            msg = f"{category_emoji} {cat_line} · {mode}\n\n{event_line}"
+            if fact_lines:
+                msg += "\n" + "\n".join(fact_lines)
+            msg += f"\n\n{watch_line}"
 
     if src_line:
         msg += f"\n\n{src_line}"
@@ -4406,10 +4530,14 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                     combined_score = max(score, newsroom_keyword_score(raw_title, raw_summary, cand_category))
                     importance = normalize_news_importance(combined_score)
                     ek_live = etf_asset_kind(raw_title, raw_summary)
-                    if ek_live == "semiconductor_etf" and not is_crypto_etf_content(raw_title, raw_summary):
-                        importance = min(importance, 7)
-                    if ek_live in ("ai_etf", "korea_stock_etf", "unknown_equity_etf") and not is_crypto_etf_content(raw_title, raw_summary):
-                        importance = min(importance, 7)
+                    if not is_crypto_etf_content(raw_title, raw_summary):
+                        if ek_live in ("semiconductor_etf", "ai_etf", "korea_stock_etf"):
+                            if is_major_domestic_semi_catalyst(raw_title, raw_summary):
+                                importance = min(importance, 9)
+                            else:
+                                importance = min(importance, 7)
+                        elif ek_live == "unknown_equity_etf":
+                            importance = min(importance, 7)
                     if cand_category == "코인" and any(k in f"{raw_title} {raw_summary}".lower() for k in ("jpmorgan", "jp morgan", "jp모건", "sol", "solana", "솔라나", "etf")):
                         importance = min(8, importance)
                     if cand_category == "코인" and importance >= 10 and not is_coin_true_critical(raw_title, raw_summary):
