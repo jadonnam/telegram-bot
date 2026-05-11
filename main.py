@@ -2446,7 +2446,7 @@ async def kimchi_monitor(bot: Bot, state: State) -> None:
 # LIVE MARKET ROOM QUALITY + MEDIA
 # ============================================================
 
-LIVE_NEWS_DAILY_LIMIT = 15
+LIVE_NEWS_DAILY_LIMIT = 12
 LIVE_COIN_DAILY_LIMIT = 5
 LIVE_SOL_ETF_DAILY_LIMIT = 2
 LIVE_NEWS_MAX_PER_SCAN = 1
@@ -2456,7 +2456,7 @@ LIVE_TITLE_SIMILARITY_BLOCK_HOURS = 24
 LIVE_TITLE_SIMILARITY_THRESHOLD = 0.5
 LIVE_RECAP_HOURS = (18,)
 LIVE_BTC_MIN_IMPORTANCE = 8
-LIVE_MESSAGE_SOFT_LIMIT = 1400
+LIVE_MESSAGE_SOFT_LIMIT = 2000
 BTC_LEVEL_ALERT_COOLDOWN_SEC = 3 * 60 * 60
 
 MARKET_IMPACT_TERMS = (
@@ -2721,21 +2721,21 @@ def kr_equity_etf_depth_paragraph(ek: str, title_ko: str, event_line: str, fact_
         if not any(("hbm" in c.lower() or "메모리" in c or "엔비디아" in c or "마이크론" in c) for c in chunks):
             if memory_chain:
                 chunks.append(
-                    "엔비디아·마이크론·브로드컴 같은 AI 메모리 밸류체인에 노출되는 상품이면,\nHBM·고대역폭 메모리 수요 기대와 같이 엮이는 뉴스로 보면 됨."
+                    "엔비디아·마이크론·브로드컴 같은 AI 메모리 밸류체인에 노출되는 상품이면,\nHBM·고대역폭 메모리 수요 기대와 같은 축에서 읽히는 뉴스임."
                 )
             else:
                 chunks.append(
                     "해외 반도체 대표주에 분산 노출되는 구조라,\nAI 메모리·GPU 쪽 기대와 함께 읽히는 경우가 많음."
                 )
         chunks.append(
-            "국내에선 삼성전자·SK하이닉스 수급이 먼저이고,\n밤에 SOX·NVDA 프리가 크게 움직일 때 같은 방향으로 붙는지 보조로 같이 보면 됨."
+            "국내에선 삼성전자·SK하이닉스 수급이 먼저이고,\n밤에 SOX·NVDA 프리가 크게 움직일 때 국내 선물·현물이 같은 방향으로 붙는지 보조 지표로 쓰면 됨."
         )
     elif ek == "ai_etf":
         chunks.append(
-            "데이터센터·GPU·전력 쪽 기대가 한 덩어리로 움직일 때가 많아,\n국내에선 AI 인프라·반도체 대장주 수급이 같은 축으로 보이는지 보면 됨."
+            "데이터센터·GPU·전력 쪽 기대가 한 덩어리로 움직일 때가 많아,\n국내에선 AI 인프라·반도체 대장주 수급이 같은 축으로 움직이는지 확인하는 게 맞음."
         )
         chunks.append(
-            "나스닥 선물·빅테크 프리는 참고용으로 두고,\n환율·외국인 순매수가 붙는지 같이 보면 됨."
+            "나스닥 선물·빅테크 프리는 참고용으로 두고,\n환율·외국인 순매수가 같은 방향으로 붙는지 같이 읽는 게 좋음."
         )
     else:  # korea_stock_etf
         chunks.append(
@@ -3233,6 +3233,52 @@ async def resolve_entry_image_url(session: aiohttp.ClientSession, entry) -> Opti
 
     return None
 
+
+async def fetch_og_image_url(session: aiohttp.ClientSession, page_url: str) -> Optional[str]:
+    if not page_url or not page_url.startswith("http"):
+        return None
+    try:
+        async with session.get(
+            page_url,
+            timeout=aiohttp.ClientTimeout(total=2.8),
+            headers={"User-Agent": "Mozilla/5.0 (compatible; NewsBot/1.0)"},
+            allow_redirects=True,
+        ) as resp:
+            if resp.status >= 400:
+                return None
+            ctype = (resp.headers.get("Content-Type") or "").lower()
+            if ctype and "html" not in ctype and "text" not in ctype:
+                return None
+            html = await resp.text(errors="ignore")
+    except Exception:
+        return None
+    if not html or len(html) < 200:
+        return None
+    for pat in (
+        r'property=["\']og:image["\']\s+content=["\']([^"\']+)["\']',
+        r'content=["\']([^"\']+)["\']\s+property=["\']og:image["\']',
+        r'name=["\']twitter:image["\']\s+content=["\']([^"\']+)["\']',
+        r'name=["\']twitter:image:src["\']\s+content=["\']([^"\']+)["\']',
+    ):
+        m = re.search(pat, html, re.I)
+        if m:
+            u = (m.group(1) or "").strip()
+            if u.startswith("http") and "quickchart.io" not in u.lower():
+                return u
+    return None
+
+
+async def resolve_article_image_url(session: aiohttp.ClientSession, entry) -> Optional[str]:
+    u = await resolve_entry_image_url(session, entry)
+    if u and "quickchart.io" not in u.lower():
+        return u
+    link = getattr(entry, "link", "") or ""
+    og = await fetch_og_image_url(session, link)
+    if og:
+        return og
+    return None
+
+
 def news_importance_label(title: str, summary: str) -> str:
     t = f"{title} {summary}".lower()
     if any(k.lower() in t for k in HIGH_IMPORTANCE_TERMS):
@@ -3336,6 +3382,11 @@ LIVE_NEWS_BANNED_PHRASES = (
     "분위기",
     "실제 돈이 들어오는지",
     "반응 확인",
+    "시장 반응 확인",
+    "자금 유입 속도가 핵심",
+    "먼저 보면 됨",
+    "부터 보면 됨",
+    "같이 보면 됨",
 )
 
 
@@ -3374,40 +3425,6 @@ def why_important_lines(event_type: str, body_ko: str, category: str, title: str
         lines.append("뉴스 속 수치·발언이 기존 시나리오와 어긋나면 자산 간 상관관계가 잠깐 깨짐.")
 
     return lines[:2]
-
-
-def market_watch_line(event_type: str, category: str, title: str, summary: str) -> str:
-    if event_type in ("etf", "crypto_etf"):
-        return "ETF 순유입·SEC 서류·기관 수급 통계를 같이 보면 됨."
-    if event_type == "semiconductor_etf":
-        return "삼성전자·SK하이닉스 수급을 먼저 보고, 밤엔 SOX·NVDA 프리가 같은 방향으로 붙는지만 보조로 확인하면 됨."
-    if event_type == "ai_etf":
-        return "나스닥 AI·데이터센터 캡스와 GPU 공급 논의를 같이 보면 됨."
-    if event_type in ("korea_stock_etf", "unknown_equity_etf"):
-        return "코스피·환율·외국인/기관 수급이 같은 방향으로 붙는지 보면 됨."
-    if event_type == "commodity_etf":
-        return "원자재·인플레 기대·달러를 같이 보면 됨."
-    if event_type == "bond_etf":
-        return "금리·달러·나스닥 레버리지 자금이 같은 축으로 움직이는지 보면 됨."
-    if event_type == "rates":
-        return "DXY·10년물 먼저 보면 됨."
-    if event_type == "oil":
-        return "WTI·브렌트·호르무즈 운임 먼저 보면 됨."
-    if event_type == "semiconductor":
-        return "SOX·NVDA 프리마켓을 같이 보면 됨."
-    if event_type == "fx":
-        return "외국인 선물·현물을 같이 보면 됨."
-    if event_type == "liquidation":
-        return "펀딩·OI 급변부터 보면 됨."
-    if event_type == "security":
-        return "공식 입장·출금 큐 길이부터 보면 됨."
-    if event_type == "geopolitics":
-        return "유가·방산·VIX를 같이 보면 됨."
-    if event_type == "capex":
-        return "빅테크 CAPEX 가이던스 숫자부터 보면 됨."
-    if category == "코인":
-        return "BTC 대비 SOL·ETH 베타부터 보면 됨."
-    return "같이 움직인 섹터부터 보면 됨."
 
 
 def is_explanatory_live_news(title: str, summary: str) -> bool:
@@ -3466,12 +3483,113 @@ def live_news_photo_topic_hit(title: str, summary: str) -> bool:
     return False
 
 
-def live_news_should_send_photo(grade: str, importance: int, title: str, summary: str) -> bool:
-    if importance < 8:
+def live_news_should_send_photo(
+    grade: str,
+    importance: int,
+    title: str,
+    summary: str,
+    *,
+    has_article_image: bool,
+) -> bool:
+    if not has_article_image:
         return False
-    if not live_news_photo_topic_hit(title, summary):
-        return False
-    return grade == "S" or importance >= 9
+    if importance >= 8:
+        return True
+    return is_explanatory_live_news(title, summary) and importance >= 7
+
+
+def live_news_severity_label(importance: int, grade: str = "") -> str:
+    if grade == "S" or importance >= 8:
+        return "중대"
+    if importance >= 7:
+        return "핵심"
+    return "속보"
+
+
+def live_news_market_impact_body(event_type: str, category: str, title: str, summary: str) -> str:
+    if event_type == "geopolitics":
+        s = (
+            "휴전·제재·에너지 루트가 바뀌면 유가와 유럽·미국 증시가 같은 박자로 요동칠 수 있음.\n"
+            "단기 호가보다는 지정학 프리미엄이 붙는지·줄어드는지가 자산배분 논의로 이어짐.\n"
+            "방산·원자재·국채 금리까지 한 번에 흔드는지 확인하는 게 맞음."
+        )
+    elif event_type == "oil":
+        s = (
+            "원유 물량·운임·비축 방출 같은 실물 쪽 뉴스는 인플레 기대와 중앙은행 대응으로 연결되기 쉬움.\n"
+            "나스닥 성장주는 유가 급변 시 레버리지 조정이 먼저 나올 때가 많음.\n"
+            "달러·VIX·해운 운임이 같은 방향으로 붙는지 같이 읽는 게 좋음."
+        )
+    elif event_type in ("rates",):
+        s = (
+            "금리 기대가 바뀌면 달러·국채 수익률이 먼저 움직이고, 나스닥 선물과 BTC가 같은 축으로 밀리는 경우가 많음.\n"
+            "연준 발언 뒤에는 가이드포인트 숫자가 시장에 얼마나 남는지가 핵심임."
+        )
+    elif event_type in ("etf", "crypto_etf"):
+        s = (
+            "현물 ETF 쪽은 일별 순유입·보관 코인 수량 변화가 가격 논의로 직결되는 경우가 많음.\n"
+            "SEC 서류·상장사 공시 문구가 나오면 단기적으로는 레버리지부터 반응하는 패턴이 잦음."
+        )
+    elif event_type == "semiconductor_etf":
+        s = (
+            "국내에선 삼성전자·SK하이닉스가 메모리·HBM 이익 민감도가 커서 테마 자금이 ETF로도 흘러올 수 있음.\n"
+            "밤에 필라델피아 반도체나 엔비디아 프리가 크게 움직이면 같은 방향으로 국내 선물·현물이 붙는지 확인하는 게 맞음."
+        )
+    elif event_type == "semiconductor":
+        s = (
+            "HBM·GPU 공급 타임라인이 바뀌면 국내 반도체 목표가·밸류에이션 논의가 같이 움직임.\n"
+            "데이터센터 CAPEX 가이던스와 전력·냉각 수급이 같은 테마로 묶일 때가 많음."
+        )
+    elif event_type == "security":
+        s = (
+            "출금 지연·지갑 동결 같은 운영 이슈는 스프레드와 온체인 유동성이 바로 반응함.\n"
+            "스테이블 페그·거래소 공지까지 같이 확인하는 게 좋음."
+        )
+    elif event_type == "liquidation":
+        s = (
+            "대형 청산은 펀딩·미결제약정을 한 번에 줄여서 변동성이 커질 수 있음.\n"
+            "BTC·알트 베타가 잠깐 깨지는지 같이 봐야 함."
+        )
+    elif event_type == "ai_etf":
+        s = (
+            "데이터센터·GPU·전력 쪽 기대가 한 덩어리로 움직일 때가 많음.\n"
+            "국내에선 AI 인프라·반도체 대장주 수급이 같은 축으로 보이는지 확인하는 게 맞음."
+        )
+    elif event_type in ("korea_stock_etf", "unknown_equity_etf"):
+        s = (
+            "국내 상장 ETF는 코스피·코스닥 비중과 외국인·기관 자금 배분이 바로 연결되는 경우가 많음.\n"
+            "장 초반 체결·환율이 같은 방향으로 붙는지 확인하는 게 좋음."
+        )
+    elif event_type == "fx":
+        s = (
+            "달러/원 급변은 외국인 선물·현물이 같은 방향으로 안 나올 때가 있음.\n"
+            "코스피 방어 구간에서는 반도체·금융주가 먼저 반응하는지 같이 봐야 함."
+        )
+    elif event_type == "capex":
+        s = (
+            "빅테크 CAPEX 숫자는 GPU·전력·냉각 장비 수급 논의로 이어질 수 있음.\n"
+            "나스닥 선물과 국내 장비·전력주가 같은 테마로 붙는지 확인하는 게 맞음."
+        )
+    elif event_type == "commodity_etf":
+        s = (
+            "원자재 ETF는 인플레 기대와 달러·국채금리와 같은 축에서 움직이는 경우가 많음.\n"
+            "나스닥 성장주 레버리지에 간접 부담으로 전달되는지 같이 읽는 게 좋음."
+        )
+    elif event_type == "bond_etf":
+        s = (
+            "채권 ETF 자금은 금리 민감 자산과 상관이 잠깐 강해질 수 있음.\n"
+            "달러·나스닥·BTC가 같은 방향으로 밀리는지 확인하는 게 맞음."
+        )
+    elif category == "코인":
+        s = (
+            "BTC가 방향을 잡으면 알트는 베타·유동성 순으로 순차 반응하는 경우가 많음.\n"
+            "SOL·ETH는 ETF·규제 뉴스가 나올 때 레버리지 쪽이 먼저 움직이는 패턴이 잦음."
+        )
+    else:
+        s = (
+            "뉴스에 나온 수치·발언이 기존 시나리오와 어긋나면 섹터 간 상관관계가 잠깐 깨질 수 있음.\n"
+            "지수·환율·외국인 수급이 같은 방향으로 붙는지 확인하는 게 좋음."
+        )
+    return strip_live_news_banned_phrases(s)
 
 
 def split_body_fact_lines(body_ko: str, max_lines: int, max_chars: int) -> list[str]:
@@ -3524,21 +3642,6 @@ def impact_channels_block(event_type: str, category: str) -> str:
     else:
         lines = ("유가", "달러", "나스닥", "코스피", "BTC")
     return "\n".join(f"· {x}" for x in lines)
-
-
-def build_live_news_fallback_chart_url() -> str:
-    import json
-    from urllib.parse import quote
-
-    chart = {
-        "type": "bar",
-        "data": {"labels": [" "], "datasets": [{"data": [1], "backgroundColor": "rgba(80,120,200,0.35)"}]},
-        "options": {
-            "plugins": {"legend": {"display": False}, "title": {"display": False}},
-            "scales": {"x": {"display": False}, "y": {"display": False}},
-        },
-    }
-    return "https://quickchart.io/chart?width=640&height=360&backgroundColor=white&c=" + quote(json.dumps(chart, ensure_ascii=False))
 
 
 def build_news_body_line(category: str, title: str, summary: str, impact: str) -> str:
@@ -4161,34 +4264,79 @@ def kr_close_focus(kospi_pct: float, kosdaq_pct: float, usd_krw: float) -> str:
 
 def importance_narrative_line(event_type: str) -> str:
     if event_type in ("etf", "crypto_etf"):
-        return "순매수·순매도와 SEC 문구가 먼저 움직이고, 가격은 그 다음에 붙는 경우가 많음."
+        return (
+            "규제 서류·상장사 공시가 먼저 움직이고, 현물 ETF는 순유입·보관 수량이 가격 논의로 직결되는 경우가 많음.\n"
+            "단기 호가보다 기관·레버리지 자금이 같은 방향으로 붙는지가 중요함."
+        )
     if event_type == "semiconductor_etf":
-        return "국내 투자자에겐 메모리·HBM 이익 민감도가 큰 삼성전자·SK하이닉스가 앞에 오고, SOX·NVDA는 해외 벤치마크로 두는 편이 맞음."
+        return (
+            "국내 투자자에겐 메모리·HBM 이익 민감도가 큰 삼성전자·SK하이닉스가 앞에 옴.\n"
+            "해외 SOX·엔비디아 프리는 같은 테마의 벤치마크로 두고 국내 수급을 먼저 보는 편이 맞음."
+        )
     if event_type == "ai_etf":
-        return "AI 인프라 테마 ETF는 데이터센터 CAPEX·GPU 수급 기대와 같이 묶여 움직이기 쉬움."
+        return (
+            "데이터센터 CAPEX·GPU 공급 기대가 한 덩어리로 움직일 때가 많음.\n"
+            "전력·냉각·장비주까지 같은 테마로 묶여 반응하는지 확인하는 게 좋음."
+        )
     if event_type in ("korea_stock_etf", "unknown_equity_etf"):
-        return "국내 상장 ETF는 지수·섹터 비중 변화가 외국인·기관 수급으로 바로 이어질 수 있음."
+        return (
+            "국내 상장 ETF는 지수·섹터 비중 변화가 외국인·기관 수급으로 바로 이어질 수 있음.\n"
+            "장 초반 체결과 환율이 같은 방향으로 붙는지 같이 읽는 게 맞음."
+        )
     if event_type == "commodity_etf":
-        return "원자재 ETF는 인플레·금리 논의와 달러 방향을 같이 타는 경우가 많음."
+        return (
+            "원자재 ETF는 인플레 기대와 달러·국채금리와 같은 축에서 움직이는 경우가 많음.\n"
+            "나스닥 성장주 레버리지에 간접 부담으로 전달되는지 확인하는 게 좋음."
+        )
     if event_type == "bond_etf":
-        return "채권 ETF 자금은 금리 민감 자산(나스닥·BTC)과 상관이 잠깐 강해질 수 있음."
+        return (
+            "채권 ETF 자금은 금리 민감 자산과 상관이 잠깐 강해질 수 있음.\n"
+            "달러·나스닥·BTC가 같은 방향으로 밀리는지 같이 봐야 함."
+        )
     if event_type == "rates":
-        return "달러·국채 수익률이 먼저 오르면 나스닥 선물·BTC가 같은 방향으로 밀릴 수 있음."
+        return (
+            "연준·중앙은행이 내놓는 가이드포인트가 바뀌면 달러·국채 수익률이 먼저 움직임.\n"
+            "나스닥 선물과 BTC가 같은 축으로 반응하는지 확인하는 게 맞음."
+        )
     if event_type == "oil":
-        return "유가 급등은 물가·국채금리 논의로 번져 나스닥 레버리지에 부담을 줄 수 있음."
+        return (
+            "원유 물량·운임·비축 방출은 인플레 논의와 중앙은행 대응으로 연결되기 쉬움.\n"
+            "나스닥 성장주는 유가 급변 시 레버리지 조정이 먼저 나올 때가 많음."
+        )
     if event_type == "semiconductor":
-        return "HBM·GPU 공급 타임라인이 바뀌면 삼성전자·SK하이닉스 레이팅·목표가가 같이 움직임."
+        return (
+            "HBM·GPU 공급 타임라인이 바뀌면 삼성전자·SK하이닉스 목표가·밸류에이션 논의가 같이 움직임.\n"
+            "데이터센터 CAPEX 가이던스와 전력·냉각 수급이 같은 테마로 묶일 때가 많음."
+        )
     if event_type == "fx":
-        return "달러/원이 급변하면 외국인 선·현물이 같은 방향으로 안 나올 때가 있음."
+        return (
+            "달러/원 급변은 외국인 선물·현물이 같은 방향으로 안 나올 때가 있음.\n"
+            "코스피 방어 구간에서는 반도체·금융주가 먼저 반응하는지 같이 봐야 함."
+        )
     if event_type == "liquidation":
-        return "레버리지 청산은 단기적으로 펀딩·미결제약정을 빠르게 줄임."
+        return (
+            "대형 청산은 펀딩·미결제약정을 한 번에 줄여서 변동성이 커질 수 있음.\n"
+            "BTC·알트 베타가 잠깐 깨지는지 확인하는 게 좋음."
+        )
     if event_type == "security":
-        return "출금 한도·지갑 동결 같은 운영 조치가 붙으면 스프레드가 바로 벌어짐."
+        return (
+            "출금 지연·지갑 동결 같은 운영 이슈는 스프레드와 온체인 유동성이 바로 반응함.\n"
+            "거래소 공지·스테이블 페그까지 같은 축으로 읽는 게 맞음."
+        )
     if event_type == "geopolitics":
-        return "지정학 이벤트는 유가·방산·금리 민감 자산을 한 번에 흔듦."
+        return (
+            "휴전·제재·에너지 루트가 바뀌면 유가와 유럽·미국 증시가 같은 박자로 요동칠 수 있음.\n"
+            "단기 호가보다 지정학 프리미엄이 붙는지·줄어드는지가 자산배분 논의로 이어짐."
+        )
     if event_type == "capex":
-        return "데이터센터 CAPEX 숫자는 전력·냉각·GPU 수급 논의로 이어짐."
-    return "뉴스 속 수치·발언이 기존 시나리오와 어긋나면 자산 간 상관관계가 잠깐 깨짐."
+        return (
+            "빅테크 CAPEX 숫자는 GPU·전력·냉각 장비 수급 논의로 이어질 수 있음.\n"
+            "나스닥 선물과 국내 장비·전력주가 같은 테마로 붙는지 확인하는 게 맞음."
+        )
+    return (
+        "뉴스에 나온 수치·발언이 기존 시나리오와 어긋나면 섹터 간 상관관계가 잠깐 깨질 수 있음.\n"
+        "지수·환율·외국인 수급이 같은 방향으로 붙는지 같이 읽는 게 좋음."
+    )
 
 
 async def build_live_news_message(
@@ -4222,7 +4370,7 @@ async def build_live_news_message(
 
     explanatory = is_explanatory_live_news(title_clean, summary) and importance >= 8
     if explanatory:
-        summary_limit = 520
+        summary_limit = 720
     elif ek_cap in ("semiconductor_etf", "ai_etf", "korea_stock_etf"):
         summary_limit = 400
     else:
@@ -4236,7 +4384,7 @@ async def build_live_news_message(
     if body and not mostly_english(body):
         try:
             body_ko = await ensure_korean_text(session, polish_korean_news_text(body))
-            bk_lim = 900 if explanatory else (560 if ek_cap in ("semiconductor_etf", "ai_etf", "korea_stock_etf") else 240)
+            bk_lim = 1400 if explanatory else (560 if ek_cap in ("semiconductor_etf", "ai_etf", "korea_stock_etf") else 240)
             body_ko = html_clean(body_ko, bk_lim)
         except Exception:
             body_ko = ""
@@ -4248,23 +4396,26 @@ async def build_live_news_message(
 
     event_type = news_event_type(title_clean, summary, category)
     event_line = event_line_from_news(title_ko, title_clean, summary, category)
-    watch_line = market_watch_line(event_type, category, title_clean, summary)
     narrative = importance_narrative_line(event_type)
 
     rel = related_assets_for_coin_news(title_clean, summary) if category == "코인" else related_assets_for_news(title_clean, summary)
     src_line = f"출처: {source}" if has_clear_source_name(source) else ""
     cat_line = live_news_category_label(category, title_clean, summary)
 
+    impact_body = strip_live_news_banned_phrases(live_news_market_impact_body(event_type, category, title_clean, summary))
+
     if explanatory:
-        mode = "브리핑"
-        fact_lines = split_body_fact_lines(body_for_facts, 4, 220)
+        sev = live_news_severity_label(importance)
+        fact_lines = split_body_fact_lines(body_for_facts, 10, 260)
         if len(fact_lines) < 2 and category == "코인":
             fact_lines.append(coin_news_brief(coin_type, title_clean, summary))
-        impact_lines = impact_channels_block(event_type, category)
-        msg = f"{category_emoji} {cat_line} · {mode}\n\n사건\n{event_line}"
-        if fact_lines:
-            msg += "\n\n핵심\n" + "\n".join(fact_lines)
-        msg += f"\n\n왜 중요한지\n{narrative}\n\n{watch_line}\n\n시장 영향\n{impact_lines}"
+        what_chunks = [event_line]
+        what_chunks.extend(fact_lines[:5])
+        if len([x for x in what_chunks if (x or "").strip()]) < 2:
+            what_chunks.insert(0, title_ko)
+        what_block = "\n".join(strip_live_news_banned_phrases(x) for x in what_chunks if (x or "").strip())[:900]
+        nar_block = strip_live_news_banned_phrases(narrative)
+        msg = f"{category_emoji} {cat_line} · {sev}\n\n무슨 일\n{what_block}\n\n왜 중요\n{nar_block}\n\n시장 영향\n{impact_body}"
     else:
         mode = "속보"
         ek_depth = etf_asset_kind(title_clean, summary)
@@ -4273,11 +4424,11 @@ async def build_live_news_message(
             depth = kr_equity_etf_depth_paragraph(ek_depth, title_ko, event_line, fact_lines)
             msg = f"{category_emoji} {cat_line}\n\n{depth}"
         else:
-            fact_lines = split_body_fact_lines(body_for_facts, 2, 200)
+            fact_lines = split_body_fact_lines(body_for_facts, 4, 220)
             msg = f"{category_emoji} {cat_line} · {mode}\n\n{event_line}"
             if fact_lines:
                 msg += "\n" + "\n".join(fact_lines)
-            msg += f"\n\n{watch_line}"
+            msg += f"\n\n{impact_body}"
 
     if src_line:
         msg += f"\n\n{src_line}"
@@ -4299,16 +4450,18 @@ async def build_live_news_message(
 
 
 async def send_news_card(bot: Bot, text: str, image_url: Optional[str] = None, use_s_grade_photo: bool = False) -> None:
-    if use_s_grade_photo:
-        photo = image_url or build_live_news_fallback_chart_url()
+    if use_s_grade_photo and image_url:
         try:
-            await bot.send_photo(chat_id=CHANNEL_ID, photo=photo, caption=text[:1024], parse_mode=None)
+            cap = (text or "")[:1024]
+            await bot.send_photo(chat_id=CHANNEL_ID, photo=image_url, caption=cap, parse_mode=None)
+            if len(text or "") > 1024:
+                await safe_send(bot, (text or "")[1024:], disable_preview=True)
             return
         except Exception as e:
             if is_telegram_auth_failure(e):
                 logging.error("Telegram 토큰 인증 실패. BotFather에서 새 토큰 발급 후 TELEGRAM_TOKEN 교체 필요.")
                 return
-            logging.warning("S급 이미지 전송 실패. 텍스트로 대체 image=%s", photo)
+            logging.warning("기사 이미지 전송 실패. 텍스트로 대체 image=%s", image_url)
     await safe_send(bot, text, disable_preview=True)
 
 
@@ -4592,7 +4745,7 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                             remember_live_news_hashes(state, raw_title, raw_link)
                             state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
                             continue
-                    image_url = await resolve_entry_image_url(session, entry)
+                    image_url = await resolve_article_image_url(session, entry)
                     msg = await build_live_news_message(
                         session, cand_emoji, cand_category, raw_title, raw_summary, source, raw_link
                     )
@@ -4601,7 +4754,9 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                         remember_live_news_hashes(state, raw_title, raw_link)
                         state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
                         continue
-                    want_photo = live_news_should_send_photo(grade, importance, raw_title, raw_summary)
+                    want_photo = live_news_should_send_photo(
+                        grade, importance, raw_title, raw_summary, has_article_image=bool(image_url)
+                    )
                     await send_news_card(bot, msg, image_url=image_url, use_s_grade_photo=want_photo)
                     if cand_category == "코인":
                         state.coin_topic_last_sent[coin_topic_key(raw_title, raw_summary)] = now
