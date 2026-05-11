@@ -2519,6 +2519,126 @@ COIN_REQUIRED_KEYWORDS = (
     "coinbase", "jpmorgan", "jp morgan", "blackrock",
 )
 
+
+def is_crypto_etf_content(title: str, summary: str) -> bool:
+    """True only when ETF/SEC context is clearly crypto (BTC/ETH/SOL etc.), not equity/반도체 ETF."""
+    raw = f"{title} {summary}"
+    t = raw.lower()
+    if any(k in t for k in ("spot bitcoin", "spot btc", "spot ether", "spot ethereum", "비트코인 현물", "이더리움 현물", "솔라나 etf", "sol etf")):
+        return True
+    if any(k in t for k in ("grayscale", "greyscale", "blackrock", "ishares bitcoin", "bitwise", "ark invest")):
+        return True
+    if "etf" in t and any(k in t for k in ("비트코인", "이더리움", "솔라나", "bitcoin", "ethereum", "solana", "btc", "eth", "crypto", "암호화폐")):
+        return True
+    if ("sec" in t or "증권거래위원회" in raw) and any(
+        k in t for k in ("bitcoin", "btc", "ethereum", "eth", "solana", "솔라나", "sol etf", "비트코인", "이더리움", "암호화폐")
+    ):
+        return True
+    pairs = (
+        ("bitcoin", "etf"),
+        ("btc", "etf"),
+        ("비트코인", "etf"),
+        ("ethereum", "etf"),
+        ("eth", "etf"),
+        ("이더리움", "etf"),
+        ("solana", "etf"),
+        ("솔라나", "etf"),
+    )
+    return any(a in t and "etf" in t for a, _ in pairs)
+
+
+def etf_asset_kind(title: str, summary: str) -> str:
+    """
+    ETF 주제 세분화. 'etf' 단독으로는 crypto_etf로 가지 않음.
+    반환: crypto_etf | semiconductor_etf | ai_etf | korea_stock_etf | commodity_etf | bond_etf | unknown_equity_etf | none
+    """
+    raw = f"{title} {summary}"
+    t = raw.lower()
+    if "etf" not in t and "상장지수" not in raw:
+        return "none"
+
+    if any(k in t for k in ("국채 etf", "채권 etf", "treasury etf", "t-bond", "장기국채", "회사채 etf", "bond etf")):
+        return "bond_etf"
+    if any(
+        k in t
+        for k in (
+            "원유 etf",
+            "oil etf",
+            "gold etf",
+            "silver etf",
+            "금 etf",
+            "은 etf",
+            "commodity etf",
+            "원자재 etf",
+        )
+    ):
+        return "commodity_etf"
+    if "etf" in t and any(k in t for k in ("원유", "wti", "brent", "금 ", "은 ", "구리", "농산물")):
+        return "commodity_etf"
+
+    if is_crypto_etf_content(title, summary):
+        return "crypto_etf"
+
+    semi_kw = (
+        "반도체",
+        "semiconductor",
+        "hbm",
+        "sox",
+        "필라델피아",
+        "nvidia",
+        "엔비디아",
+        "gpu",
+        "삼성전자",
+        "sk하이닉스",
+        "하이닉스",
+        "hynix",
+        "micron",
+        "마이크론",
+        "tsmc",
+        "chip",
+        "칩",
+    )
+    if any(k in t for k in semi_kw):
+        return "semiconductor_etf"
+
+    if any(k in t for k in ("inference", "hyperscaler", "hyperscal", "ai etf")) or (
+        "etf" in t and any(k in t for k in ("데이터센터", "ai 서버", "ai 인프라"))
+    ):
+        return "ai_etf"
+
+    if any(
+        k in t
+        for k in (
+            "kodex",
+            "코덱스",
+            "tiger",
+            "타이거",
+            "hanaro",
+            "하나로",
+            "ace etf",
+            "kbstar",
+            "kb스타",
+            "nh아문디",
+            "아문디",
+            "삼성자산",
+            "미래에셋",
+            "한국투자",
+            "solidx",
+        )
+    ):
+        return "korea_stock_etf"
+
+    if "etf" in t:
+        return "unknown_equity_etf"
+    return "none"
+
+
+def live_news_category_label(category: str, title: str, summary: str) -> str:
+    if etf_asset_kind(title, summary) == "semiconductor_etf" and category in ("한국", "미국", "세계"):
+        return f"{category} · 반도체"
+    return category
+
+
 LIVE_AI_MARKET_ANCHORS = (
     "엔비디아",
     "nvidia",
@@ -2640,8 +2760,37 @@ def effective_live_news_category(category_emoji: str, category: str, title: str,
     blob = f"{title} {summary}"
     blob_l = blob.lower()
     lk = (link or "").lower()
-    if any(k in blob_l for k in ("coindesk", "cointelegraph", "crypto", "bitcoin", "btc", "ethereum", "eth", "solana", "sol", "etf", "청산", "거래소", "비트코인", "이더리움")):
+    coin_force = (
+        "coindesk",
+        "cointelegraph",
+        "crypto",
+        "bitcoin",
+        "btc",
+        "ethereum",
+        "eth",
+        "solana",
+        "sol",
+        "청산",
+        "거래소",
+        "비트코인",
+        "이더리움",
+        "암호화폐",
+    )
+    if any(k in blob_l for k in coin_force):
         return "🟠", "코인"
+    if "etf" in blob_l and is_crypto_etf_content(title, summary):
+        return "🟠", "코인"
+    ek = etf_asset_kind(title, summary)
+    if ek == "semiconductor_etf":
+        if any(k in blob for k in ("NH", "nh", "KODEX", "Kodex", "TIGER", "Tiger", "코스피", "삼성전자", "하이닉스", "한국")):
+            return "🇰🇷", "한국"
+        return "🇺🇸", "미국"
+    if ek in ("ai_etf", "korea_stock_etf", "unknown_equity_etf", "commodity_etf", "bond_etf"):
+        if any(k in blob for k in ("NH", "nh", "KODEX", "Kodex", "TIGER", "Tiger", "코스피", "코스닥", "한국")):
+            return "🇰🇷", "한국"
+        if ek == "korea_stock_etf":
+            return "🇰🇷", "한국"
+        return "🇺🇸", "미국"
     if any(k in blob_l for k in ("hormuz", "iran", "israel", "oil", "wti", "brent", "호르무즈", "이란", "이스라엘", "유가", "원유")):
         return "🌍", "세계"
     kr_hosts = (
@@ -2984,7 +3133,9 @@ def news_importance_label(title: str, summary: str) -> str:
 
 def build_market_impact_line(category: str, title: str, summary: str) -> str:
     t = f"{title} {summary}".lower()
-    if category == "한국" and any(k in t for k in ("bitcoin", "btc", "ethereum", "eth", "알트", "etf")):
+    if category == "한국" and (
+        any(k in t for k in ("bitcoin", "btc", "ethereum", "eth", "알트")) or is_crypto_etf_content(title, summary)
+    ):
         return "한국장은 환율과 외국인 수급이 먼저. 코인 해석은 분리해서 보는 편이 좋음."
 
     if is_live_ai_without_market_anchor(title, summary):
@@ -3012,7 +3163,9 @@ def build_market_impact_line(category: str, title: str, summary: str) -> str:
         return "나스닥 성장주 수급 이슈. 지수보다 종목별 체크."
     if any(k in t for k in ("earnings", "guidance", "실적", "가이던스", "eps", "매출")):
         return "실적 이슈. 숫자보다 가이던스와 장 후반 수급이 더 중요."
-    if any(k in t for k in ("bitcoin", "btc", "비트코인", "ethereum", "eth", "etf", "청산", "liquidation", "tokenization", "stablecoin", "토큰화", "스테이블코인", "거래소")):
+    if any(k in t for k in ("bitcoin", "btc", "비트코인", "ethereum", "eth", "청산", "liquidation", "tokenization", "stablecoin", "토큰화", "스테이블코인", "거래소")):
+        return "코인 수급 이슈. BTC 가격 반응과 거래량 동반 여부 체크."
+    if "etf" in t and is_crypto_etf_content(title, summary):
         return "코인 수급 이슈. BTC 가격 반응과 거래량 동반 여부 체크."
     if any(k in t for k in ("samsung", "삼성전자", "hynix", "하이닉스", "kospi", "코스피", "환율", "외국인", "현대차", "기아", "lg에너지솔루션", "두산에너빌리티")):
         return "한국장 수급 이슈. 외국인·환율·반도체 흐름 같이 봐야함."
@@ -3031,14 +3184,17 @@ def news_event_type(title: str, summary: str, category: str) -> str:
         return "rates"
     if any(k in t for k in ("hormuz", "iran", "israel", "oil", "wti", "brent", "호르무즈", "이란", "이스라엘", "유가", "원유")):
         return "oil"
+    ek = etf_asset_kind(title, summary)
+    if ek != "none":
+        return ek
     if any(k in t for k in ("환율", "usd/krw", "달러/원", "dxy", "달러인덱스", "외국인")):
         return "fx"
     if any(k in t for k in ("반도체", "hbm", "semiconductor", "엔비디아", "nvidia", "ai server", "데이터센터", "공급망", "supply chain")):
         return "semiconductor"
     if any(k in t for k in ("capex", "capital expenditure", "투자 집행", "설비투자")):
         return "capex"
-    if any(k in t for k in ("etf", "sec", "승인", "거절", "유입", "inflow", "outflow")):
-        return "etf"
+    if any(k in t for k in ("승인", "거절", "유입", "inflow", "outflow")) and is_crypto_etf_content(title, summary):
+        return "crypto_etf"
     return "general"
 
 
@@ -3085,7 +3241,7 @@ def why_important_lines(event_type: str, body_ko: str, category: str, title: str
     if cleaned_body and not any(bad in cleaned_body for bad in LIVE_NEWS_BANNED_PHRASES):
         lines.append(cleaned_body)
 
-    if event_type == "etf":
+    if event_type in ("etf", "crypto_etf"):
         lines.append("순매수·순매도와 SEC 문구가 먼저 움직이고, 가격은 그 다음에 붙는 경우가 많음.")
     elif event_type == "rates":
         lines.append("달러·국채 수익률이 먼저 오르면 나스닥 선물·BTC가 같은 방향으로 밀릴 수 있음.")
@@ -3110,39 +3266,59 @@ def why_important_lines(event_type: str, body_ko: str, category: str, title: str
 
 
 def market_watch_line(event_type: str, category: str, title: str, summary: str) -> str:
-    if event_type == "etf":
-        return "시장 포인트: ETF 순유입·SEC 문서부터 읽으면 됨."
+    if event_type in ("etf", "crypto_etf"):
+        return "ETF 순유입·SEC 서류·기관 수급 통계를 같이 보면 됨."
+    if event_type == "semiconductor_etf":
+        return "SOX·NVDA 프리마켓과 국내 반도체 동조 여부를 보면 됨."
+    if event_type == "ai_etf":
+        return "나스닥 AI·데이터센터 캡스와 GPU 공급 논의를 같이 보면 됨."
+    if event_type in ("korea_stock_etf", "unknown_equity_etf"):
+        return "코스피·환율·외국인/기관 수급이 같은 방향으로 붙는지 보면 됨."
+    if event_type == "commodity_etf":
+        return "원자재·인플레 기대·달러를 같이 보면 됨."
+    if event_type == "bond_etf":
+        return "금리·달러·나스닥 레버리지 자금이 같은 축으로 움직이는지 보면 됨."
     if event_type == "rates":
-        return "시장 포인트: DXY·10년물 먼저 보면 됨."
+        return "DXY·10년물 먼저 보면 됨."
     if event_type == "oil":
-        return "시장 포인트: WTI·브렌트·호르무즈 운임 먼저 보면 됨."
+        return "WTI·브렌트·호르무즈 운임 먼저 보면 됨."
     if event_type == "semiconductor":
-        return "시장 포인트: SOX·NVDA 프리마켓을 같이 보면 됨."
+        return "SOX·NVDA 프리마켓을 같이 보면 됨."
     if event_type == "fx":
-        return "시장 포인트: 외국인 선물·현물을 같이 보면 됨."
+        return "외국인 선물·현물을 같이 보면 됨."
     if event_type == "liquidation":
-        return "시장 포인트: 펀딩·OI 급변부터 보면 됨."
+        return "펀딩·OI 급변부터 보면 됨."
     if event_type == "security":
-        return "시장 포인트: 공식 입장·출금 큐 길이부터 보면 됨."
+        return "공식 입장·출금 큐 길이부터 보면 됨."
     if event_type == "geopolitics":
-        return "시장 포인트: 유가·방산·VIX를 같이 보면 됨."
+        return "유가·방산·VIX를 같이 보면 됨."
     if event_type == "capex":
-        return "시장 포인트: 빅테크 CAPEX 가이던스 숫자부터 보면 됨."
+        return "빅테크 CAPEX 가이던스 숫자부터 보면 됨."
     if category == "코인":
-        return "시장 포인트: BTC 대비 SOL·ETH 베타부터 보면 됨."
-    return "시장 포인트: 같이 움직인 섹터부터 보면 됨."
+        return "BTC 대비 SOL·ETH 베타부터 보면 됨."
+    return "같이 움직인 섹터부터 보면 됨."
 
 
 def is_explanatory_live_news(title: str, summary: str) -> bool:
     t = f"{title} {summary}".lower()
+    raw = f"{title} {summary}"
+    if etf_asset_kind(title, summary) in (
+        "semiconductor_etf",
+        "ai_etf",
+        "korea_stock_etf",
+        "unknown_equity_etf",
+        "commodity_etf",
+        "bond_etf",
+    ):
+        return False
     if any(k in t for k in ("russia", "ukraine", "러시아", "우크라")):
         return True
     if any(k in t for k in ("iran", "hormuz", "israel", "이란", "호르무즈", "이스라엘", "미사일", "전쟁", "war")):
         return True
-    if "sec" in t or "증권거래위원회" in t:
+    if ("sec" in t or "증권거래위원회" in raw) and is_crypto_etf_content(title, summary):
         return True
     if "etf" in t and any(k in t for k in ("승인", "거절", "유입", "inflow", "outflow", "listing")):
-        return True
+        return is_crypto_etf_content(title, summary)
     if any(k in t for k in ("fomc", "cpi", "pce", "연준", "fed", "금리")):
         return True
     if any(k in t for k in ("earnings", "guidance", "실적", "가이던스", "eps")):
@@ -3166,7 +3342,9 @@ def live_news_photo_topic_hit(title: str, summary: str) -> bool:
     t = f"{title} {summary}".lower()
     if any(k in t for k in ("russia", "ukraine", "iran", "israel", "hormuz", "war", "미사일", "전쟁", "러시아", "우크라", "이란", "호르무즈")):
         return True
-    if any(k in t for k in ("etf", "sec", "승인", "거절")):
+    if is_crypto_etf_content(title, summary) and any(k in t for k in ("etf", "승인", "거절", "sec")):
+        return True
+    if etf_asset_kind(title, summary) == "semiconductor_etf":
         return True
     if any(k in t for k in ("oil", "wti", "brent", "유가", "원유")):
         return True
@@ -3204,12 +3382,22 @@ def split_body_fact_lines(body_ko: str, max_lines: int, max_chars: int) -> list[
 
 
 def impact_channels_block(event_type: str, category: str) -> str:
-    if event_type == "etf":
-        lines = ("유가(간접)", "달러·국채", "나스닥 성장주", "BTC·ETH 현물")
+    if event_type in ("etf", "crypto_etf"):
+        lines = ("자금 유입·유출", "승인·규제 서류", "기관 수급", "BTC·ETH 현물")
+    elif event_type == "semiconductor_etf":
+        lines = ("HBM", "AI 서버", "GPU", "삼성전자·SK하이닉스", "SOX·NVDA")
+    elif event_type == "ai_etf":
+        lines = ("나스닥 AI", "데이터센터", "GPU", "전력·냉각")
+    elif event_type in ("korea_stock_etf", "unknown_equity_etf"):
+        lines = ("코스피·코스닥", "외국인·기관", "환율")
+    elif event_type == "commodity_etf":
+        lines = ("원자재", "인플레", "달러", "나스닥 부담")
+    elif event_type == "bond_etf":
+        lines = ("달러", "금리", "나스닥", "BTC")
     elif event_type == "rates":
-        lines = ("달러·국채", "나스닥", "BTC")
+        lines = ("달러", "금리", "나스닥", "BTC")
     elif event_type == "oil":
-        lines = ("유가", "인플레 논의", "국채금리", "나스닥", "방산")
+        lines = ("유가", "인플레", "달러", "나스닥 부담")
     elif event_type == "semiconductor":
         lines = ("HBM", "AI 서버", "삼성전자·SK하이닉스", "나스닥 SOX")
     elif event_type == "fx":
@@ -3224,7 +3412,7 @@ def impact_channels_block(event_type: str, category: str) -> str:
         lines = ("나스닥 빅테크", "전력·냉각", "반도체 장비")
     else:
         lines = ("유가", "달러", "나스닥", "코스피", "BTC")
-    return "영향이 나올 수 있는 쪽:\n" + "\n".join(f"· {x}" for x in lines)
+    return "\n".join(f"· {x}" for x in lines)
 
 
 def build_live_news_fallback_chart_url() -> str:
@@ -3421,6 +3609,9 @@ def newsroom_keyword_score(title: str, summary: str, category: str = "") -> int:
         score += 4
     if is_live_ai_without_market_anchor(title, summary):
         score -= 18
+    ek = etf_asset_kind(title, summary)
+    if ek in ("semiconductor_etf", "ai_etf", "korea_stock_etf", "unknown_equity_etf") and not is_crypto_etf_content(title, summary):
+        score -= 8
     return max(1, min(35, score))
 
 
@@ -3490,13 +3681,28 @@ def related_assets_for_news(title: str, summary: str = "") -> str:
     if is_live_ai_without_market_anchor(title, summary):
         return ""
     txt = f"{title} {summary}".lower()
+    ek = etf_asset_kind(title, summary)
+    if ek == "semiconductor_etf":
+        return "SOX · NVDA · HBM · 국내 반도체"
+    if ek == "crypto_etf":
+        return "BTC · ETH · ETF 자금"
+    if ek == "ai_etf":
+        return "나스닥 · AI 인프라 · 반도체"
+    if ek in ("korea_stock_etf", "unknown_equity_etf"):
+        return "KOSPI · 환율 · 외국인"
+    if ek == "commodity_etf":
+        return "원자재 · 인플레 · 달러"
+    if ek == "bond_etf":
+        return "금리 · 달러 · 나스닥"
     if any(k in txt for k in ("hormuz", "호르무즈", "oil", "wti", "brent", "유가", "원유", "해운", "선박", "supply chain", "공급망")):
         return "유가 · 해운 · 공급망"
     if any(k in txt for k in ("코스피", "kospi", "환율", "외국인", "기관", "연기금", "국민연금", "삼성전자", "sk하이닉스", "삼성sdi", "현대차")):
         return "KOSPI · 환율 · 외국인"
     if any(k in txt for k in ("반도체", "semiconductor", "hbm", "엔비디아", "nvidia", "데이터센터", "ai server", "ai 서버")):
         return "반도체 · HBM · 데이터센터"
-    if any(k in txt for k in ("bitcoin", "btc", "ethereum", "eth", "sol", "etf", "청산", "liquidation", "알트")):
+    if any(k in txt for k in ("bitcoin", "btc", "ethereum", "eth", "sol", "청산", "liquidation", "알트")) or (
+        "etf" in txt and is_crypto_etf_content(title, summary)
+    ):
         return "BTC · ETF · 알트"
     if any(k in txt for k in ("fed", "fomc", "cpi", "pce", "ppi", "금리", "연준", "파월", "국채", "달러", "dxy")):
         return "금리 · 달러 · 나스닥"
@@ -3505,6 +3711,9 @@ def related_assets_for_news(title: str, summary: str = "") -> str:
 
 def classify_coin_news_type(title: str, summary: str) -> str:
     txt = f"{title} {summary}".lower()
+    ek = etf_asset_kind(title, summary)
+    if ek in ("semiconductor_etf", "ai_etf", "korea_stock_etf", "commodity_etf", "bond_etf", "unknown_equity_etf"):
+        return "equity_etf_non_crypto"
     if any(k in txt for k in ("eth", "ethereum", "이더리움", "l2", "layer 2", "보안", "security", "양자", "quantum")):
         return "eth_security"
     if any(k in txt for k in ("sol", "solana", "솔라나", "sol etf", "jpmorgan", "jp morgan", "jp모건", "알트")):
@@ -3515,7 +3724,7 @@ def classify_coin_news_type(title: str, summary: str) -> str:
         return "volatility"
     if any(k in txt for k in ("btc", "bitcoin", "비트코인", "현물 etf", "spot etf")):
         return "btc_flow"
-    if any(k in txt for k in ("etf", "sec", "승인", "유입", "inflow")):
+    if ek == "crypto_etf" or (any(k in txt for k in ("etf", "sec", "승인", "유입", "inflow")) and is_crypto_etf_content(title, summary)):
         return "etf_flow"
     return "coin_general"
 
@@ -3523,6 +3732,8 @@ def classify_coin_news_type(title: str, summary: str) -> str:
 def coin_topic_key(title: str, summary: str) -> str:
     txt = f"{title} {summary}".lower()
     news_type = classify_coin_news_type(title, summary)
+    if news_type == "equity_etf_non_crypto":
+        return "equity_etf_non_crypto"
     if news_type == "sol_alt_flow" and "etf" in txt:
         return "sol_etf"
     if news_type == "eth_security":
@@ -3540,6 +3751,13 @@ def coin_topic_key(title: str, summary: str) -> str:
 
 def topic_key_for_news(title: str, summary: str, category: str) -> str:
     txt = f"{title} {summary}".lower()
+    ek = etf_asset_kind(title, summary)
+    if ek == "semiconductor_etf":
+        return "semiconductor_etf"
+    if ek == "crypto_etf":
+        if category == "코인":
+            return "crypto_etf:" + coin_topic_key(title, summary)
+        return "crypto_etf"
     if category == "코인":
         return coin_topic_key(title, summary)
     if any(k in txt for k in ("hormuz", "호르무즈", "유가", "wti", "brent", "전쟁", "미사일")):
@@ -3573,10 +3791,26 @@ def classify_news_grade(title: str, summary: str, category: str) -> str:
         return "C"
 
     s_terms = (
-        "etf 승인", "etf 거절", "sec", "fomc", "cpi", "pce", "금리", "대형 청산",
-        "거래소 해킹", "hack", "hormuz", "호르무즈", "유가 급등", "btc 급등", "btc 급락",
+        "etf 승인",
+        "etf 거절",
+        "fomc",
+        "cpi",
+        "pce",
+        "금리",
+        "대형 청산",
+        "거래소 해킹",
+        "hack",
+        "hormuz",
+        "호르무즈",
+        "유가 급등",
+        "btc 급등",
+        "btc 급락",
+        "sec approves",
+        "sec rejects",
     )
     if any(k in txt for k in s_terms):
+        return "S"
+    if "sec" in txt and is_crypto_etf_content(title, summary):
         return "S"
 
     a_terms = (
@@ -3594,6 +3828,8 @@ def classify_news_grade(title: str, summary: str, category: str) -> str:
 
 def related_assets_for_coin_news(title: str, summary: str) -> str:
     news_type = classify_coin_news_type(title, summary)
+    if news_type == "equity_etf_non_crypto":
+        return related_assets_for_news(title, summary)
     if news_type == "eth_security":
         return "ETH · SOL · 양자보안"
     if news_type == "sol_alt_flow":
@@ -3613,6 +3849,8 @@ def related_assets_for_coin_news(title: str, summary: str) -> str:
 
 
 def coin_news_brief(news_type: str, title: str, summary: str) -> str:
+    if news_type == "equity_etf_non_crypto":
+        return "주식·섹터 ETF는 HBM·GPU·SOX와 국내 반도체 수급이 같은 축으로 움직이는지 보면 됨."
     if news_type == "eth_security":
         return "ETH 네트워크·L2 보안 논의가 가격보다 먼저 움직일 수 있음."
     if news_type == "sol_alt_flow":
@@ -3811,8 +4049,18 @@ def kr_close_focus(kospi_pct: float, kosdaq_pct: float, usd_krw: float) -> str:
 
 
 def importance_narrative_line(event_type: str) -> str:
-    if event_type == "etf":
+    if event_type in ("etf", "crypto_etf"):
         return "순매수·순매도와 SEC 문구가 먼저 움직이고, 가격은 그 다음에 붙는 경우가 많음."
+    if event_type == "semiconductor_etf":
+        return "HBM·GPU 공급과 레버리지형 ETF 자금이 겹치면 SOX·국내 반도체가 같은 박자로 튈 수 있음."
+    if event_type == "ai_etf":
+        return "AI 인프라 테마 ETF는 데이터센터 CAPEX·GPU 수급 기대와 같이 묶여 움직이기 쉬움."
+    if event_type in ("korea_stock_etf", "unknown_equity_etf"):
+        return "국내 상장 ETF는 지수·섹터 비중 변화가 외국인·기관 수급으로 바로 이어질 수 있음."
+    if event_type == "commodity_etf":
+        return "원자재 ETF는 인플레·금리 논의와 달러 방향을 같이 타는 경우가 많음."
+    if event_type == "bond_etf":
+        return "채권 ETF 자금은 금리 민감 자산(나스닥·BTC)과 상관이 잠깐 강해질 수 있음."
     if event_type == "rates":
         return "달러·국채 수익률이 먼저 오르면 나스닥 선물·BTC가 같은 방향으로 밀릴 수 있음."
     if event_type == "oil":
@@ -3850,6 +4098,11 @@ async def build_live_news_message(
         raw_score = 18
     raw_score = max(raw_score, newsroom_keyword_score(title_clean, summary, category))
     importance = normalize_news_importance(raw_score)
+    ek_cap = etf_asset_kind(title_clean, summary)
+    if ek_cap == "semiconductor_etf" and not is_crypto_etf_content(title_clean, summary):
+        importance = min(importance, 7)
+    if ek_cap in ("ai_etf", "korea_stock_etf", "unknown_equity_etf") and not is_crypto_etf_content(title_clean, summary):
+        importance = min(importance, 7)
 
     coin_type = ""
     if category == "코인":
@@ -3882,23 +4135,25 @@ async def build_live_news_message(
 
     rel = related_assets_for_coin_news(title_clean, summary) if category == "코인" else related_assets_for_news(title_clean, summary)
     src_line = f"출처: {source}" if has_clear_source_name(source) else ""
+    cat_line = live_news_category_label(category, title_clean, summary)
 
     if explanatory:
         mode = "브리핑"
         fact_lines = split_body_fact_lines(body_for_facts, 4, 220)
         if len(fact_lines) < 2 and category == "코인":
             fact_lines.append(coin_news_brief(coin_type, title_clean, summary))
-        msg = f"{category_emoji} {category} · {mode}\n\n1) 사건\n{event_line}"
+        impact_lines = impact_channels_block(event_type, category)
+        msg = f"{category_emoji} {cat_line} · {mode}\n\n사건\n{event_line}"
         if fact_lines:
-            msg += "\n\n2) 핵심 사실\n" + "\n".join(fact_lines)
-        msg += f"\n\n3) 왜 중요한지\n{narrative}\n\n4) 시장 포인트\n{watch_line}\n\n5) {impact_channels_block(event_type, category)}"
+            msg += "\n\n핵심\n" + "\n".join(fact_lines)
+        msg += f"\n\n왜 중요한지\n{narrative}\n\n시장 포인트\n{watch_line}\n\n시장 영향\n{impact_lines}"
     else:
         mode = "속보"
         fact_lines = split_body_fact_lines(body_for_facts, 2, 200)
-        msg = f"{category_emoji} {category} · {mode}\n\n{event_line}"
+        msg = f"{category_emoji} {cat_line} · {mode}\n\n{event_line}"
         if fact_lines:
             msg += "\n" + "\n".join(fact_lines)
-        msg += f"\n\n{watch_line}"
+        msg += f"\n\n시장 포인트\n{watch_line}"
 
     if src_line:
         msg += f"\n\n{src_line}"
@@ -4150,6 +4405,11 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                     score, entry, raw_title, raw_summary, raw_link, cand_emoji, cand_category, grade, topic_key, topic_on_cooldown = candidates[0]
                     combined_score = max(score, newsroom_keyword_score(raw_title, raw_summary, cand_category))
                     importance = normalize_news_importance(combined_score)
+                    ek_live = etf_asset_kind(raw_title, raw_summary)
+                    if ek_live == "semiconductor_etf" and not is_crypto_etf_content(raw_title, raw_summary):
+                        importance = min(importance, 7)
+                    if ek_live in ("ai_etf", "korea_stock_etf", "unknown_equity_etf") and not is_crypto_etf_content(raw_title, raw_summary):
+                        importance = min(importance, 7)
                     if cand_category == "코인" and any(k in f"{raw_title} {raw_summary}".lower() for k in ("jpmorgan", "jp morgan", "jp모건", "sol", "solana", "솔라나", "etf")):
                         importance = min(8, importance)
                     if cand_category == "코인" and importance >= 10 and not is_coin_true_critical(raw_title, raw_summary):
