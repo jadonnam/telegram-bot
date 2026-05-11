@@ -3234,6 +3234,151 @@ async def resolve_entry_image_url(session: aiohttp.ClientSession, entry) -> Opti
     return None
 
 
+LIVE_NEWS_IMAGE_HOST_HINTS = (
+    "reuters.com",
+    "reuters.net",
+    "bloomberg.com",
+    "bloomberg.net",
+    "cnbc.com",
+    "wsj.com",
+    "ft.com",
+    "ftcontent.com",
+    "coindesk.com",
+    "cointelegraph.com",
+    "yna.co.kr",
+    "yonhapnews",
+    "hankyung.com",
+    "mk.co.kr",
+    "mt.co.kr",
+    "sedaily.com",
+    "biz.chosun.com",
+    "chosun.com",
+    "joins.com",
+    "infomax.co.kr",
+    "newsis.com",
+    "heraldcorp.com",
+    "seoul.co.kr",
+    "donga.com",
+    "hani.co.kr",
+    "apnews.com",
+    "bbc.com",
+    "bbc.co.uk",
+    "nikkei.com",
+    "nippon.com",
+    "sec.gov",
+    "federalreserve.gov",
+    "nasdaq.com",
+    "economist.com",
+    "marketwatch.com",
+    "investing.com",
+    "finance.yahoo.com",
+)
+
+
+def live_news_source_allows_article_image(source: str, link: str) -> bool:
+    """기사 이미지는 신뢰도 높은 매체·도메인만 (링크 또는 출처 문자열 매칭)."""
+    s = (source or "").lower()
+    lk = (link or "").lower()
+    blob = f"{s} {lk}"
+    name_hints = (
+        "reuters",
+        "bloomberg",
+        "cnbc",
+        "wsj",
+        "financial times",
+        "ft ",
+        "coindesk",
+        "cointelegraph",
+        "연합뉴스",
+        "yonhap",
+        "한국경제",
+        "매일경제",
+        "조선비즈",
+        "연합인포맥스",
+        "infomax",
+        "머니투데이",
+        "이데일리",
+        "아시아경제",
+        "서울경제",
+    )
+    if any(h in blob for h in LIVE_NEWS_IMAGE_HOST_HINTS):
+        return True
+    return any(h in s for h in name_hints)
+
+
+def _image_dims_from_url(url: str) -> Optional[Tuple[int, int]]:
+    if not url:
+        return None
+    u = url
+    m = re.search(r"/(\d{3,5})x(\d{3,5})/", u)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    m = re.search(r"[?&]w=(\d{3,5})\b", u, re.I)
+    if m:
+        w = int(m.group(1))
+        mh = re.search(r"[?&]h=(\d{3,5})\b", u, re.I)
+        if mh:
+            return w, int(mh.group(1))
+        return w, w
+    m = re.search(r"width[=/_-](\d{3,5})", u, re.I)
+    if m:
+        w = int(m.group(1))
+        mh = re.search(r"height[=/_-](\d{3,5})", u, re.I)
+        if mh:
+            return w, int(mh.group(1))
+    return None
+
+
+def news_image_url_passes_heuristics(url: str) -> bool:
+    if not url or not url.startswith("http"):
+        return False
+    ul = url.lower()
+    deny = (
+        "news.google",
+        "googleusercontent",
+        "gstatic.com",
+        "/favicon",
+        "favicon.",
+        "apple-touch-icon",
+        "touch-icon",
+        "/logo",
+        "logo.svg",
+        "logo.png",
+        "-logo",
+        "_logo",
+        "/avatar",
+        "avatar.",
+        "placeholder",
+        "default-image",
+        "default_image",
+        "no-image",
+        "noimage",
+        "sprite",
+        "/icons/",
+        "/icon/",
+        "app-icon",
+        "og-default",
+        "/1x1",
+        "blank.gif",
+        "pixel.gif",
+        "spacer.gif",
+    )
+    if any(d in ul for d in deny):
+        return False
+    dims = _image_dims_from_url(url)
+    if dims:
+        w, h = dims
+        if w < 300 or h < 300:
+            return False
+        ratio = max(w, h) / max(1, min(w, h))
+        if ratio > 3.2:
+            return False
+    else:
+        if any(x in ul for x in ("/logo", "favicon", "icon.png", "icon.jpg", "sprite", "avatar")):
+            return False
+    return True
+
+
 async def fetch_og_image_url(session: aiohttp.ClientSession, page_url: str) -> Optional[str]:
     if not page_url or not page_url.startswith("http"):
         return None
@@ -3263,18 +3408,23 @@ async def fetch_og_image_url(session: aiohttp.ClientSession, page_url: str) -> O
         m = re.search(pat, html, re.I)
         if m:
             u = (m.group(1) or "").strip()
-            if u.startswith("http") and "quickchart.io" not in u.lower():
+            if u.startswith("http") and "quickchart.io" not in u.lower() and news_image_url_passes_heuristics(u):
                 return u
     return None
 
 
-async def resolve_article_image_url(session: aiohttp.ClientSession, entry) -> Optional[str]:
+async def resolve_article_image_url(
+    session: aiohttp.ClientSession, entry, source: str = "", link: str = ""
+) -> Optional[str]:
+    lk = (link or getattr(entry, "link", "") or "").strip()
+    src = (source or "").strip()
+    if not live_news_source_allows_article_image(src, lk):
+        return None
     u = await resolve_entry_image_url(session, entry)
-    if u and "quickchart.io" not in u.lower():
+    if u and news_image_url_passes_heuristics(u) and "quickchart.io" not in u.lower():
         return u
-    link = getattr(entry, "link", "") or ""
-    og = await fetch_og_image_url(session, link)
-    if og:
+    og = await fetch_og_image_url(session, lk)
+    if og and news_image_url_passes_heuristics(og):
         return og
     return None
 
@@ -3299,13 +3449,13 @@ def build_market_impact_line(category: str, title: str, summary: str) -> str:
         return "거래 관점에선 우선순위 낮음. 서비스·이벤트 소식일 수 있음."
 
     if any(k in t for k in ("hormuz", "호르무즈", "oil", "wti", "brent", "유가", "원유", "opec", "해협", "선박", "해운")):
-        return "호르무즈 긴장 완화 얘기가 나오면서\n유가는 잠깐 진정되는 분위기.\n\n근데 선박 이동이 완전히 정상화된 건 아니라\n해운쪽 변동성은 아직 남아있음."
+        return "호르무즈 쪽 긴장 완화 얘기가 나오면서\n유가 급등세는 잠깐 누그러졌다는 쪽으로 보임.\n\n다만 선박 이동·운임 문제는 아직 남아서\n해운·물류 변수는 계속 챙겨야 하는 상황."
     if any(k in t for k in ("iran", "israel", "missile", "strike", "ceasefire", "sanction", "nuclear", "이란", "이스라엘", "미사일", "공습", "휴전", "제재", "핵", "전쟁", "드론")):
-        return "지정학 리스크 이슈. 유가·달러·코인 변동성 커질 수 있음."
+        return "지정학 변수가 커지면 유가·달러·코인까지 변동폭이 한 번에 벌어질 수 있음."
     if any(k in t for k in ("fed", "fomc", "cpi", "ppi", "interest rate", "rate cut", "powell", "연준", "금리", "물가", "파월", "국채", "수익률", "달러")):
-        return "금리·달러 민감 이슈. 나스닥·코인 방향에 바로 영향 줄 수 있음."
+        return "금리·달러 쪽 뉴스. 나스닥·코인 방향에 바로 영향 줄 수 있음."
     if any(k in t for k in ("ionq", "아이온큐", "rigetti", "리게티", "quantum", "양자")):
-        return "양자컴퓨터 테마 수급 체크. 기대감은 크지만 변동성도 큰 구간."
+        return "양자컴퓨터 테마 수급 체크. 기대는 크지만 변동폭도 큼."
     if any(k in t for k in ("nvidia", "엔비디아", "semiconductor", "반도체", "hbm", "micron", "마이크론", "broadcom", "브로드컴", "amd", "tsmc", "asml", "chip", "칩")):
         return "반도체 수급 핵심. 국내 반도체·나스닥 동조만 짧게 체크."
     if any(k in t for k in ("oracle", "오라클", "coreweave", "dell", "supermicro", "smci", "cloud", "data center", "데이터센터", "클라우드", "ai infrastructure", "ai 인프라")):
@@ -3313,20 +3463,20 @@ def build_market_impact_line(category: str, title: str, summary: str) -> str:
     if any(k in t for k in ("vertiv", "vst", "ge vernova", "nuclear", "uranium", "power", "electricity", "전력", "원전", "우라늄", "에너지", "전력망")):
         return "AI 전력 수요 테마. 전력·원전·인프라 관련주 반응 체크."
     if any(k in t for k in ("defense", "drone", "lockheed", "boeing", "국방", "방산", "드론", "한화에어로스페이스")):
-        return "방산·지정학 수급 이슈. 방산주와 원자재 변동성 같이 봐야함."
+        return "방산·지정학 수급. 방산주랑 원자재 변동폭 같이 보면 됨."
     if any(k in t for k in ("shipping", "tariff", "rare earth", "supply chain", "해운", "관세", "희토류", "공급망")):
-        return "공급망·관세 이슈. 물가와 기업 마진에 영향 줄 수 있음."
+        return "물류·관세 쪽 뉴스. 물가랑 기업 마진에 바로 닿을 수 있음."
     if any(k in t for k in ("tesla", "테슬라", "apple", "애플", "meta", "메타", "google", "구글", "amazon", "아마존", "microsoft", "마이크로소프트", "palantir", "팔란티어")):
-        return "나스닥 성장주 수급 이슈. 지수보다 종목별 체크."
+        return "나스닥 성장주 수급. 지수보다 종목별로 보는 게 낫음."
     if any(k in t for k in ("earnings", "guidance", "실적", "가이던스", "eps", "매출")):
-        return "실적 이슈. 숫자보다 가이던스와 장 후반 수급이 더 중요."
+        return "실적 뉴스. 숫자보다 가이던스랑 장 후반 수급이 더 큼."
     if any(k in t for k in ("bitcoin", "btc", "비트코인", "ethereum", "eth", "청산", "liquidation", "tokenization", "stablecoin", "토큰화", "스테이블코인", "거래소")):
-        return "코인 수급 이슈. BTC 가격 반응과 거래량 동반 여부 체크."
+        return "코인 수급. BTC 가격이랑 거래량이 같이 붙는지 보면 됨."
     if "etf" in t and is_crypto_etf_content(title, summary):
-        return "코인 수급 이슈. BTC 가격 반응과 거래량 동반 여부 체크."
+        return "코인 수급. BTC 가격이랑 거래량이 같이 붙는지 보면 됨."
     if any(k in t for k in ("samsung", "삼성전자", "hynix", "하이닉스", "kospi", "코스피", "환율", "외국인", "현대차", "기아", "lg에너지솔루션", "두산에너빌리티")):
-        return "한국장 수급 이슈. 외국인·환율·반도체 흐름 같이 봐야함."
-    return "시장 영향은 가격 반응과 거래량 붙는지 확인 필요."
+        return "한국장 수급. 외국인·환율·반도체를 같이 보면 됨."
+    return "가격이 움직일 때 거래량이 같이 붙는지 보면 됨."
 
 
 def news_event_type(title: str, summary: str, category: str) -> str:
@@ -3357,6 +3507,18 @@ def news_event_type(title: str, summary: str, category: str) -> str:
 
 def event_line_from_news(title_ko: str, title: str, summary: str, category: str) -> str:
     text = f"{title} {summary}".lower()
+    if any(k in text for k in ("hormuz", "호르무즈")) and any(
+        k in text for k in ("완화", "긴장 완화", "de-escalation", "진정", "긴장")
+    ):
+        return "호르무즈 쪽 긴장 완화 얘기가 나오면서 유가 급등세는 잠깐 누그러졌다는 쪽으로 읽힘."
+    if any(k in text for k in ("nvidia", "엔비디아")) and any(
+        k in text for k in ("capex", "capital expenditure", "설비", "투자")
+    ):
+        return "엔비디아가 CAPEX(설비 투자) 확대 쪽으로 숫자·가이던스를 내놓음."
+    if any(k in text for k in ("russia", "ukraine", "러시아", "우크라")) and any(
+        k in text for k in ("협상", "대화", "negotiat", "talks", "휴전", "ceasefire")
+    ):
+        return "러·우크라 협상·대화 쪽 얘기가 다시 수면 위로 올라옴."
     if any(k in text for k in ("jp morgan", "jpmorgan", "jp모건")) and any(k in text for k in ("sol", "solana", "솔라나", "etf")):
         return "JP모건이 SOL ETF 초기 자금 유입 전망을 내놓음."
     if any(k in text for k in ("sec", "미 증권거래위원회")) and any(k in text for k in ("sol", "solana", "솔라나", "etf")):
@@ -3376,9 +3538,12 @@ def event_line_from_news(title_ko: str, title: str, summary: str, category: str)
 
 LIVE_NEWS_BANNED_PHRASES = (
     "기대감은 살아있지만",
+    "기대감이 반영",
     "확인 구간",
+    "확인 필요",
     "흐름",
     "보는 중",
+    "보는 구간",
     "분위기",
     "실제 돈이 들어오는지",
     "반응 확인",
@@ -3387,6 +3552,10 @@ LIVE_NEWS_BANNED_PHRASES = (
     "먼저 보면 됨",
     "부터 보면 됨",
     "같이 보면 됨",
+    "유가 압력",
+    "공급망 이슈",
+    "같은 방향으로 붙는 느낌",
+    "리스크가 존재",
 )
 
 
@@ -3509,15 +3678,15 @@ def live_news_severity_label(importance: int, grade: str = "") -> str:
 def live_news_market_impact_body(event_type: str, category: str, title: str, summary: str) -> str:
     if event_type == "geopolitics":
         s = (
-            "휴전·제재·에너지 루트가 바뀌면 유가와 유럽·미국 증시가 같은 박자로 요동칠 수 있음.\n"
-            "단기 호가보다는 지정학 프리미엄이 붙는지·줄어드는지가 자산배분 논의로 이어짐.\n"
-            "방산·원자재·국채 금리까지 한 번에 흔드는지 확인하는 게 맞음."
+            "휴전·제재 완화 쪽 뉴스가 먼저 뜨면 유가랑 유럽 증시 반응이 제일 큼.\n"
+            "미국이랑 유럽이 같은 스텝은 아닐 때도 있어서, 지역별로 나눠 읽는 게 안전함.\n"
+            "방산·원자재는 뉴스 하나에도 범위가 크게 흔들릴 수 있음."
         )
     elif event_type == "oil":
         s = (
-            "원유 물량·운임·비축 방출 같은 실물 쪽 뉴스는 인플레 기대와 중앙은행 대응으로 연결되기 쉬움.\n"
-            "나스닥 성장주는 유가 급변 시 레버리지 조정이 먼저 나올 때가 많음.\n"
-            "달러·VIX·해운 운임이 같은 방향으로 붙는지 같이 읽는 게 좋음."
+            "호르무즈 쪽 얘기가 한 번 돌면 유가부터 움직이고, 그 여파가 항공·물류비로 이어지는 경우가 많음.\n"
+            "다만 선박 움직임·운임까지 같은 날 정상화됐다고 보긴 이르니, 해운이랑 물류 변수는 따로 챙겨야 함.\n"
+            "유가가 다시 튀면 나스닥이랑 방산·원자재까지 한 줄로 흔들릴 수 있음."
         )
     elif event_type in ("rates",):
         s = (
@@ -3541,8 +3710,8 @@ def live_news_market_impact_body(event_type: str, category: str, title: str, sum
         )
     elif event_type == "security":
         s = (
-            "출금 지연·지갑 동결 같은 운영 이슈는 스프레드와 온체인 유동성이 바로 반응함.\n"
-            "스테이블 페그·거래소 공지까지 같이 확인하는 게 좋음."
+            "출금 지연·지갑 동결 같은 운영 변수는 스프레드랑 온체인 유동성이 바로 반응함.\n"
+            "스테이블 페그·거래소 공지까지 같이 보면 됨."
         )
     elif event_type == "liquidation":
         s = (
@@ -3735,14 +3904,15 @@ def polish_korean_news_text(text_value: str) -> str:
     fixes = {
         "호르무즈 해협 선박 지원": "호르무즈 해협 선박 지원",
         "트럼프의 호르무즈 선박 구조": "호르무즈 긴장 완화 기대",
-        "석유 압력": "유가 압력",
+        "석유 압력": "유가 부담",
         "압력 완화": "진정",
-        "유가 압력": "유가 압력",
-        "공급망 지연은 여전히 남아 있음": "공급망 지연 이슈는 남아있음",
-        "공급망 지연은 여전히 ​​남아 있음": "공급망 지연 이슈는 남아있음",
-        "위험자산 반응 체크": "위험자산 반응 확인 필요",
-        "빅테크 움직임이라 나스닥 분위기 같이 봐야함.": "AI·빅테크 수급이 나스닥 흐름을 좌우할 수 있음.",
-        "시장 영향은 가격 반응 확인하면서 봐야함.": "가격 반응과 거래량 동반 여부 확인 필요.",
+        "유가 압력": "유가 부담",
+        "공급망 지연은 여전히 남아 있음": "물류·배송 지연은 아직 남아 있음",
+        "공급망 지연은 여전히 ​​남아 있음": "물류·배송 지연은 아직 남아 있음",
+        "공급망 지연 이슈는 남아있음": "물류·배송 지연은 아직 남아 있음",
+        "위험자산 반응 체크": "위험자산 반응을 지수랑 같이 보면 됨",
+        "빅테크 움직임이라 나스닥 분위기 같이 봐야함.": "빅테크 움직임이 나스닥 방향을 끌 가능성이 큼.",
+        "시장 영향은 가격 반응 확인하면서 봐야함.": "가격이 움직일 때 거래량이 같이 붙는지 보면 됨.",
     }
     for old, new in fixes.items():
         s = s.replace(old, new)
@@ -4300,8 +4470,8 @@ def importance_narrative_line(event_type: str) -> str:
         )
     if event_type == "oil":
         return (
-            "원유 물량·운임·비축 방출은 인플레 논의와 중앙은행 대응으로 연결되기 쉬움.\n"
-            "나스닥 성장주는 유가 급변 시 레버리지 조정이 먼저 나올 때가 많음."
+            "유가가 튀면 물가·국채금리 얘기까지 한 번에 붙는 경우가 많음.\n"
+            "나스닥 성장주는 달러 레버리지 조정이 먼저 나오는 패턴도 흔함."
         )
     if event_type == "semiconductor":
         return (
@@ -4325,8 +4495,8 @@ def importance_narrative_line(event_type: str) -> str:
         )
     if event_type == "geopolitics":
         return (
-            "휴전·제재·에너지 루트가 바뀌면 유가와 유럽·미국 증시가 같은 박자로 요동칠 수 있음.\n"
-            "단기 호가보다 지정학 프리미엄이 붙는지·줄어드는지가 자산배분 논의로 이어짐."
+            "휴전·제재 줄이는 쪽으로 무게가 실리면 유가랑 유럽 증시가 제일 빨리 반응함.\n"
+            "방산·원자재는 뉴스마다 변동폭이 크게 나올 수 있음."
         )
     if event_type == "capex":
         return (
@@ -4745,7 +4915,7 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                             remember_live_news_hashes(state, raw_title, raw_link)
                             state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
                             continue
-                    image_url = await resolve_article_image_url(session, entry)
+                    image_url = await resolve_article_image_url(session, entry, source, raw_link)
                     msg = await build_live_news_message(
                         session, cand_emoji, cand_category, raw_title, raw_summary, source, raw_link
                     )
