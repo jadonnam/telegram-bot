@@ -3234,78 +3234,6 @@ async def resolve_entry_image_url(session: aiohttp.ClientSession, entry) -> Opti
     return None
 
 
-LIVE_NEWS_IMAGE_HOST_HINTS = (
-    "reuters.com",
-    "reuters.net",
-    "bloomberg.com",
-    "bloomberg.net",
-    "cnbc.com",
-    "wsj.com",
-    "ft.com",
-    "ftcontent.com",
-    "coindesk.com",
-    "cointelegraph.com",
-    "yna.co.kr",
-    "yonhapnews",
-    "hankyung.com",
-    "mk.co.kr",
-    "mt.co.kr",
-    "sedaily.com",
-    "biz.chosun.com",
-    "chosun.com",
-    "joins.com",
-    "infomax.co.kr",
-    "newsis.com",
-    "heraldcorp.com",
-    "seoul.co.kr",
-    "donga.com",
-    "hani.co.kr",
-    "apnews.com",
-    "bbc.com",
-    "bbc.co.uk",
-    "nikkei.com",
-    "nippon.com",
-    "sec.gov",
-    "federalreserve.gov",
-    "nasdaq.com",
-    "economist.com",
-    "marketwatch.com",
-    "investing.com",
-    "finance.yahoo.com",
-)
-
-
-def live_news_source_allows_article_image(source: str, link: str) -> bool:
-    """기사 이미지는 신뢰도 높은 매체·도메인만 (링크 또는 출처 문자열 매칭)."""
-    s = (source or "").lower()
-    lk = (link or "").lower()
-    blob = f"{s} {lk}"
-    name_hints = (
-        "reuters",
-        "bloomberg",
-        "cnbc",
-        "wsj",
-        "financial times",
-        "ft ",
-        "coindesk",
-        "cointelegraph",
-        "연합뉴스",
-        "yonhap",
-        "한국경제",
-        "매일경제",
-        "조선비즈",
-        "연합인포맥스",
-        "infomax",
-        "머니투데이",
-        "이데일리",
-        "아시아경제",
-        "서울경제",
-    )
-    if any(h in blob for h in LIVE_NEWS_IMAGE_HOST_HINTS):
-        return True
-    return any(h in s for h in name_hints)
-
-
 def _image_dims_from_url(url: str) -> Optional[Tuple[int, int]]:
     if not url:
         return None
@@ -3418,7 +3346,7 @@ async def resolve_article_image_url(
 ) -> Optional[str]:
     lk = (link or getattr(entry, "link", "") or "").strip()
     src = (source or "").strip()
-    if not live_news_source_allows_article_image(src, lk):
+    if source_quality_rank(src, lk) not in ("S", "A"):
         return None
     u = await resolve_entry_image_url(session, entry)
     if u and news_image_url_passes_heuristics(u) and "quickchart.io" not in u.lower():
@@ -3948,6 +3876,127 @@ def normalize_news_importance(score: int) -> int:
     if score >= 6:
         return 4
     return max(1, min(3, score // 2 + 1))
+
+
+def source_quality_rank(source: str, link: str) -> str:
+    """라이브 뉴스 출처 등급: S > A > B > C (C는 기본 차단, 이미지는 S/A만)."""
+    raw = (source or "").strip()
+    s = raw.lower()
+    lk = (link or "").strip()
+    lk_l = lk.lower()
+    blob_l = f"{s} {lk_l}"
+    host = ""
+    try:
+        host = urlparse(lk).netloc.replace("www.", "").lower()
+    except Exception:
+        host = ""
+
+    if any(x in s for x in ("보도자료", "press release", "pr newswire", "prnewswire", "globenewswire", "business wire", "newsfile corp")):
+        return "C"
+    if "광고" in raw and len(raw) <= 24:
+        return "C"
+    c_tokens = ("korea it times", "재외동포", "코리아넷", "한민족", "koreaittimes", "koreaitimes")
+    if any(x in s for x in c_tokens) or any(x in blob_l for x in ("koreaittimes.com", "koreaitimes.com")):
+        return "C"
+    if host and any(
+        x in host
+        for x in (
+            "prnewswire.com",
+            "globenewswire.com",
+            "businesswire.com",
+            "newsfilecorp.com",
+            "koreaittimes.com",
+        )
+    ):
+        return "C"
+
+    s_hosts = (
+        "reuters.com",
+        "reuters.net",
+        "bloomberg.com",
+        "bloomberg.net",
+        "ft.com",
+        "ftcontent.com",
+        "wsj.com",
+        "cnbc.com",
+        "coindesk.com",
+        "theblock.co",
+        "theblock.com",
+        "yna.co.kr",
+        "yonhapnews.co.kr",
+        "yonhap.co.kr",
+        "infomax.co.kr",
+    )
+    if host:
+        for h in s_hosts:
+            if host == h or host.endswith("." + h):
+                return "S"
+    if any(
+        x in host
+        for x in (
+            "reuters.com",
+            "bloomberg.com",
+            "ft.com",
+            "wsj.com",
+            "cnbc.com",
+            "coindesk.com",
+            "theblock.co",
+            "theblock.com",
+            "yna.co",
+            "yonhap",
+            "infomax.",
+        )
+    ):
+        return "S"
+    if "ft.com" in lk_l or "financial times" in s:
+        return "S"
+    if any(m in s for m in ("reuters", "로이터", "bloomberg", "cnbc", "coindesk", "the block", "연합뉴스", "연합인포맥스")) or any(m in raw for m in ("연합뉴스", "연합인포맥스")):
+        return "S"
+    if any(m in s for m in ("yonhap", "infomax")):
+        return "S"
+
+    a_hosts = (
+        "hankyung.com",
+        "mk.co.kr",
+        "biz.chosun.com",
+        "sedaily.com",
+        "mt.co.kr",
+        "edaily.co.kr",
+        "investing.com",
+        "finance.yahoo.com",
+    )
+    if host:
+        for h in a_hosts:
+            if host == h or host.endswith("." + h):
+                return "A"
+    if "investing.com" in lk_l or "finance.yahoo" in lk_l:
+        return "A"
+    if any(m in raw for m in ("한국경제", "매일경제", "조선비즈", "서울경제", "머니투데이", "이데일리")):
+        return "A"
+    if any(m in s for m in ("hankyung", "maeil", "sedaily", "edaily", "moneytoday", "yahoo finance", "야후")):
+        return "A"
+
+    return "B"
+
+
+def live_news_mega_catalyst_bypasses_c_source(title: str, summary: str, link: str) -> bool:
+    """C급 출처라도 초대형 이벤트면 라이브 발송 예외 (리캡 후보는 여전히 제외)."""
+    t = f"{title} {summary}".lower()
+    lk = (link or "").lower()
+    raw = f"{title} {summary}"
+    if "fomc" in t:
+        return True
+    if re.search(r"\bcpi\b", t) or re.search(r"\bppi\b", t):
+        return True
+    if "sec.gov" in lk or "federalreserve.gov" in lk:
+        return True
+    if ("sec" in t or "증권거래위원회" in raw) and any(k in t for k in ("etf", "승인", "거절", "심사", "서류", "공시")):
+        return True
+    if any(k in t for k in ("전쟁", "미사일", "공습", "invasion", "nuclear strike", "war ", " war", "gaza", "ceasefire", "휴전")):
+        return True
+    if any(k in t for k in ("유가 급등", "유가 급락", "oil surges", "oil spikes", "oil plunges", "wti surges", "brent soars", "brent plunges")):
+        return True
+    return False
 
 
 def has_clear_source_name(source: str) -> bool:
@@ -4879,6 +4928,7 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                         remember_live_news_hashes(state, raw_title, raw_link)
                         state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
                         continue
+                    src_rank = source_quality_rank(source, raw_link)
                     title_for_recap = strip_news_source_tail(raw_title)
                     try:
                         title_for_recap = await ensure_korean_text(session, title_for_recap)
@@ -4888,7 +4938,7 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                         continue
                     if not is_recap_title_natural(title_for_recap):
                         continue
-                    if grade in ("A", "B") or topic_on_cooldown:
+                    if (grade in ("A", "B") or topic_on_cooldown) and src_rank != "C":
                         recap_grade = grade if grade in ("A", "B") else "A"
                         state.live_recent_items.append((now, cand_emoji, html_clean(title_for_recap, 150), source, combined_score, recap_grade, topic_key))
 
@@ -4901,6 +4951,25 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                         state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
                         continue
                     if importance < 7 or grade not in ("S", "A"):
+                        remember_live_news_hashes(state, raw_title, raw_link)
+                        state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
+                        continue
+                    if src_rank == "C" and not live_news_mega_catalyst_bypasses_c_source(raw_title, raw_summary, raw_link):
+                        logging.info(
+                            "live_news blocked reason=source_rank_c title=%s source=%s",
+                            clean_text(raw_title, 90),
+                            source,
+                        )
+                        remember_live_news_hashes(state, raw_title, raw_link)
+                        state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
+                        continue
+                    if src_rank == "B" and importance < 8:
+                        logging.info(
+                            "live_news blocked reason=source_rank_b_importance title=%s importance=%s source=%s",
+                            clean_text(raw_title, 90),
+                            importance,
+                            source,
+                        )
                         remember_live_news_hashes(state, raw_title, raw_link)
                         state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
                         continue
@@ -5018,7 +5087,6 @@ async def live_recap_scheduler(bot: Bot, state: State) -> None:
                             )[:3]
                         else:
                             top = sorted(items, key=lambda x: x[4] if len(x) > 4 else 0, reverse=True)[:3]
-                        blocked_sources = {"Korea IT Times", "재외동포신문", "한민족센터", "코리아넷뉴스"}
                         lines = ["👀 지금 시장에서 보는 흐름"]
                         idx = 1
                         seen_buckets: set[str] = set()
@@ -5029,8 +5097,8 @@ async def live_recap_scheduler(bot: Bot, state: State) -> None:
                             _ts, emoji, title, source, _score, *extra = item
                             recap_grade = extra[0] if len(extra) >= 1 else "A"
                             recap_topic = extra[1] if len(extra) >= 2 else normalize_recap_bucket(recap_market_keyword(title, emoji))
-                            if source in blocked_sources:
-                                logging.info("recap skipped reason=blocked_source title=%s source=%s", clean_text(title, 90), source)
+                            if source_quality_rank(source, "") == "C":
+                                logging.info("recap skipped reason=source_rank_c title=%s source=%s", clean_text(title, 90), source)
                                 continue
                             if mostly_english(title):
                                 logging.info("recap skipped reason=mostly_english title=%s", clean_text(title, 90))
