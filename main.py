@@ -112,11 +112,6 @@ BREAKING_FORCE_TERMS = (
     "유가", "전쟁", "청산", "급락", "해킹",
 )
 
-THREADS_AUTO_POST = os.getenv("THREADS_AUTO_POST", "false").lower() == "true"
-THREADS_USER_ID = os.getenv("THREADS_USER_ID")
-THREADS_ACCESS_TOKEN = os.getenv("THREADS_ACCESS_TOKEN")
-THREADS_IMAGE_URL = os.getenv("THREADS_IMAGE_URL")
-
 REQUEST_HEADERS = {
     "User-Agent": "Mozilla/5.0 Chrome/124 Safari/537.36",
     "Accept": "application/json,text/plain,*/*",
@@ -1249,82 +1244,21 @@ def is_urgent_news(title: str, summary: str) -> bool:
 def news_importance_line(title: str, summary: str) -> str:
     text = f"{title}\n{summary}".lower()
     if any(k in text for k in ("etf", "sec", "regulation", "approval", "rejection", "규제", "승인", "거절")):
-        return "ETF·규제 이슈라 비트코인 수급에 직접 영향 줄 수 있음."
+        return "ETF·규제라면 수급이 바로 반응하는 축."
     if any(k in text for k in ("fed", "fomc", "cpi", "inflation", "interest rate", "rate cut", "금리", "연준")):
-        return "금리 기대가 흔들리면 코인·주식이 같이 움직일 수 있음."
+        return "금리 쪽이면 코인이랑 주식이 한 줄로 움직이는 날이 많음."
     if any(k in text for k in ("hack", "exploit", "hacked", "해킹")):
-        return "해킹 이슈는 단기 투자심리를 바로 식힐 수 있음."
+        return "해킹이면 단기 심리부터 긁힘."
     if any(k in text for k in ("exchange", "binance", "coinbase", "kraken", "거래소")):
-        return "거래소 이슈는 수급과 신뢰도에 바로 연결됨."
+        return "거래소 이슈면 스프레드·신뢰도부터 보면 됨."
     if any(k in text for k in ("trump", "tariff", "dollar", "oil", "war", "iran", "israel", "유가", "달러", "전쟁")):
-        return "거시·지정학 이슈라 유가·달러·위험자산 분위기를 같이 흔들 수 있음."
+        return "거시·지정학이면 유가·달러·위험자산 한 덩어리로 봄."
     if any(k in text for k in ("liquidation", "sell-off", "whale", "volume", "청산")):
-        return "청산·거래량 이슈라 단기 변동성이 커질 수 있음."
-    return "방향보다 시장 반응까지 같이 확인해야 하는 뉴스."
+        return "청산·거래량이면 변동성부터 크게 잡음."
+    return "가격보다 붙은 반응(거래량·선물)을 먼저 볼 만한 건."
 
 
-def build_threads_text(title_ko: str, title: str, summary: str) -> str:
-    text = f"{title}\n{summary}".lower()
-    if is_forced_breaking_news(title, summary):
-        return (
-            f"속보성 이슈다.\n\n"
-            f"{title_ko}\n\n"
-            f"유가, 달러, 비트코인이 같이 흔들릴 수 있는 구간이다.\n\n"
-            f"지금은 가격보다 뉴스 이후 시장 반응을 먼저 봐야 한다."
-        )[:500]
-    if "etf" in text:
-        return (
-            "비트코인 ETF 쪽 돈 흐름은 계속 봐야 한다.\n\n"
-            "단기 가격보다 중요한 건 큰돈이 빠지는지, 다시 들어오는지다.\n\n"
-            "ETF 유입이 유지되면 가격은 늦게 반응할 수 있다."
-        )[:500]
-    return (
-        f"{title_ko}\n\n"
-        "지금은 뉴스 하나에도 시장이 바로 흔들리는 구간이다.\n\n"
-        "가격이 어디서 버티는지 같이 봐야 한다."
-    )[:500]
-
-
-async def publish_to_threads(session: aiohttp.ClientSession, text: str) -> None:
-    if not THREADS_AUTO_POST:
-        return
-    if not THREADS_USER_ID or not THREADS_ACCESS_TOKEN:
-        logging.warning("Threads 자동 업로드 설정 없음")
-        return
-
-    try:
-        create_url = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads"
-        payload = {"access_token": THREADS_ACCESS_TOKEN, "text": text[:500]}
-        if THREADS_IMAGE_URL:
-            payload["media_type"] = "IMAGE"
-            payload["image_url"] = THREADS_IMAGE_URL
-        else:
-            payload["media_type"] = "TEXT"
-
-        async with session.post(create_url, data=payload, timeout=30) as response:
-            created = await response.json()
-            if response.status >= 300:
-                logging.error("Threads 컨테이너 생성 실패: %s", created)
-                return
-
-        creation_id = created.get("id")
-        if not creation_id:
-            return
-
-        publish_url = f"https://graph.threads.net/v1.0/{THREADS_USER_ID}/threads_publish"
-        async with session.post(
-            publish_url,
-            data={"access_token": THREADS_ACCESS_TOKEN, "creation_id": creation_id},
-            timeout=30,
-        ) as response:
-            published = await response.json()
-            if response.status >= 300:
-                logging.error("Threads 게시 실패: %s", published)
-    except Exception:
-        logging.exception("Threads 자동 업로드 오류")
-
-
-async def build_korean_news_message(session: aiohttp.ClientSession, title: str, summary: str, link: str) -> Tuple[str, str]:
+async def build_korean_news_message(session: aiohttp.ClientSession, title: str, summary: str, link: str) -> str:
     title_ko = await translate_to_korean(session, title)
     source = source_name_from_link(link)
     score = normalized_news_score(title, summary)
@@ -1337,28 +1271,26 @@ async def build_korean_news_message(session: aiohttp.ClientSession, title: str, 
             btc_price = float(btc["lastPrice"])
             btc_pct = float(btc["priceChangePercent"])
             flow = "상승 흐름" if btc_pct > 0.15 else "하락 압력" if btc_pct < -0.15 else "보합권"
-            btc_line = f"\n\n📊 현재 BTC: {btc_price:,.0f} USDT ({fmt_pct(btc_pct)}, {flow})"
+            btc_line = f"\n\n지금 BTC {btc_price:,.0f} ({fmt_pct(btc_pct)}, {flow})"
         except Exception:
             btc_line = ""
 
     if is_urgent_news(title, summary):
-        tag = f"🚨 [속보 · 중요도 {score}/10]"
+        tag = f"🚨 피드 · 속보 · {score}/10"
     elif score >= 8:
-        tag = f"🔥 [핵심뉴스 · 중요도 {score}/10]"
+        tag = f"🔥 피드 · 상단 · {score}/10"
     else:
-        tag = f"📰 [뉴스 · 중요도 {score}/10]"
+        tag = f"📰 피드 · 흐름 · {score}/10"
 
     telegram_msg = (
         f"{tag}\n"
         f"{title_ko}\n\n"
-        f"관찰: {line}\n"
-        f"리스크: 뉴스 직후 과한 추격은 변동성에 휘말릴 수 있음.\n"
-        f"대응: BTC 가격 반응과 거래량 동반 여부 확인."
+        f"데스크: {line}"
         f"{btc_line}\n\n"
-        f" {source}\n"
+        f"출처: {source}\n"
         f"{link}"
     )
-    return telegram_msg, build_threads_text(title_ko, title, summary)
+    return telegram_msg
 
 
 async def fetch_feed_entries(session: aiohttp.ClientSession, url: str) -> list:
@@ -1785,9 +1717,8 @@ async def news_monitor(bot: Bot, state: State) -> None:
                                 logging.info("뉴스 간격 제한 스킵 urgent=%s title=%s", urgent, clean_text(title, 80))
                                 continue
 
-                            msg, threads_text = await build_korean_news_message(session, title, summary, link)
+                            msg = await build_korean_news_message(session, title, summary, link)
                             await safe_send(bot, msg, disable_preview=False)
-                            await publish_to_threads(session, threads_text)
 
                             logging.info("뉴스 전송 완료 score=%s urgent=%s title=%s", score, urgent, clean_text(title, 80))
                             mark_news_sent_strict(state, title, link, published, now)
@@ -2002,6 +1933,46 @@ def market_one_liner(btc_24h_pct: float) -> str:
     return "큰 방향은 아직 안 나왔고, 수급 붙는 쪽으로 시장이 움직일 가능성 큼."
 
 
+_WEEKDAY_KO = ("월", "화", "수", "목", "금", "토", "일")
+
+
+def _fmt_usdt_turnover(v: Optional[float]) -> str:
+    if v is None or v <= 0:
+        return "-"
+    if v >= 1e9:
+        return f"{v / 1e9:.1f}B$"
+    if v >= 1e6:
+        return f"{v / 1e6:.0f}M$"
+    return f"{v / 1e3:.0f}K$"
+
+
+def briefing_hook_line(btc_pct: float, eth_pct: float, sol_pct: float) -> str:
+    if btc_pct >= 1.0:
+        return "BTC가 꽤 치켜세웠어요. 롱은 거래량이 끝까지 붙을 때만 믿는 게 덜 데이고."
+    if btc_pct <= -1.0:
+        return "BTC가 꽤 눌렸어요. 반등은 호가·선물 펀딩이 같이 살아날 때만 보는 쪽이 나아요."
+    if sol_pct >= 1.2 and btc_pct < 0.6 and eth_pct < 0.8:
+        return "SOL만 텐션 올라온 느낌이에요. 알트는 유동성 얇은 구간부터 먼저 깨지니까 체결 깨짐만 보면 돼요."
+    if btc_pct <= -0.5 and eth_pct <= -0.8 and sol_pct <= -0.8:
+        return "BTC·ETH·SOL이 한팡에 약해요. 위험자산 톤 나쁠 땐 레버·펀딩이 먼저예요."
+    return "BTC는 아직 방향 고르는 중이에요. 박스 깨기 전엔 추격 말고 레벨만 봐도 충분해요."
+
+
+def briefing_volatility_nudge(btc_pct: float, eth_pct: float, sol_pct: float) -> str:
+    mx = max(abs(btc_pct), abs(eth_pct), abs(sol_pct))
+    if mx >= 2.5:
+        return "24h 변동폭이 커요. 청산 물량·호가 밀도만 같이 보면 됨."
+    if mx >= 1.2:
+        return "평소보다 변동 조금 있어요. 숏·롱 다 과하면 잘리기 쉬움."
+    return "변동은 무난한 편. 뉴스 터질 때 거래대금만 급하게 붙는지 보면 됨."
+
+
+def _fmt_funding_pct(v: Optional[float]) -> str:
+    if v is None:
+        return "-"
+    return f"{v:+.4f}%"
+
+
 async def briefing_scheduler(bot: Bot, state: State) -> None:
     slots = {
         "12": (12, "☀️ 점심 · 코인·시장 체크"),
@@ -2012,66 +1983,107 @@ async def briefing_scheduler(bot: Bot, state: State) -> None:
             started = utc_now()
             try:
                 now = now_kst()
-                for slot_key, (hour, title) in slots.items():
-                    if now.hour == hour and now.minute < 5:
-                        if state.briefing_sent_dates.get(slot_key) == now.date():
+                for slot_key, (hour, _title) in slots.items():
+                    if now.hour != hour or now.minute > 1:
+                        continue
+                    if state.briefing_sent_dates.get(slot_key) == now.date():
+                        continue
+
+                    rows = await asyncio.gather(*[get_market_ticker(session, s) for s in SYMBOLS])
+                    tickers: dict[str, tuple[float, float, float]] = {}
+                    for sym, t in zip(SYMBOLS, rows):
+                        if not t:
                             continue
-
-                        tickers = {}
-                        for symbol in SYMBOLS:
-                            t = await get_market_ticker(session, symbol)
-                            if t:
-                                tickers[symbol] = (float(t["lastPrice"]), float(t["priceChangePercent"]))
-                        if "BTCUSDT" not in tickers:
+                        try:
+                            tickers[sym] = (
+                                float(t["lastPrice"]),
+                                float(t["priceChangePercent"]),
+                                float(t.get("volume24h") or 0),
+                            )
+                        except Exception:
                             continue
+                    if "BTCUSDT" not in tickers:
+                        continue
 
-                        fng = await get_fear_greed(session)
-                        kimchi = await get_kimchi_premium(session)
-                        weekend = is_weekend_mode(now)
-                        nq_fut = await get_yahoo_snapshot(session, "NQ%3DF") if not weekend else None
-                        wti = await get_yahoo_snapshot(session, "CL%3DF")
-                        sox = await get_yahoo_snapshot(session, "%5ESOX") if not weekend else None
-                        dxy = await get_yahoo_snapshot(session, "DX-Y.NYB")
+                    f_btc, f_eth, f_sol = await asyncio.gather(
+                        get_funding_rate(session, "BTCUSDT"),
+                        get_funding_rate(session, "ETHUSDT"),
+                        get_funding_rate(session, "SOLUSDT"),
+                    )
 
-                        btc_price, btc_pct = tickers["BTCUSDT"]
-                        eth_price, eth_pct = tickers.get("ETHUSDT", (0, 0))
-                        sol_price, sol_pct = tickers.get("SOLUSDT", (0, 0))
+                    fng = await get_fear_greed(session)
+                    kimchi = await get_kimchi_premium(session)
+                    weekend = is_weekend_mode(now)
+                    nq_fut = await get_yahoo_snapshot(session, "NQ%3DF") if not weekend else None
+                    wti = await get_yahoo_snapshot(session, "CL%3DF")
+                    sox = await get_yahoo_snapshot(session, "%5ESOX") if not weekend else None
+                    dxy = await get_yahoo_snapshot(session, "DX-Y.NYB")
 
-                        msg = compact_section(title)
-                        msg += f"\n{btc_brief_line(btc_price, btc_pct)}"
-                        msg += f"\n{move_icon(eth_pct)} ETH: {eth_price:,.0f} USDT ({fmt_pct(eth_pct)})"
-                        msg += f"\n{move_icon(sol_pct)} SOL: {sol_price:,.0f} USDT ({fmt_pct(sol_pct)})"
+                    btc_price, btc_pct, btc_vol = tickers["BTCUSDT"]
+                    eth_price, eth_pct, eth_vol = tickers.get("ETHUSDT", (0.0, 0.0, 0.0))
+                    sol_price, sol_pct, sol_vol = tickers.get("SOLUSDT", (0.0, 0.0, 0.0))
 
-                        if nq_fut and not weekend:
-                            msg += f"\n\n{snapshot_line('나스닥 선물', nq_fut)}"
-                        if wti:
-                            msg += f"\n{snapshot_line('WTI 유가', wti)}"
-                        if sox and not weekend:
-                            msg += f"\n{snapshot_line('필라델피아 반도체지수', sox)}"
-                        if dxy:
-                            msg += f"\n{snapshot_line('달러인덱스', dxy)}"
+                    wd = _WEEKDAY_KO[now.weekday()]
+                    head_emoji = "☀️" if hour == 12 else "🌙"
+                    head_word = "점심" if hour == 12 else "밤"
+                    msg = (
+                        f"{head_emoji} {head_word} 스냅 · {now.month}/{now.day}({wd}) 정각 1회\n"
+                        f"코인·김치·매크로 한눈에 정리\n"
+                        f"────────\n"
+                        f"🪙 가격\n"
+                        f"{btc_brief_line(btc_price, btc_pct)}\n"
+                        f"{move_icon(eth_pct)} ETH: {eth_price:,.0f} USDT ({fmt_pct(eth_pct)})\n"
+                        f"{move_icon(sol_pct)} SOL: {sol_price:,.0f} USDT ({fmt_pct(sol_pct)})"
+                    )
 
-                        if fng:
-                            fng_value, fng_label = fng
-                            msg += f"\n\n😶‍🌫️ 공포탐욕지수: {fng_value} ({fng_label})"
-                        if kimchi:
-                            premium, _, _ = kimchi
-                            msg += f"\n🇰🇷 김치프리미엄: {fmt_pct(premium)}"
+                    if nq_fut and not weekend:
+                        msg += f"\n\n📡 매크로\n{snapshot_line('나스닥 선물', nq_fut)}"
+                    if wti:
+                        msg += f"\n{snapshot_line('WTI 유가', wti)}"
+                    if sox and not weekend:
+                        msg += f"\n{snapshot_line('필라델피아 반도체', sox)}"
+                    if dxy:
+                        msg += f"\n{snapshot_line('달러인덱스', dxy)}"
 
-                        msg += f"\n\n📌 지금 핵심:\n{market_one_liner(btc_pct)}"
-                        if sol_pct >= 1.0 and btc_pct < 1.0 and eth_pct < 1.0:
-                            msg += "\n알트 쪽만 강한 흐름."
-                        if eth_pct <= -0.8 and btc_pct <= -0.8 and sol_pct <= -0.8:
-                            msg += "\n위험자산 전반 약세."
-                        msg += "\n\n체크할 것:"
-                        msg += "\n- BTC·ETH·SOL 수급과 청산/ETF 흐름"
-                        msg += "\n- 알트·김치프리미엄 변화"
-                        if weekend:
-                            msg += "\n- 유가·달러·공포탐욕"
-                        else:
-                            msg += "\n- 미국 선물·환율·반도체(증시 연동)"
+                    if fng:
+                        fng_value, fng_label = fng
+                        msg += f"\n\n😶‍🌫️ 공포탐욕 {fng_value} ({fng_label})"
+                    if kimchi:
+                        premium, _, _ = kimchi
+                        msg += f"\n🇰🇷 김치 {fmt_pct(premium)}"
 
-                        await safe_send(bot, compact_message(msg, LIVE_MESSAGE_SOFT_LIMIT), disable_preview=True)
+                    msg += (
+                        f"\n\n💬 한 줄\n{briefing_hook_line(btc_pct, eth_pct, sol_pct)}\n"
+                        f"{briefing_volatility_nudge(btc_pct, eth_pct, sol_pct)}"
+                    )
+
+                    msg += (
+                        f"\n\n📊 24h 거래대금(USDT·대략)\n"
+                        f"BTC {_fmt_usdt_turnover(btc_vol)} · ETH {_fmt_usdt_turnover(eth_vol)} · SOL {_fmt_usdt_turnover(sol_vol)}"
+                    )
+                    msg += (
+                        f"\n\n⚡ 펀딩(연속·%)\n"
+                        f"BTC {_fmt_funding_pct(f_btc)} · ETH {_fmt_funding_pct(f_eth)} · SOL {_fmt_funding_pct(f_sol)}"
+                    )
+
+                    msg += (
+                        "\n\n👀 오늘 유심히\n"
+                        "• BTC — ETF·거시 나오면 선물 거래대금부터\n"
+                        "• ETH — BTC랑 따로 놀면 레버 과열 의심\n"
+                        "• SOL — 알트 바로미터. 펀딩 튀면 단타는 타이트하게"
+                    )
+                    if weekend:
+                        msg += "\n• 주말 — 유가·달러·김치만 짧게"
+                    else:
+                        msg += "\n• 한국장 열리면 — 외인·반도체 수급이랑 환율"
+
+                    try:
+                        await send_message(
+                            bot, compact_message(msg, LIVE_MESSAGE_SOFT_LIMIT), disable_preview=True
+                        )
+                        state.briefing_sent_dates[slot_key] = now.date()
+                    except Exception:
+                        logging.exception("briefing 전송 실패 slot=%s hour=%s", slot_key, hour)
             except Exception:
                 logging.exception("briefing_scheduler 오류")
 
@@ -3962,10 +3974,10 @@ def event_line_from_news(title_ko: str, title: str, summary: str, category: str)
 
     base = html_clean(strip_news_source_tail(title_ko or title), 120).strip(" -–—:·.")
     if not base:
-        return "시장 영향이 있는 새 뉴스가 확인됨."
+        return "방금 보도만 확인됨."
     if base.endswith(("다", "됨", "함", ".", "음")):
         return base
-    return f"{base} 소식이 나옴."
+    return f"{base} 쪽 보도."
 
 
 LIVE_NEWS_BANNED_PHRASES = (
@@ -4100,95 +4112,99 @@ def live_news_should_send_photo(
 
 
 def live_news_severity_label(importance: int, grade: str = "") -> str:
-    if grade == "S" or importance >= 8:
-        return "중대"
+    if grade == "S" or importance >= 10:
+        return "상단"
+    if importance >= 9:
+        return "필독"
+    if importance >= 8:
+        return "강조"
     if importance >= 7:
-        return "핵심"
-    return "속보"
+        return "체크"
+    return "흐름"
 
 
 def live_news_market_impact_body(event_type: str, category: str, title: str, summary: str) -> str:
     if event_type == "geopolitics":
         s = (
-            "휴전·제재 완화 쪽 뉴스가 먼저 뜨면 유가랑 유럽 증시 반응이 제일 큼.\n"
-            "미국이랑 유럽이 같은 스텝은 아닐 때도 있어서, 지역별로 나눠 읽는 게 안전함.\n"
-            "방산·원자재는 뉴스 하나에도 범위가 크게 흔들릴 수 있음."
+            "휴전·제재 완화 먼저 뜨면 유가·유럽 증시가 제일 큼.\n"
+            "미국이랑 유럽 스텝 안 맞을 때도 있음. 지역 나눠서 보면 됨.\n"
+            "방산·원자재는 뉴스 하나에도 범위 크게 흔들림."
         )
     elif event_type == "oil":
         s = (
-            "호르무즈 쪽 얘기가 한 번 돌면 유가부터 움직이고, 그 여파가 항공·물류비로 이어지는 경우가 많음.\n"
-            "다만 선박 움직임·운임까지 같은 날 정상화됐다고 보긴 이르니, 해운이랑 물류 변수는 따로 챙겨야 함.\n"
-            "유가가 다시 튀면 나스닥이랑 방산·원자재까지 한 줄로 흔들릴 수 있음."
+            "호르무즈 한 번 돌면 유가부터. 항공·물류비로 이어짐.\n"
+            "선박·운임까지 당일 정상이라고 보긴 이르니 해운은 따로.\n"
+            "유가 다시 튀면 나스닥·방산·원자재 한 줄로 감."
         )
     elif event_type in ("rates",):
         s = (
-            "금리 기대가 바뀌면 달러·국채 수익률이 먼저 움직이고, 나스닥 선물과 BTC가 같은 축으로 밀리는 경우가 많음.\n"
-            "연준 발언 뒤에는 가이드포인트 숫자가 시장에 얼마나 남는지가 핵심임."
+            "금리 기대 바뀌면 달러·국채 먼저. 나스닥 선물이랑 BTC 같은 축으로 밀림.\n"
+            "연준 끝나고 숫자가 시장에 얼마나 남는지가 본전."
         )
     elif event_type in ("etf", "crypto_etf"):
         s = (
-            "현물 ETF 쪽은 일별 순유입·보관 코인 수량 변화가 가격 논의로 직결되는 경우가 많음.\n"
-            "SEC 서류·상장사 공시 문구가 나오면 단기적으로는 레버리지부터 반응하는 패턴이 잦음."
+            "현물 ETF는 일별 유입·보관 수량이 가격 얘기랑 바로 붙음.\n"
+            "SEC·공시 문구 나오면 단기론 레버부터 튀는 편."
         )
     elif event_type == "semiconductor_etf":
         s = (
-            "국내에선 삼성전자·SK하이닉스가 메모리·HBM 이익 민감도가 커서 테마 자금이 ETF로도 흘러올 수 있음.\n"
-            "밤에 필라델피아 반도체나 엔비디아 프리가 크게 움직이면 같은 방향으로 국내 선물·현물이 붙는지 확인하는 게 맞음."
+            "국장에선 삼전·하닉이 메모리·HBM 민감도 크니까 테마 자금이 ETF로도 옴.\n"
+            "밤에 필반·엔비디아 프리 크게 움직이면 국내 선·현물이 같은 쪽으로 붙는지."
         )
     elif event_type == "semiconductor":
         s = (
-            "HBM·GPU 공급 타임라인이 바뀌면 국내 반도체 목표가·밸류에이션 논의가 같이 움직임.\n"
-            "데이터센터 CAPEX 가이던스와 전력·냉각 수급이 같은 테마로 묶일 때가 많음."
+            "HBM·GPU 타임라인 바뀌면 국내 반도체 목표가·밸류 같이 감.\n"
+            "CAPEX 가이던스랑 전력·냉각이 한 테마로 묶이는지."
         )
     elif event_type == "security":
         s = (
-            "출금 지연·지갑 동결 같은 운영 변수는 스프레드랑 온체인 유동성이 바로 반응함.\n"
-            "스테이블 페그·거래소 공지까지 같이 보면 됨."
+            "출금 지연·동결이면 스프레드랑 온체인 유동성부터.\n"
+            "스테이블 페그·거래소 공지 같이."
         )
     elif event_type == "liquidation":
         s = (
-            "대형 청산은 펀딩·미결제약정을 한 번에 줄여서 변동성이 커질 수 있음.\n"
-            "BTC·알트 베타가 잠깐 깨지는지 같이 봐야 함."
+            "대형 청산이면 펀딩·미결제 한 번에 줄어듦. 변동성 커짐.\n"
+            "BTC·알트 베타 잠깐 깨지는지."
         )
     elif event_type == "ai_etf":
         s = (
-            "데이터센터·GPU·전력 쪽 기대가 한 덩어리로 움직일 때가 많음.\n"
-            "국내에선 AI 인프라·반도체 대장주 수급이 같은 축으로 보이는지 확인하는 게 맞음."
+            "데이터센터·GPU·전력 기대가 한 덩어리로 움직이는 편.\n"
+            "국장에선 AI 인프라·반도체 대장 수급이 같은 축인지."
         )
     elif event_type in ("korea_stock_etf", "unknown_equity_etf"):
         s = (
-            "국내 상장 ETF는 코스피·코스닥 비중과 외국인·기관 자금 배분이 바로 연결되는 경우가 많음.\n"
-            "장 초반 체결·환율이 같은 방향으로 붙는지 확인하는 게 좋음."
+            "국내 ETF는 코스피·코스닥 비중이 외인·기관 배분이랑 바로 엮임.\n"
+            "장 초반 체결이랑 환율 방향만 같이."
         )
     elif event_type == "fx":
         s = (
-            "달러/원 급변은 외국인 선물·현물이 같은 방향으로 안 나올 때가 있음.\n"
-            "코스피 방어 구간에서는 반도체·금융주가 먼저 반응하는지 같이 봐야 함."
+            "달러/원 급변은 외인 선·현물이 엇갈릴 때 있음.\n"
+            "코스피 방어 구간이면 반도체·금융이 먼저."
         )
     elif event_type == "capex":
         s = (
-            "빅테크 CAPEX 숫자는 GPU·전력·냉각 장비 수급 논의로 이어질 수 있음.\n"
-            "나스닥 선물과 국내 장비·전력주가 같은 테마로 붙는지 확인하는 게 맞음."
+            "빅테크 CAPEX는 GPU·전력·냉각 수급으로 이어짐.\n"
+            "나스닥 선물이랑 국내 장비·전력주가 같은 테마인지."
         )
     elif event_type == "commodity_etf":
         s = (
-            "원자재 ETF는 인플레 기대와 달러·국채금리와 같은 축에서 움직이는 경우가 많음.\n"
-            "나스닥 성장주 레버리지에 간접 부담으로 전달되는지 같이 읽는 게 좋음."
+            "원자재 ETF는 인플레 기대랑 달러·금리 축.\n"
+            "나스닥 성장주 레버에 간접으로 박히는지."
         )
     elif event_type == "bond_etf":
         s = (
-            "채권 ETF 자금은 금리 민감 자산과 상관이 잠깐 강해질 수 있음.\n"
-            "달러·나스닥·BTC가 같은 방향으로 밀리는지 확인하는 게 맞음."
+            "채권 ETF 자금은 금리 민감 자산이랑 상관 잠깐 세질 때 있음.\n"
+            "달러·나스닥·BTC 한 줄인지."
         )
     elif category == "코인":
         s = (
-            "BTC가 방향을 잡으면 알트는 베타·유동성 순으로 순차 반응하는 경우가 많음.\n"
-            "SOL·ETH는 ETF·규제 뉴스가 나올 때 레버리지 쪽이 먼저 움직이는 패턴이 잦음."
+            "BTC가 방향 잡으면 알트는 베타·유동성 순으로 늦게 붙는 경우 많음.\n"
+            "SOL·ETH는 ETF·규제 나올 때 레버부터 튀는 편."
         )
     else:
         s = (
-            "뉴스에 나온 수치·발언이 기존 시나리오와 어긋나면 섹터 간 상관관계가 잠깐 깨질 수 있음.\n"
-            "지수·환율·외국인 수급이 같은 방향으로 붙는지 확인하는 게 좋음."
+            "숫자나 말 한마디에 시나리오 깨지면 섹터끼리 잠깐 따로 노는 구간 나옴.\n"
+            "지수·환율·외인이 한 방향인지만."
         )
     return strip_live_news_banned_phrases(s)
 
@@ -4342,9 +4358,9 @@ def polish_korean_news_text(text_value: str) -> str:
         "공급망 지연은 여전히 남아 있음": "물류·배송 지연은 아직 남아 있음",
         "공급망 지연은 여전히 ​​남아 있음": "물류·배송 지연은 아직 남아 있음",
         "공급망 지연 이슈는 남아있음": "물류·배송 지연은 아직 남아 있음",
-        "위험자산 반응 체크": "위험자산 반응을 지수랑 같이 보면 됨",
-        "빅테크 움직임이라 나스닥 분위기 같이 봐야함.": "빅테크 움직임이 나스닥 방향을 끌 가능성이 큼.",
-        "시장 영향은 가격 반응 확인하면서 봐야함.": "가격이 움직일 때 거래량이 같이 붙는지 보면 됨.",
+        "위험자산 반응 체크": "위험자산은 지수랑 같이 보면 됨",
+        "빅테크 움직임이라 나스닥 분위기 같이 봐야함.": "빅테크가 나스닥 방향 끌 가능성 큼.",
+        "시장 영향은 가격 반응 확인하면서 봐야함.": "가격 움직일 때 거래량 붙는지 보면 됨.",
     }
     for old, new in fixes.items():
         s = s.replace(old, new)
@@ -4357,7 +4373,7 @@ def compact_message(msg: str, limit: int = 1500) -> str:
     msg = polish_korean_news_text(msg)
     if len(msg) <= limit:
         return msg
-    return msg[:limit - 40].rstrip() + "\n\n…내용 압축됨"
+    return msg[:limit - 40].rstrip() + "\n\n…길어서 잘림"
 
 
 def normalize_news_importance(score: int) -> int:
@@ -4982,77 +4998,77 @@ def kr_close_focus(kospi_pct: float, kosdaq_pct: float, usd_krw: float) -> str:
 def importance_narrative_line(event_type: str) -> str:
     if event_type in ("etf", "crypto_etf"):
         return (
-            "규제 서류·상장사 공시가 먼저 움직이고, 현물 ETF는 순유입·보관 수량이 가격 논의로 직결되는 경우가 많음.\n"
-            "단기 호가보다 기관·레버리지 자금이 같은 방향으로 붙는지가 중요함."
+            "SEC·거래소 문구가 먼저 튀고, 현물은 유입이랑 보관 잔고로 감 잡으면 됨.\n"
+            "호가보다 레버·기관이 같은 방향인지."
         )
     if event_type == "semiconductor_etf":
         return (
-            "국내 투자자에겐 메모리·HBM 이익 민감도가 큰 삼성전자·SK하이닉스가 앞에 옴.\n"
-            "해외 SOX·엔비디아 프리는 같은 테마의 벤치마크로 두고 국내 수급을 먼저 보는 편이 맞음."
+            "국장에선 삼전·하닉이 앞줄. 메모리·HBM 민감도가 큼.\n"
+            "밤엔 SOX·엔비디아 프리 보고 국내 수급 맞춰 보면 됨."
         )
     if event_type == "ai_etf":
         return (
-            "데이터센터 CAPEX·GPU 공급 기대가 한 덩어리로 움직일 때가 많음.\n"
-            "전력·냉각·장비주까지 같은 테마로 묶여 반응하는지 확인하는 게 좋음."
+            "데이터센터 CAPEX랑 GPU 기대가 한 덩어리로 움직이는 편.\n"
+            "전력·냉각·장비까지 같은 테마로 붙는지."
         )
     if event_type in ("korea_stock_etf", "unknown_equity_etf"):
         return (
-            "국내 상장 ETF는 지수·섹터 비중 변화가 외국인·기관 수급으로 바로 이어질 수 있음.\n"
-            "장 초반 체결과 환율이 같은 방향으로 붙는지 같이 읽는 게 맞음."
+            "국내 ETF는 지수·섹터 비중이 외인·기관 수급이랑 바로 엮임.\n"
+            "장 초반 체결이랑 환율 방향만 같이 보면 됨."
         )
     if event_type == "commodity_etf":
         return (
-            "원자재 ETF는 인플레 기대와 달러·국채금리와 같은 축에서 움직이는 경우가 많음.\n"
-            "나스닥 성장주 레버리지에 간접 부담으로 전달되는지 확인하는 게 좋음."
+            "원자재 ETF는 인플레 기대랑 달러·금리 축.\n"
+            "나스닥 성장주 레버에 간접으로 박히는지."
         )
     if event_type == "bond_etf":
         return (
-            "채권 ETF 자금은 금리 민감 자산과 상관이 잠깐 강해질 수 있음.\n"
-            "달러·나스닥·BTC가 같은 방향으로 밀리는지 같이 봐야 함."
+            "채권 ETF 자금은 금리 민감 자산이랑 상관 잠깐 세질 때 있음.\n"
+            "달러·나스닥·BTC가 한 줄로 가는지."
         )
     if event_type == "rates":
         return (
-            "연준·중앙은행이 내놓는 가이드포인트가 바뀌면 달러·국채 수익률이 먼저 움직임.\n"
-            "나스닥 선물과 BTC가 같은 축으로 반응하는지 확인하는 게 맞음."
+            "연준·각국 가이드포인트 바뀌면 달러·국채부터 움직임.\n"
+            "나스닥 선물이랑 BTC가 같은 축인지."
         )
     if event_type == "oil":
         return (
-            "유가가 튀면 물가·국채금리 얘기까지 한 번에 붙는 경우가 많음.\n"
-            "나스닥 성장주는 달러 레버리지 조정이 먼저 나오는 패턴도 흔함."
+            "유가 튀면 물가·금리 얘기까지 한꺼번에 붙는 날 많음.\n"
+            "성장주는 달러 레버 조정이 먼저 나오기도 함."
         )
     if event_type == "semiconductor":
         return (
-            "HBM·GPU 공급 타임라인이 바뀌면 삼성전자·SK하이닉스 목표가·밸류에이션 논의가 같이 움직임.\n"
-            "데이터센터 CAPEX 가이던스와 전력·냉각 수급이 같은 테마로 묶일 때가 많음."
+            "HBM·GPU 타임라인 바뀌면 삼전·하닉 목표가·밸류 같이 감.\n"
+            "CAPEX 가이던스랑 전력·냉각이 한 테마로 묶이는지."
         )
     if event_type == "fx":
         return (
-            "달러/원 급변은 외국인 선물·현물이 같은 방향으로 안 나올 때가 있음.\n"
-            "코스피 방어 구간에서는 반도체·금융주가 먼저 반응하는지 같이 봐야 함."
+            "달러/원 급변은 외인 선·현물이 엇갈릴 때 있음.\n"
+            "코스피 방어 구간이면 반도체·금융이 먼저 움직이는지."
         )
     if event_type == "liquidation":
         return (
-            "대형 청산은 펀딩·미결제약정을 한 번에 줄여서 변동성이 커질 수 있음.\n"
-            "BTC·알트 베타가 잠깐 깨지는지 확인하는 게 좋음."
+            "대형 청산이면 펀딩·미결제 한 번에 줄어듦. 변동성 커짐.\n"
+            "BTC·알트 베타 잠깐 깨지는지."
         )
     if event_type == "security":
         return (
-            "출금 지연·지갑 동결 같은 운영 이슈는 스프레드와 온체인 유동성이 바로 반응함.\n"
-            "거래소 공지·스테이블 페그까지 같은 축으로 읽는 게 맞음."
+            "출금 지연·동결이면 스프레드랑 온체인 유동성부터 튐.\n"
+            "거래소 공지랑 스테이블 페그 같이."
         )
     if event_type == "geopolitics":
         return (
-            "휴전·제재 줄이는 쪽으로 무게가 실리면 유가랑 유럽 증시가 제일 빨리 반응함.\n"
-            "방산·원자재는 뉴스마다 변동폭이 크게 나올 수 있음."
+            "휴전·제재 완화 쪽이면 유가·유럽 증시가 제일 빠름.\n"
+            "방산·원자재는 뉴스 하나에도 범위 크게 흔들림."
         )
     if event_type == "capex":
         return (
-            "빅테크 CAPEX 숫자는 GPU·전력·냉각 장비 수급 논의로 이어질 수 있음.\n"
-            "나스닥 선물과 국내 장비·전력주가 같은 테마로 붙는지 확인하는 게 맞음."
+            "빅테크 CAPEX 숫자는 GPU·전력·냉각 수급으로 이어짐.\n"
+            "나스닥 선물이랑 국내 장비·전력주가 같은 테마인지."
         )
     return (
-        "뉴스에 나온 수치·발언이 기존 시나리오와 어긋나면 섹터 간 상관관계가 잠깐 깨질 수 있음.\n"
-        "지수·환율·외국인 수급이 같은 방향으로 붙는지 같이 읽는 게 좋음."
+        "숫자나 말 한마디에 시나리오 깨지면 섹터끼리 잠깐 따로 노는 구간 나옴.\n"
+        "지수·환율·외인이 한 방향인지만 같이 보면 됨."
     )
 
 
@@ -5132,17 +5148,17 @@ async def build_live_news_message(
             what_chunks.insert(0, title_ko)
         what_block = "\n".join(strip_live_news_banned_phrases(x) for x in what_chunks if (x or "").strip())[:900]
         nar_block = strip_live_news_banned_phrases(narrative)
-        msg = f"{category_emoji} {cat_line} · {sev}\n\n무슨 일\n{what_block}\n\n왜 중요\n{nar_block}\n\n시장 영향\n{impact_body}"
+        msg = f"{category_emoji} {cat_line} · {sev}\n\n내용\n{what_block}\n\n메모\n{nar_block}\n\n시장\n{impact_body}"
     else:
-        mode = "속보"
+        sev_short = live_news_severity_label(importance)
         ek_depth = etf_asset_kind(title_clean, summary)
         if ek_depth in ("semiconductor_etf", "ai_etf", "korea_stock_etf") and not is_crypto_etf_content(title_clean, summary):
             fact_lines = split_body_fact_lines(body_for_facts, 6, 260)
             depth = kr_equity_etf_depth_paragraph(ek_depth, title_ko, event_line, fact_lines)
-            msg = f"{category_emoji} {cat_line}\n\n{depth}"
+            msg = f"{category_emoji} {cat_line} · {sev_short}\n\n{depth}"
         else:
             fact_lines = split_body_fact_lines(body_for_facts, 4, 220)
-            msg = f"{category_emoji} {cat_line} · {mode}\n\n{event_line}"
+            msg = f"{category_emoji} {cat_line} · {sev_short}\n\n{event_line}"
             if fact_lines:
                 msg += "\n" + "\n".join(fact_lines)
             msg += f"\n\n{impact_body}"
@@ -5162,7 +5178,7 @@ async def build_live_news_message(
         except Exception:
             pass
 
-    msg += f"\n중요도 {importance}/10"
+    msg += f"\n〔{importance}/10〕"
     return compact_message(msg, LIVE_MESSAGE_SOFT_LIMIT)
 
 
