@@ -1937,8 +1937,33 @@ def market_one_liner(btc_24h_pct: float) -> str:
 
 _WEEKDAY_KO = ("월", "화", "수", "목", "금", "토", "일")
 
+ROOM_BRAND = "자돈남 방"
+ROOM_DISCLAIMER = "※ 매매 권유 아님. 뉴스·가격·수급만 공유하는 방입니다."
 
-def _fmt_usdt_turnover(v: Optional[float]) -> str:
+
+def room_line(subtitle: str, now: datetime) -> str:
+    wd = _WEEKDAY_KO[now.weekday()]
+    return f"{ROOM_BRAND} · {subtitle} · {now.month}/{now.day}({wd})"
+
+
+def fmt_oi_compact(tag: str, oi: Optional[float]) -> str:
+    if oi is None or oi <= 0:
+        return ""
+    if oi >= 1e9:
+        return f"{tag} {oi / 1e9:.1f}B"
+    if oi >= 1e6:
+        return f"{tag} {oi / 1e6:.1f}M"
+    if oi >= 1e3:
+        return f"{tag} {oi / 1e3:.0f}K"
+    return f"{tag} {oi:.0f}"
+
+
+def room_open_interest_line(oi_btc: Optional[float], oi_eth: Optional[float], oi_sol: Optional[float]) -> str:
+    bits = [fmt_oi_compact("BTC", oi_btc), fmt_oi_compact("ETH", oi_eth), fmt_oi_compact("SOL", oi_sol)]
+    bits = [b for b in bits if b]
+    if not bits:
+        return ""
+    return "선물 미결제(거래소 원시·참고): " + " · ".join(bits)
     if v is None or v <= 0:
         return "-"
     if v >= 1e9:
@@ -2016,68 +2041,83 @@ async def briefing_scheduler(bot: Bot, state: State) -> None:
                     fng = await get_fear_greed(session)
                     kimchi = await get_kimchi_premium(session)
                     weekend = is_weekend_mode(now)
-                    nq_fut = await get_yahoo_snapshot(session, "NQ%3DF") if not weekend else None
-                    wti = await get_yahoo_snapshot(session, "CL%3DF")
-                    sox = await get_yahoo_snapshot(session, "%5ESOX") if not weekend else None
-                    dxy = await get_yahoo_snapshot(session, "DX-Y.NYB")
+                    if not weekend:
+                        kospi, kosdaq, usd_krw, nq_fut, wti, sox, dxy = await asyncio.gather(
+                            get_yahoo_snapshot(session, "%5EKS11"),
+                            get_yahoo_snapshot(session, "%5EKQ11"),
+                            get_usd_krw(session),
+                            get_yahoo_snapshot(session, "NQ%3DF"),
+                            get_yahoo_snapshot(session, "CL%3DF"),
+                            get_yahoo_snapshot(session, "%5ESOX"),
+                            get_yahoo_snapshot(session, "DX-Y.NYB"),
+                        )
+                    else:
+                        kospi = kosdaq = nq_fut = sox = None
+                        usd_krw, wti, dxy = await asyncio.gather(
+                            get_usd_krw(session),
+                            get_yahoo_snapshot(session, "CL%3DF"),
+                            get_yahoo_snapshot(session, "DX-Y.NYB"),
+                        )
+
+                    oi_btc, oi_eth, oi_sol = await asyncio.gather(
+                        get_open_interest(session, "BTCUSDT"),
+                        get_open_interest(session, "ETHUSDT"),
+                        get_open_interest(session, "SOLUSDT"),
+                    )
 
                     btc_price, btc_pct, btc_vol = tickers["BTCUSDT"]
                     eth_price, eth_pct, eth_vol = tickers.get("ETHUSDT", (0.0, 0.0, 0.0))
                     sol_price, sol_pct, sol_vol = tickers.get("SOLUSDT", (0.0, 0.0, 0.0))
 
-                    wd = _WEEKDAY_KO[now.weekday()]
-                    head_emoji = "☀️" if hour == 12 else "🌙"
-                    head_word = "점심" if hour == 12 else "밤"
-                    msg = (
-                        f"{head_emoji} {head_word} 스냅 · {now.month}/{now.day}({wd}) 정각 1회\n"
-                        f"코인·김치·매크로 한눈에 정리\n"
-                        f"────────\n"
-                        f"🪙 가격\n"
-                        f"{btc_brief_line(btc_price, btc_pct)}\n"
-                        f"{move_icon(eth_pct)} ETH: {eth_price:,.0f} USDT ({fmt_pct(eth_pct)})\n"
-                        f"{move_icon(sol_pct)} SOL: {sol_price:,.0f} USDT ({fmt_pct(sol_pct)})"
-                    )
-
+                    slot_tag = "☀️ 점심 스냅" if hour == 12 else "🌙 밤 스냅"
+                    msg = room_line(slot_tag, now)
+                    msg += "\n\n① 숫자 (지금 팩트)"
+                    msg += f"\n{btc_brief_line(btc_price, btc_pct)}"
+                    msg += f"\n{move_icon(eth_pct)} ETH: {eth_price:,.0f} USDT ({fmt_pct(eth_pct)})"
+                    msg += f"\n{move_icon(sol_pct)} SOL: {sol_price:,.0f} USDT ({fmt_pct(sol_pct)})"
+                    if usd_krw:
+                        msg += f"\n달러/원: {usd_krw:,.2f}원"
+                    if not weekend:
+                        if kospi:
+                            msg += f"\n{session_snapshot_line('코스피 선물', kospi)}"
+                        if kosdaq:
+                            msg += f"\n{session_snapshot_line('코스닥 선물', kosdaq)}"
                     if nq_fut and not weekend:
-                        msg += f"\n\n📡 매크로\n{snapshot_line('나스닥 선물', nq_fut)}"
+                        msg += f"\n{session_snapshot_line('나스닥 선물', nq_fut)}"
                     if wti:
-                        msg += f"\n{snapshot_line('WTI 유가', wti)}"
+                        msg += f"\n{session_snapshot_line('WTI 유가', wti)}"
                     if sox and not weekend:
-                        msg += f"\n{snapshot_line('필라델피아 반도체', sox)}"
+                        msg += f"\n{session_snapshot_line('필라델피아 반도체', sox)}"
                     if dxy:
-                        msg += f"\n{snapshot_line('달러인덱스', dxy)}"
+                        msg += f"\n{session_snapshot_line('달러인덱스', dxy)}"
 
+                    msg += "\n\n② 심리·선물"
                     if fng:
                         fng_value, fng_label = fng
-                        msg += f"\n\n😶‍🌫️ 공포탐욕 {fng_value} ({fng_label})"
+                        msg += f"\n공포탐욕 {fng_value} ({fng_label})"
                     if kimchi:
                         premium, _, _ = kimchi
-                        msg += f"\n🇰🇷 김치 {fmt_pct(premium)}"
+                        msg += f"\n김치프리미엄 {fmt_pct(premium)}"
+                    msg += f"\n24h 거래대금 BTC {_fmt_usdt_turnover(btc_vol)} · ETH {_fmt_usdt_turnover(eth_vol)} · SOL {_fmt_usdt_turnover(sol_vol)}"
+                    msg += f"\n펀딩 BTC {_fmt_funding_pct(f_btc)} · ETH {_fmt_funding_pct(f_eth)} · SOL {_fmt_funding_pct(f_sol)}"
+                    oi_ln = room_open_interest_line(oi_btc, oi_eth, oi_sol)
+                    if oi_ln:
+                        msg += f"\n{oi_ln}"
 
-                    msg += (
-                        f"\n\n💬 한 줄\n{briefing_hook_line(btc_pct, eth_pct, sol_pct)}\n"
-                        f"{briefing_volatility_nudge(btc_pct, eth_pct, sol_pct)}"
-                    )
-
-                    msg += (
-                        f"\n\n📊 24h 거래대금(USDT·대략)\n"
-                        f"BTC {_fmt_usdt_turnover(btc_vol)} · ETH {_fmt_usdt_turnover(eth_vol)} · SOL {_fmt_usdt_turnover(sol_vol)}"
-                    )
-                    msg += (
-                        f"\n\n⚡ 펀딩(연속·%)\n"
-                        f"BTC {_fmt_funding_pct(f_btc)} · ETH {_fmt_funding_pct(f_eth)} · SOL {_fmt_funding_pct(f_sol)}"
-                    )
-
-                    msg += (
-                        "\n\n👀 오늘 유심히\n"
-                        "• BTC — ETF·거시 나오면 선물 거래대금부터\n"
-                        "• ETH — BTC랑 따로 놀면 레버 과열 의심\n"
-                        "• SOL — 알트 바로미터. 펀딩 튀면 단타는 타이트하게"
-                    )
+                    msg += "\n\n③ 오늘 포지션에서 볼 것"
+                    msg += f"\n· {briefing_hook_line(btc_pct, eth_pct, sol_pct)}"
+                    msg += f"\n· {briefing_volatility_nudge(btc_pct, eth_pct, sol_pct)}"
                     if weekend:
-                        msg += "\n• 주말 — 유가·달러·김치만 짧게"
+                        msg += "\n· 주말: 유가·달러·김치만 짧게"
+                    elif not weekend and not is_korean_market_weekday(now):
+                        msg += "\n· 휴장일: 국장 수급 대신 코인·ETF·매크로"
                     else:
-                        msg += "\n• 한국장 열리면 — 외인·반도체 수급이랑 환율"
+                        msg += "\n· 한국장: 외인·반도체·환율 → 코인은 BTC가 방향"
+
+                    mood = market_direction_label(btc_pct, eth_pct, sol_pct)
+                    msg += f"\n\n④ 코인 톤\n{mood}"
+
+                    msg += f"\n\n{ROOM_DISCLAIMER}"
 
                     try:
                         await send_message(
@@ -2355,22 +2395,27 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         eth = await coin_snapshot(session, "ETHUSDT")
                         sol = await coin_snapshot(session, "SOLUSDT")
 
-                        if weekend:
-                            msg = session_section("🌅 주말 · 코인 중심 체크")
-                        elif kr_closed:
-                            msg = session_section("🌅 휴장일 · 코인·매크로 체크")
-                        else:
-                            msg = session_section("🌅 한국장 전 · 코인·증시 브리핑")
+                        oi_btc, oi_eth, oi_sol = await asyncio.gather(
+                            get_open_interest(session, "BTCUSDT"),
+                            get_open_interest(session, "ETHUSDT"),
+                            get_open_interest(session, "SOLUSDT"),
+                        )
 
+                        sub = "주말 오전" if weekend else ("휴장일 오전" if kr_closed else "한국장 직전")
+                        msg = room_line(f"🌅 {sub}", now)
+                        msg += "\n\n① 숫자"
                         if usd_krw:
-                            msg += f"\n💵 달러/원: {usd_krw:,.2f}원"
+                            msg += f"\n달러/원: {usd_krw:,.2f}원"
                         msg += f"\n{btc_text}"
                         if eth:
                             msg += f"\n{move_icon(eth[1])} ETH: {eth[0]:,.0f} USDT ({fmt_pct(eth[1])})"
                         if sol:
                             msg += f"\n{move_icon(sol[1])} SOL: {sol[0]:,.0f} USDT ({fmt_pct(sol[1])})"
-
-                        msg += "\n"
+                        if not weekend and not kr_closed:
+                            if kospi:
+                                msg += f"\n{session_snapshot_line('코스피 선물', kospi)}"
+                            if kosdaq:
+                                msg += f"\n{session_snapshot_line('코스닥 선물', kosdaq)}"
                         if weekend:
                             if wti:
                                 msg += f"\n{session_snapshot_line('WTI 유가', wti)}"
@@ -2397,25 +2442,28 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
 
                         fng = await get_fear_greed(session)
                         kimchi = await get_kimchi_premium(session)
+                        msg += "\n\n② 심리·선물"
                         if fng:
                             fng_value, fng_label = fng
-                            msg += f"\n\n😶‍🌫️ 공포탐욕지수: {fng_value} ({fng_label})"
+                            msg += f"\n공포탐욕 {fng_value} ({fng_label})"
                         if kimchi:
                             premium, _, _ = kimchi
-                            msg += f"\n🇰🇷 김치프리미엄: {fmt_pct(premium)}"
+                            msg += f"\n김치 {fmt_pct(premium)}"
+                        oi_ln = room_open_interest_line(oi_btc, oi_eth, oi_sol)
+                        if oi_ln:
+                            msg += f"\n{oi_ln}"
 
+                        msg += "\n\n③ 오늘 포지션에서"
                         if weekend:
-                            msg += "\n\nBTC/ETH/SOL 중심으로 코인·유가·달러만 체크."
+                            msg += "\n· 코인·유가·달러만 짧게"
                         elif kr_closed:
-                            msg += "\n\n오늘은 한국장 휴장일이라"
-                            msg += "\n정규장 수급 대신 코인·ETF·유가·달러 흐름만 체크."
+                            msg += "\n· 국장 휴장 → 코인·ETF·매크로"
                         else:
-                            msg += f"\n\n📌 오늘 핵심:\n{final_kr_open_focus(safe_pct_from_snapshot(nq_fut), safe_pct_from_snapshot(sox), usd_krw or 0, safe_pct_from_snapshot(wti))}"
-                        msg += f"\n\n🧭 시장 분위기: {session_mood(safe_pct_from_snapshot(sp_fut), safe_pct_from_snapshot(nq_fut), safe_pct_from_snapshot(sox), -safe_pct_from_snapshot(dxy), -safe_pct_from_snapshot(tnx))}"
-                        if not (weekend or kr_closed):
-                            msg += "\n⚠️ 코인 변동성·증시 동조 둘 다 보고, 추격은 거래량 확인 후."
-                        else:
-                            msg += "\n\n체크할 것:\n- BTC·ETH·SOL 레벨\n- ETF·청산 이슈\n- 유가·달러"
+                            msg += f"\n· {final_kr_open_focus(safe_pct_from_snapshot(nq_fut), safe_pct_from_snapshot(sox), usd_krw or 0, safe_pct_from_snapshot(wti))}"
+                            msg += "\n· 삼전·하닉 호가·외인 순매수부터"
+
+                        msg += f"\n\n④ 방 느낌\n{session_mood(safe_pct_from_snapshot(sp_fut), safe_pct_from_snapshot(nq_fut), safe_pct_from_snapshot(sox), -safe_pct_from_snapshot(dxy), -safe_pct_from_snapshot(tnx))}"
+                        msg += f"\n\n{ROOM_DISCLAIMER}"
                         await safe_send(bot, compact_message(msg, LIVE_MESSAGE_SOFT_LIMIT), disable_preview=True)
                         state.market_session_sent_dates[key] = now.date()
                         state.briefing_sent_dates["08"] = now.date()
@@ -2443,7 +2491,8 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         eth = await coin_snapshot(session, "ETHUSDT")
                         sol = await coin_snapshot(session, "SOLUSDT")
 
-                        msg = session_section("🌆 미국장 전 · 코인 연동 체크")
+                        msg = room_line("🌆 미국장 직전", now)
+                        msg += "\n\n① 선물·금리"
                         if sp_fut:
                             msg += f"\n{session_snapshot_line('S&P500 선물', sp_fut)}"
                         if nq_fut:
@@ -2456,22 +2505,22 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                             msg += f"\n{session_snapshot_line('달러인덱스', dxy)}"
                         if tnx:
                             msg += f"\n{session_snapshot_line('미10년물 금리', tnx)}"
+                        msg += "\n\n② 코인"
                         msg += f"\n{btc_text}"
                         if eth:
                             msg += f"\n{move_icon(eth[1])} ETH: {eth[0]:,.0f} USDT ({fmt_pct(eth[1])})"
                         if sol:
                             msg += f"\n{move_icon(sol[1])} SOL: {sol[0]:,.0f} USDT ({fmt_pct(sol[1])})"
 
+                        msg += "\n\n③ 오늘 포지션에서"
                         if us_holiday:
-                            msg += "\n\n오늘은 미국장 휴장이라 정규장 데이터는 제한적."
-                            msg += "\n대신 BTC·달러·유가 흐름 위주로 보면 됨."
+                            msg += "\n· 미국 휴장 → BTC·달러·유가만"
                         else:
-                            msg += f"\n\n📌 오늘 핵심:\n{final_us_pre_focus(safe_pct_from_snapshot(sp_fut), safe_pct_from_snapshot(nq_fut), safe_pct_from_snapshot(dxy), safe_pct_from_snapshot(tnx), safe_pct_from_snapshot(wti))}"
-                        msg += f"\n\n🧭 미국장 분위기: {session_mood(safe_pct_from_snapshot(sp_fut), safe_pct_from_snapshot(nq_fut), safe_pct_from_snapshot(sox), -safe_pct_from_snapshot(dxy), -safe_pct_from_snapshot(tnx))}"
-                        if us_holiday or weekend:
-                            msg += "\n\n체크할 것:\n- BTC·ETH·SOL·ETF 흐름\n- 달러·유가\n- 다음 미국장 전 선물 반응"
-                        else:
-                            msg += "\n\n체크할 것:\n- BTC·알트 수급과 나스닥·반도체 방향\n- 달러·금리 동반 움직임\n- S&P500 초반 체온"
+                            msg += f"\n· {final_us_pre_focus(safe_pct_from_snapshot(sp_fut), safe_pct_from_snapshot(nq_fut), safe_pct_from_snapshot(dxy), safe_pct_from_snapshot(tnx), safe_pct_from_snapshot(wti))}"
+                            msg += "\n· 나스닥 프리 첫 30분 체결·변동성만"
+
+                        msg += f"\n\n④ 방 느낌\n{session_mood(safe_pct_from_snapshot(sp_fut), safe_pct_from_snapshot(nq_fut), safe_pct_from_snapshot(sox), -safe_pct_from_snapshot(dxy), -safe_pct_from_snapshot(tnx))}"
+                        msg += f"\n\n{ROOM_DISCLAIMER}"
                         await safe_send(bot, compact_message(msg, LIVE_MESSAGE_SOFT_LIMIT), disable_preview=True)
                         state.market_session_sent_dates[key] = now.date()
                         log_slot(key, now, False, kr_closed, us_holiday, weekend, "sent")
@@ -2499,14 +2548,15 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         eth = await coin_snapshot(session, "ETHUSDT")
                         sol = await coin_snapshot(session, "SOLUSDT")
 
-                        msg = session_section("🌙 미국장 마감 · 코인·증시 정리")
+                        msg = room_line("🌙 미국장 마감", now)
+                        msg += "\n\n① 코인"
                         msg += f"\n{btc_text}"
                         if eth:
                             msg += f"\n{move_icon(eth[1])} ETH: {eth[0]:,.0f} USDT ({fmt_pct(eth[1])})"
                         if sol:
                             msg += f"\n{move_icon(sol[1])} SOL: {sol[0]:,.0f} USDT ({fmt_pct(sol[1])})"
 
-                        msg += "\n"
+                        msg += "\n\n② 미국 지수 마감"
                         if spx:
                             msg += f"\n{session_snapshot_line('S&P500', spx)}"
                         if ixic:
@@ -2522,16 +2572,18 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         if tnx:
                             msg += f"\n{session_snapshot_line('미10년물 금리', tnx)}"
 
+                        msg += "\n\n③ 내일 한국장·코인"
                         if us_holiday:
-                            msg += "\n\n오늘은 미국장 휴장이라 정규장 데이터는 제한적."
-                            msg += "\n대신 BTC, 달러, 유가 흐름 위주로 확인."
+                            msg += "\n· 미국 휴장 데이터 제한 → BTC·달러"
                         else:
-                            msg += f"\n\n📌 오늘 핵심:\n{final_us_close_focus(safe_pct_from_snapshot(spx), safe_pct_from_snapshot(ixic), safe_pct_from_snapshot(dji), safe_pct_from_snapshot(sox), safe_pct_from_snapshot(dxy), safe_pct_from_snapshot(tnx), safe_pct_from_snapshot(wti))}"
-                        msg += f"\n\n🧭 미국장 분위기: {session_mood(safe_pct_from_snapshot(spx), safe_pct_from_snapshot(ixic), safe_pct_from_snapshot(dji), safe_pct_from_snapshot(sox), -safe_pct_from_snapshot(dxy), -safe_pct_from_snapshot(tnx))}"
+                            msg += f"\n· {final_us_close_focus(safe_pct_from_snapshot(spx), safe_pct_from_snapshot(ixic), safe_pct_from_snapshot(dji), safe_pct_from_snapshot(sox), safe_pct_from_snapshot(dxy), safe_pct_from_snapshot(tnx), safe_pct_from_snapshot(wti))}"
                         if weekend or kr_closed:
-                            msg += "\n\n체크할 것:\n- BTC 80K 유지 여부\n- 알트 수급 이어지는지\n- 유가·달러 흐름"
+                            msg += "\n· 월요일까지: BTC 레벨·알트 펀딩"
                         else:
-                            msg += "\n\n체크할 것:\n- BTC·ETH 수급과 알트 확산\n- 한국장 반도체·외국인\n- 환율·나스닥 잔상"
+                            msg += "\n· 내일 아침: 반도체·외인·환율 → 코인 동조"
+
+                        msg += f"\n\n④ 방 느낌\n{session_mood(safe_pct_from_snapshot(spx), safe_pct_from_snapshot(ixic), safe_pct_from_snapshot(dji), safe_pct_from_snapshot(sox), -safe_pct_from_snapshot(dxy), -safe_pct_from_snapshot(tnx))}"
+                        msg += f"\n\n{ROOM_DISCLAIMER}"
                         await safe_send(bot, compact_message(msg, LIVE_MESSAGE_SOFT_LIMIT), disable_preview=True)
                         state.market_session_sent_dates[key] = now.date()
                         log_slot(key, now, False, kr_closed, us_holiday, weekend, "sent")
@@ -5143,6 +5195,28 @@ def live_news_hub_watch_line(event_type: str, category: str, title: str, summary
     return "지수·환율·외인 방향만 짧게 맞춰 보면 됨."
 
 
+def live_news_action_bullets(event_type: str, category: str, title: str, summary: str) -> list[str]:
+    t = f"{title} {summary}".lower()
+    out: list[str] = []
+    if category == "코인":
+        out.append("차트: 뉴스 난 시점 전후로 거래대금·캔들 꼬리만 보면 됨.")
+        if "etf" in t or "sec" in t or "승인" in t or "거절" in t:
+            out.append("ETF·규제: 전일 ETF 순유입·BTC 종가 괴리(기사와 숫자가 따로 노는지).")
+        elif event_type == "security" or any(k in t for k in ("hack", "exploit", "해킹", "출금", "동결")):
+            out.append("거래소: 공지·출금 지연·USDT 페그만 확인.")
+        elif "discord" in t or "디스코드" in t or "ban" in t:
+            out.append("커뮤 규칙은 단기 심리용. 펀딩·선물 체결 스큐가 따라오는지.")
+        else:
+            out.append("선물: BTC 펀딩이 한쪽으로 몰리면 과열·청산 구간일 때가 많음.")
+    else:
+        out.append("지수·ETF면 당일 외인·기관 순매수, 환율.")
+        if event_type in ("rates", "oil", "fx"):
+            out.append("코인까지 연동되면 달러·금리 축부터.")
+        else:
+            out.append("코인 포지션 있으면 BTC 방향이 알트 베타보다 먼저.")
+    return out[:3]
+
+
 async def build_live_news_message(
     session: aiohttp.ClientSession,
     category_emoji: str,
@@ -5220,12 +5294,21 @@ async def build_live_news_message(
 
     bullets = live_news_hub_bullets(event_line, fact_lines, title_ko, prefix=prefix_lines or None, max_total=4)
     hook = live_news_hub_watch_line(event_type, category, title_clean, summary)
+    actions = live_news_action_bullets(event_type, category, title_clean, summary)
 
     headline = html_clean(title_ko, 240).strip()
-    parts: list[str] = [f"{category_emoji} {cat_line}", "", f"📌 {headline}", ""]
+    now = now_kst()
+    parts: list[str] = [
+        room_line(f"{category_emoji} {cat_line}", now),
+        f"〔{importance}/10〕",
+        "",
+        "① 무슨 일",
+    ]
     for b in bullets:
         parts.append(f"· {b}")
-    parts += ["", f"💡 {hook}"]
+    parts += ["", "② 내 계좌 기준으로는", f"· {hook}", "", "③ 지금 체크"]
+    for a in actions:
+        parts.append(f"· {a}")
     link_s = (link or "").strip()
     if link_s.startswith("http"):
         parts += ["", f"🔗 {link_s}"]
@@ -5240,11 +5323,11 @@ async def build_live_news_message(
             if btc:
                 btc_price = float(btc["lastPrice"])
                 btc_pct = float(btc["priceChangePercent"])
-                parts.append(f"BTC {btc_price:,.0f} ({fmt_pct(btc_pct)})")
+                parts.append(f"지금 BTC {btc_price:,.0f} ({fmt_pct(btc_pct)})")
         except Exception:
             pass
 
-    parts.append(f"〔{importance}/10〕")
+    parts += ["", ROOM_DISCLAIMER]
     msg = "\n".join(parts)
     return compact_message(msg, LIVE_MESSAGE_SOFT_LIMIT)
 
@@ -5649,11 +5732,9 @@ async def daily_digest_scheduler(bot: Bot, state: State) -> None:
             # 아침 7시는 overnight_recap_scheduler(7:10)와 겹치므로 제거. 저녁 한 번만.
             if now.hour == 18 and now.minute < 5 and state.digest_sent_dates.get(key_evening) != now.date():
                 msg = (
-                    f"📋 오늘 허브 체크리스트 · {now.month}/{now.day}\n"
-                    "① 코인: BTC·ETH 레벨 / ETF·청산 / 알트 펀딩\n"
-                    "② 미국: 나스닥·금리·반도체\n"
-                    "③ 한국: 반도체·외인·환율\n"
-                    "④ 매크로: 유가·달러"
+                    room_line("오늘 체크리스트", now)
+                    + "\n\n① 코인\n· BTC·ETH 레벨 / ETF·청산 / 알트 펀딩\n\n② 미국\n· 나스닥·금리·반도체\n\n③ 한국\n· 반도체·외인·환율\n\n④ 매크로\n· 유가·달러"
+                    + f"\n\n{ROOM_DISCLAIMER}"
                 )
                 try:
                     await send_message(bot, compact_message(msg, LIVE_MESSAGE_SOFT_LIMIT), disable_preview=True)
@@ -5843,7 +5924,7 @@ def resolve_telegram_token() -> Tuple[str, str]:
     return "", ""
 
 
-async def railway_port_health_server() -> None:
+async def railway_port_health_server(workers: list[str]) -> None:
     port_s = os.getenv("PORT")
     if not port_s:
         return
@@ -5852,13 +5933,30 @@ async def railway_port_health_server() -> None:
     async def ping(_request: web.Request) -> web.Response:
         return web.Response(text="telegram-bot worker ok")
 
+    async def health(_request: web.Request) -> web.Response:
+        commit = (
+            os.getenv("RAILWAY_GIT_COMMIT_SHA")
+            or os.getenv("SOURCE_COMMIT")
+            or os.getenv("HEROKU_SLUG_COMMIT")
+            or "unknown"
+        )
+        payload = {
+            "ok": True,
+            "service": "telegram-bot",
+            "commit": commit,
+            "channel": str(CHANNEL_ID),
+            "workers": list(workers),
+        }
+        return web.json_response(payload)
+
     app = web.Application()
     app.router.add_get("/", ping)
+    app.router.add_get("/health", health)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    logging.info("PORT=%s HTTP 헬스 응답 시작", port_s)
+    logging.info("PORT=%s HTTP / /health 시작", port_s)
     await asyncio.Future()
 
 
@@ -5997,27 +6095,29 @@ async def overnight_recap_scheduler(bot: Bot, state: State) -> None:
                         eth_pct = float(eth["priceChangePercent"]) if eth else 0.0
                         sol_price = float(sol["lastPrice"]) if sol else 0.0
                         sol_pct = float(sol["priceChangePercent"]) if sol else 0.0
-                        msg = f"🌙 밤사이 한 줄 · {now.month}/{now.day}\n"
+                        msg = room_line("새벽 한 줄", now)
+                        msg += "\n\n① 밤사이 숫자"
                         if btc:
-                            msg += f"BTC {btc_price:,.0f} ({fmt_pct(btc_pct)})"
+                            msg += f"\nBTC {btc_price:,.0f} ({fmt_pct(btc_pct)})"
                         if eth:
                             msg += f" · ETH {fmt_pct(eth_pct)}"
                         if sol:
                             msg += f" · SOL {fmt_pct(sol_pct)}"
-                        msg += "\n"
+                        msg += "\n② 매크로"
                         if nq:
-                            msg += f"NQ {fmt_pct(safe_pct_from_snapshot(nq))}"
+                            msg += f"\nNQ {fmt_pct(safe_pct_from_snapshot(nq))}"
                         if sox:
                             msg += f" · SOX {fmt_pct(safe_pct_from_snapshot(sox))}"
                         if wti:
                             msg += f" · 유가 {fmt_pct(safe_pct_from_snapshot(wti))}"
                         if dxy:
                             msg += f" · DXY {fmt_pct(safe_pct_from_snapshot(dxy))}"
-                        msg += f"\n\n💬 {final_market_recap_focus(btc_pct, eth_pct, sol_pct, safe_pct_from_snapshot(nq), safe_pct_from_snapshot(sox), safe_pct_from_snapshot(wti), safe_pct_from_snapshot(dxy))}"
+                        msg += f"\n\n③ 오늘 포지션에서\n· {final_market_recap_focus(btc_pct, eth_pct, sol_pct, safe_pct_from_snapshot(nq), safe_pct_from_snapshot(sox), safe_pct_from_snapshot(wti), safe_pct_from_snapshot(dxy))}"
                         if weekend_mode or holiday_mode:
-                            msg += "\n\n👀 오늘: BTC·알트 / 유가·달러 / 뉴스 플로우"
+                            msg += "\n· 주말/휴장: 코인·유가·달러 위주"
                         else:
-                            msg += "\n\n👀 오늘: BTC·ETH·SOL / 나스닥·반도체 / 환율·외인"
+                            msg += "\n· 한국장: 외인·반도체·환율 → BTC 레벨"
+                        msg += f"\n\n{ROOM_DISCLAIMER}"
                         try:
                             await send_message(bot, compact_message(msg, LIVE_MESSAGE_SOFT_LIMIT), disable_preview=True)
                             state.overnight_recap_sent_dates[key] = now.date()
@@ -6128,7 +6228,7 @@ async def run_forever() -> None:
         enabled_workers.append("bot_state_persist_loop")
 
     if os.getenv("PORT"):
-        tasks.append(asyncio.create_task(railway_port_health_server()))
+        tasks.append(asyncio.create_task(railway_port_health_server(enabled_workers)))
         enabled_workers.append("railway_port_health_server")
 
     logging.info("워커 루프 시작 CHANNEL=%s", CHANNEL_ID)
