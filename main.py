@@ -1745,15 +1745,16 @@ SEC_NEWS_CHECK = "③ 체크 · 차트·수급·거시"
 SEC_NUM_BLOCK = "· ━ 인용 수치"
 
 
-def desk_voice_line(now: datetime) -> str:
-    """짧은 데스크 한 줄(로테이션 · 사람이 붙인 메모처럼 보이게)."""
+def desk_voice_line(now: datetime, title_seed: str = "") -> str:
+    """짧은 데스크 한 줄(로테이션 · 기사마다 문구가 바뀌게)."""
     lines = (
         "· 이슈만 짧게 정리했습니다.",
         "· 출처·링크 기준으로 팩트 위주로만 남겼습니다.",
         "· 숫자·맥락만 올립니다. 매매 권유는 없습니다.",
         "· 데스크에서 흐름만 점검한 카드입니다.",
     )
-    return lines[(now.hour + now.day) % len(lines)]
+    h = hashlib.md5(f"{now.day}:{now.hour}:{title_seed}".encode("utf-8")).hexdigest()
+    return lines[int(h, 16) % len(lines)]
 
 
 def room_line(subtitle: str, now: datetime) -> str:
@@ -2455,7 +2456,7 @@ async def kimchi_monitor(bot: Bot, state: State) -> None:
 LIVE_NEWS_DAILY_LIMIT = env_int("LIVE_NEWS_DAILY_LIMIT", 56, min_value=12, max_value=500)
 LIVE_COIN_DAILY_LIMIT = env_int("LIVE_COIN_DAILY_LIMIT", 40, min_value=3, max_value=200)
 LIVE_SOL_ETF_DAILY_LIMIT = env_int("LIVE_SOL_ETF_DAILY_LIMIT", 4, min_value=1, max_value=12)
-LIVE_NEWS_MAX_PER_SCAN = env_int("LIVE_NEWS_MAX_PER_SCAN", 6, min_value=1, max_value=30)
+LIVE_NEWS_MAX_PER_SCAN = env_int("LIVE_NEWS_MAX_PER_SCAN", 1, min_value=1, max_value=30)
 LIVE_NEWS_MIN_INTERVAL = timedelta(minutes=env_int("LIVE_NEWS_MIN_INTERVAL_MINUTES", 3, min_value=1, max_value=120))
 LIVE_NIGHT_NEWS_MIN_INTERVAL = timedelta(minutes=env_int("LIVE_NEWS_NIGHT_INTERVAL_MINUTES", 18, min_value=5, max_value=90))
 LIVE_NEWS_POLL_SECONDS = env_int("LIVE_NEWS_POLL_SECONDS", 120, min_value=30, max_value=900)
@@ -2548,6 +2549,11 @@ COIN_REQUIRED_KEYWORDS = (
     "etf", "sec", "승인", "유입", "청산", "스테이블코인",
     "btc", "bitcoin", "eth", "ethereum", "sol", "solana",
     "coinbase", "jpmorgan", "jp morgan", "blackrock",
+    "암호화폐", "가상자산", "비트코인", "이더리움", "솔라나",
+    "whale", "고래", "온체인", "on-chain", "onchain",
+    "xrp", "ripple", "defi", "nft", "binance", "bybit", "okx",
+    "staking", "airdrop", "memecoin", "밈코인", "tvl", "liquidation",
+    "업비트", "빗썸", "inflow", "outflow",
 )
 
 
@@ -2842,7 +2848,10 @@ _LIVE_COIN_GOOGLE_Q = (
     "Bitcoin OR BTC OR Ethereum OR ETH OR Solana OR SOL OR XRP OR Ripple OR crypto OR stablecoin OR "
     "ETF OR SEC OR regulation OR liquidation OR DeFi OR Binance OR Bybit OR OKX OR "
     "BlackRock OR Grayscale OR MicroStrategy OR MSTR OR funding OR whale OR options OR "
-    "tokenization OR Coinbase OR on-chain OR inflow OR outflow OR staking OR hack OR exploit"
+    "tokenization OR Coinbase OR on-chain OR inflow OR outflow OR staking OR hack OR exploit OR "
+    "Avalanche OR AVAX OR Polygon OR MATIC OR Chainlink OR LINK OR Dogecoin OR DOGE OR "
+    "memecoin OR airdrop OR TVL OR Arbitrum OR Optimism OR rollup OR L2 OR "
+    "가상자산 OR 업비트 OR 온체인 OR 고래 OR 거래대금 OR 밈코인"
 )
 _LIVE_COIN_GOOGLE_RSS = (
     "https://news.google.com/rss/search?q=" + quote("(" + _LIVE_COIN_GOOGLE_Q + ")") + "&hl=ko&gl=KR&ceid=KR:ko"
@@ -2955,29 +2964,214 @@ def is_live_ai_without_market_anchor(title: str, summary: str) -> bool:
     return not has_live_ai_market_anchor(f"{title} {summary}")
 
 
+def _blob_has_crypto_market_signal(blob: str, blob_l: str) -> bool:
+    """코인 시장으로 읽을 근거(솔루션·meth 등 오탐 방지)."""
+    if any(
+        k in blob_l
+        for k in (
+            "bitcoin",
+            "btc",
+            "ethereum",
+            "solana",
+            "xrp",
+            "defi",
+            "stablecoin",
+            "비트코인",
+            "이더리움",
+            "암호화폐",
+            "솔라나",
+            "스테이블",
+            "펀딩",
+            "레버리지",
+            "liquidation",
+            "청산",
+            "현물 etf",
+            "spot etf",
+            "coinbase",
+            "binance",
+            "bybit",
+            "okx",
+            "whale",
+            "staking",
+            "airdrop",
+            "memecoin",
+            "arbitrum",
+            "optimism",
+            "avalanche",
+            "polygon",
+            "chainlink",
+            "dogecoin",
+            "rollup",
+        )
+    ):
+        return True
+    if any(k in blob for k in ("가상자산", "업비트", "빗썸", "온체인", "고래", "밈코인", "에어드랍")):
+        return True
+    if re.search(r"\bcrypto(currency|currencies|assets?|market)\b", blob_l):
+        return True
+    if re.search(r"\bbtc\b", blob_l) or re.search(r"\beth\b", blob_l) or re.search(r"\bsolana\b", blob_l):
+        return True
+    if re.search(r"\bsol\b", blob_l) and "솔루션" not in blob and "solution" not in blob_l:
+        return True
+    if re.search(r"\bonchain\b", blob_l) or "on-chain" in blob_l:
+        return True
+    if re.search(r"\btvl\b", blob_l):
+        return True
+    if re.search(r"\bavax\b", blob_l) or re.search(r"\bmatic\b", blob_l) or re.search(r"\blink\b", blob_l):
+        return True
+    if re.search(r"\b(doge|dot|ada)\b", blob_l):
+        return True
+    if "layer 2" in blob_l or "layer2" in blob_l.replace(" ", "") or re.search(r"\bl2\b", blob_l):
+        return True
+    return False
+
+
+def _blob_is_mideast_military(blob: str, blob_l: str) -> bool:
+    keys = (
+        "이란",
+        "iran",
+        "사우디",
+        "saudi",
+        "uae",
+        "아랍에미리트",
+        "이라크",
+        "iraq",
+        "이스라엘",
+        "israel",
+        "후티",
+        "houthi",
+        "가자",
+        "gaza",
+        "호르무즈",
+        "hormuz",
+        "미사일",
+        "missile",
+        "공습",
+        "중동",
+        "middle east",
+        "걸프",
+        "gulf",
+    )
+    return sum(1 for k in keys if k in blob or k in blob_l) >= 2
+
+
+def _blob_is_geopolitics_mideast(blob: str, blob_l: str) -> bool:
+    """군사 2키 외에, 협상·종전·긴장 완화 등 지정학 보도도 같은 데스크 맥락으로."""
+    if _blob_is_mideast_military(blob, blob_l):
+        return True
+    if "이란" in blob or re.search(r"\biran\b", blob_l):
+        dip = (
+            "협상",
+            "종전",
+            "트럼프",
+            "trump",
+            "biden",
+            "바이든",
+            "백악관",
+            "핵",
+            "nuclear",
+            "제재",
+            "sanction",
+            "미사일",
+            "missile",
+            "이스라엘",
+            "israel",
+            "호르무즈",
+            "hormuz",
+            "사우디",
+            "saudi",
+            "uae",
+            "쿠웨이트",
+            "kuwait",
+            "긴장",
+            "완화",
+            "휴전",
+            "ceasefire",
+        )
+        return any(k in blob or k in blob_l for k in dip)
+    if "이스라엘" in blob or re.search(r"\bisrael\b", blob_l):
+        return any(k in blob or k in blob_l for k in ("가자", "gaza", "이란", "iran", "미사일", "missile", "핵", "nuclear"))
+    return False
+
+
+def _blob_is_kr_corporate_earnings(blob: str, blob_l: str) -> bool:
+    if not any(k in blob for k in ("실적", "매출", "분기", "영업이익", "가이던스", "어닝")):
+        return False
+    return any(
+        k in blob
+        for k in (
+            "LG에너지",
+            "LG에너지솔루션",
+            "삼성전자",
+            "SK하이닉스",
+            "SK이노베이션",
+            "현대차",
+            "기아",
+            "POSCO",
+            "포스코",
+            "NAVER",
+            "네이버",
+            "카카오",
+            "셀트리온",
+            "SK바이오",
+        )
+    )
+
+
 def effective_live_news_category(category_emoji: str, category: str, title: str, summary: str, link: str) -> Tuple[str, str]:
     blob = f"{title} {summary}"
     blob_l = blob.lower()
     lk = (link or "").lower()
     if "coindesk.com" in lk or "cointelegraph.com" in lk:
         return "🟠", "코인"
-    coin_force = (
+
+    if _blob_is_geopolitics_mideast(blob, blob_l) and not _blob_has_crypto_market_signal(blob, blob_l):
+        return "🌍", "세계"
+    if _blob_is_kr_corporate_earnings(blob, blob_l) and not _blob_has_crypto_market_signal(blob, blob_l):
+        return "🇰🇷", "한국"
+
+    coin_tokens = (
         "coindesk",
         "cointelegraph",
-        "crypto",
         "bitcoin",
-        "btc",
         "ethereum",
-        "eth",
         "solana",
-        "sol",
-        "청산",
-        "거래소",
         "비트코인",
         "이더리움",
         "암호화폐",
+        "cryptocurrency",
+        "defi",
+        "stablecoin",
+        "스테이블",
+        "whale",
+        "가상자산",
+        "업비트",
+        "arbitrum",
+        "optimism",
+        "memecoin",
+        "airdrop",
+        "on-chain",
+        "onchain",
+        "staking",
     )
-    if any(k in blob_l for k in coin_force):
+    if any(k in blob_l for k in coin_tokens):
+        return "🟠", "코인"
+    if re.search(r"\bbtc\b", blob_l) or re.search(r"\beth\b", blob_l) or re.search(r"\bsolana\b", blob_l):
+        return "🟠", "코인"
+    if re.search(r"\bsol\b", blob_l) and "솔루션" not in blob and "solution" not in blob_l:
+        return "🟠", "코인"
+    if "청산" in blob and (
+        "liquidation" in blob_l
+        or "암호화폐" in blob
+        or "비트코인" in blob
+        or "bitcoin" in blob_l
+        or re.search(r"\bcrypto(currency|currencies|assets?)\b", blob_l)
+    ):
+        return "🟠", "코인"
+    if "거래소" in blob and any(
+        k in blob_l
+        for k in ("binance", "coinbase", "bybit", "okx", "암호화폐", "cryptocurrency", "비트코인", "bitcoin")
+    ):
         return "🟠", "코인"
     if "etf" in blob_l and is_crypto_etf_content(title, summary):
         return "🟠", "코인"
@@ -3859,10 +4053,12 @@ def event_line_from_news(title_ko: str, title: str, summary: str, category: str)
 
     base = html_clean(strip_news_source_tail(title_ko or title), 120).strip(" -–—:·.")
     if not base:
-        return "방금 기사 제목만 잡혔어요."
-    if base.endswith(("다", "됨", "함", ".", "음")):
-        return base
-    return f"{base} 뉴스가 나왔어요."
+        return "제목만 잡힌 이슈입니다."
+    if base.endswith(("다", "됨", "함", ".", "음", "요", "임", "음.", "다.", "요.")):
+        return base if base.endswith(".") else base + "."
+    tails = (" 쪽 보도.", " 기사 기준.", " 이슈 라인.", " 흐름.")
+    ix = int(hashlib.md5(base.encode("utf-8")).hexdigest(), 16) % len(tails)
+    return base + tails[ix]
 
 
 LIVE_NEWS_BANNED_PHRASES = (
@@ -4820,6 +5016,7 @@ def live_news_hub_bullets(
 
 def live_news_hub_watch_line(event_type: str, category: str, title: str, summary: str) -> str:
     t = f"{title} {summary}".lower()
+    raw = f"{title} {summary}"
     if "discord" in t or "디스코드" in t:
         return "커뮤니티 규정 이슈는 단기 심리·노이즈 비중이 큼. 체결·펀딩·선물 스큐로만 검증."
     if "blind" in t or "블라인드" in t or "서명" in t or "signature" in t:
@@ -4834,13 +5031,24 @@ def live_news_hub_watch_line(event_type: str, category: str, title: str, summary
         return "거래소·지갑: 공지·출금 큐·스테이블 페그 이탈만."
     if event_type == "liquidation":
         return "청산: 레버 감소·OI 변화·알트-BTC 베타 순."
+    if category == "미국" and event_type in ("semiconductor", "capex", "semiconductor_etf", "ai_etf"):
+        return "미국 반도체·AI칩: 실적·캐파 가이던스가 단기 주가보다 길게 붙는 경우가 많음."
+    if category == "미국" and event_type in ("rates", "oil", "fx"):
+        return "금리·유가·달러 라인. 나스닥·코인은 같은 날 베타만 짧게."
+    if category == "세계" and _blob_is_geopolitics_mideast(raw, t):
+        return "지정학·에너지: 유가·DXY·10Y·해운까지 같은 맥락으로만 점검."
+    if category == "한국" and _blob_is_kr_corporate_earnings(raw, t):
+        return "실적 라인: 가이던스·마진·환율이 헤드라인보다 먼저 움직이는 경우가 많음."
     if category == "코인":
-        return "코인 뉴스: 펀딩·OI·대형 체결이 가격보다 선행하는 경우가 많음."
+        return (
+            "코인 데스크: BTC·ETH 방향에 펀딩·OI를 얹고, 알트는 고래·온체인·거래대금·이슈(상장·해킹·규제)까지 같이 보는 경우가 많음."
+        )
     return "지수·환율·외국인 흐름을 한 줄로 압축."
 
 
 def live_news_action_bullets(event_type: str, category: str, title: str, summary: str) -> list[str]:
     t = f"{title} {summary}".lower()
+    raw = f"{title} {summary}"
     out: list[str] = []
     if category == "코인":
         out.append("차트: 이벤트 전후 15~60m 거래대금·윅·스프레드.")
@@ -4850,14 +5058,45 @@ def live_news_action_bullets(event_type: str, category: str, title: str, summary
             out.append("거래소: 공지·출금 지연·스테이블 페그.")
         elif "discord" in t or "디스코드" in t or "ban" in t:
             out.append("커뮤니티: 체결·펀딩·대형 호가 소멸만.")
+        elif any(k in t for k in ("whale", "on-chain", "onchain", "온체인")) or "고래" in raw:
+            out.append("온체인·고래: 대형 이동·거래소 입금이 단기 가격보다 앞설 때가 있음.")
+        elif any(k in t for k in ("airdrop", "meme", "tvl", "defi", "staking", "layer 2", "arbitrum", "optimism")) or any(
+            k in raw for k in ("에어드랍", "밈코인", "스테이킹", "레이어2")
+        ):
+            out.append("알트·이슈: 유동성·캐리·베이스(BTC) 방향을 같이 보는 게 안전한 경우가 많음.")
+        elif any(k in t for k in ("volume", "volumes", "turnover")) or "거래대금" in raw or "거래량" in raw:
+            out.append("수급: 거래대금·깊이가 뉴스 방향과 같은 쪽으로 붙는지.")
         else:
             out.append("선물: BTC 펀딩·OI 한쪽 쏠림 시 변동성 팽창.")
+    elif category == "세계":
+        out.append("매크로: 유가·DXY·미 10년물을 한 묶음으로.")
+        if _blob_is_geopolitics_mideast(raw, t):
+            out.append("지정학: 호르무즈·운임·VIX가 같은 날 교차하는지.")
+        else:
+            out.append("지수: S&P·나스닥 선물 방향.")
+    elif category == "한국":
+        out.append("증시: 코스피·환율·외국인 순매수.")
+        if _blob_is_kr_corporate_earnings(raw, t):
+            out.append("실적: 컨센서스 대비·가이던스·환율 민감도.")
+        else:
+            out.append("수급: 기관·연기금·반도체 흐름.")
+    elif category == "미국":
+        out.append("미국장: 나스닥 선물·SOX·실적 캘린더를 한 줄로.")
+        if event_type in ("rates", "oil", "fx"):
+            out.append("금리·유가·달러 이슈면 DXY·10Y·원유를 한 묶음으로.")
+        elif event_type in ("semiconductor", "capex", "semiconductor_etf", "ai_etf"):
+            out.append("반도체·AI칩: 밸류·캐파 가이던스·경쟁사 호가가 같은 날 겹치는지.")
+        else:
+            out.append("대형주: 서프라이즈보다 가이던스·밸류에이션이 더 길게 감.")
+    elif category == "이슈":
+        out.append("헤드라인: 숫자·인용·출처만 압축 확인.")
+        out.append("큰 그림은 환율·지수 선물 방향과 교차.")
     else:
         out.append("주식·ETF: 외국인·기관·환율.")
         if event_type in ("rates", "oil", "fx"):
             out.append("매크로 이벤트 시 코인은 NQ·DXY와 단기 베타.")
         else:
-            out.append("알트보다 BTC 방향을 베이스로.")
+            out.append("지수 방향과 환율·섹터 로테이션을 같이 보면 됨.")
     return out[:3]
 
 
@@ -5001,7 +5240,7 @@ async def build_live_news_message(
         "",
     ]
     if LIVE_NEWS_DESK_VOICE_LINE:
-        parts.append(desk_voice_line(now))
+        parts.append(desk_voice_line(now, title_clean or title))
         parts.append("")
     parts.append(SEC_NEWS_FACT)
     for b in bullets:
