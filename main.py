@@ -1745,6 +1745,17 @@ SEC_NEWS_CHECK = "③ 체크 · 차트·수급·거시"
 SEC_NUM_BLOCK = "· ━ 인용 수치"
 
 
+def desk_voice_line(now: datetime) -> str:
+    """짧은 데스크 한 줄(로테이션 · 사람이 붙인 메모처럼 보이게)."""
+    lines = (
+        "· 이슈만 짧게 정리했습니다.",
+        "· 출처·링크 기준으로 팩트 위주로만 남겼습니다.",
+        "· 숫자·맥락만 올립니다. 매매 권유는 없습니다.",
+        "· 데스크에서 흐름만 점검한 카드입니다.",
+    )
+    return lines[(now.hour + now.day) % len(lines)]
+
+
 def room_line(subtitle: str, now: datetime) -> str:
     wd = _WEEKDAY_KO[now.weekday()]
     clock = now.strftime("%H:%M")
@@ -2444,11 +2455,24 @@ async def kimchi_monitor(bot: Bot, state: State) -> None:
 LIVE_NEWS_DAILY_LIMIT = env_int("LIVE_NEWS_DAILY_LIMIT", 56, min_value=12, max_value=500)
 LIVE_COIN_DAILY_LIMIT = env_int("LIVE_COIN_DAILY_LIMIT", 40, min_value=3, max_value=200)
 LIVE_SOL_ETF_DAILY_LIMIT = env_int("LIVE_SOL_ETF_DAILY_LIMIT", 4, min_value=1, max_value=12)
-LIVE_NEWS_MAX_PER_SCAN = env_int("LIVE_NEWS_MAX_PER_SCAN", 3, min_value=1, max_value=30)
-LIVE_NEWS_MIN_INTERVAL = timedelta(minutes=env_int("LIVE_NEWS_MIN_INTERVAL_MINUTES", 5, min_value=1, max_value=120))
+LIVE_NEWS_MAX_PER_SCAN = env_int("LIVE_NEWS_MAX_PER_SCAN", 6, min_value=1, max_value=30)
+LIVE_NEWS_MIN_INTERVAL = timedelta(minutes=env_int("LIVE_NEWS_MIN_INTERVAL_MINUTES", 3, min_value=1, max_value=120))
 LIVE_NIGHT_NEWS_MIN_INTERVAL = timedelta(minutes=env_int("LIVE_NEWS_NIGHT_INTERVAL_MINUTES", 18, min_value=5, max_value=90))
-LIVE_NEWS_POLL_SECONDS = env_int("LIVE_NEWS_POLL_SECONDS", 180, min_value=30, max_value=900)
-LIVE_NEWS_FEED_HEAD = env_int("LIVE_NEWS_FEED_HEAD", 12, min_value=5, max_value=40)
+LIVE_NEWS_POLL_SECONDS = env_int("LIVE_NEWS_POLL_SECONDS", 120, min_value=30, max_value=900)
+LIVE_NEWS_FEED_HEAD = env_int("LIVE_NEWS_FEED_HEAD", 18, min_value=5, max_value=40)
+LIVE_NEWS_MIN_IMPORTANCE_SEND = env_int("LIVE_NEWS_MIN_IMPORTANCE_SEND", 7, min_value=5, max_value=10)
+LIVE_NEWS_DESK_VOICE_LINE = env_bool("LIVE_NEWS_DESK_VOICE_LINE", True)
+LIVE_NEWS_NIGHT_COIN_MIN = env_int("LIVE_NEWS_NIGHT_COIN_MIN", 12, min_value=8, max_value=24)
+LIVE_NEWS_NIGHT_OTHER_MIN = env_int("LIVE_NEWS_NIGHT_OTHER_MIN", 15, min_value=8, max_value=28)
+
+
+def live_news_send_grades() -> frozenset[str]:
+    raw = (os.getenv("LIVE_NEWS_SEND_GRADES") or "S,A,B").replace(" ", "").upper()
+    parts = [p for p in raw.split(",") if p in ("S", "A", "B", "C")]
+    return frozenset(parts) if parts else frozenset({"S", "A", "B"})
+
+
+LIVE_NEWS_SEND_GRADES_SET = live_news_send_grades()
 LIVE_NEWS_TAPE_MODE = env_bool("LIVE_NEWS_TAPE_MODE", False)
 LIVE_NEWS_TAPE_SKIP_TRANSLATE = env_bool("LIVE_NEWS_TAPE_SKIP_TRANSLATE", False)
 LIVE_NEWS_DEDUP_RETENTION_DAYS = env_int("LIVE_NEWS_DEDUP_RETENTION_DAYS", 14, min_value=1, max_value=90)
@@ -2483,6 +2507,7 @@ MARKET_IMPACT_TERMS = (
     "삼성전자", "하이닉스", "SK하이닉스", "코스피", "환율", "외국인",
 
     "ionq", "rigetti", "qbts", "quantum", "quantum computing", "양자", "양자컴퓨터", "아이온큐", "리게티",
+    "속보", "긴급", "브리핑", "대통령실", "국회", "국무회의",
     "palantir", "pltr", "팔란티어",
     "amd", "arm", "tsmc", "asml", "oracle", "orcl", "coreweave", "dell", "supermicro", "smci",
     "vertiv", "vst", "ge vernova", "nuclear", "uranium", "power grid", "electricity", "energy demand",
@@ -2496,7 +2521,7 @@ LIVE_HARD_BLOCK_TERMS = (
     "coinmarketcap",
     "price chart", "market cap", "가격, 차트", "시가총액",
     "swift student challenge", "google for korea", "구글 포 코리아",
-    "google news", "구글 뉴스", "via google news",
+    # 'google news' 문자열은 구글 RSS 제목에 자주 붙어 과차단되므로 제외(스팸은 low_quality 쪽에서 걸러짐).
     "맛집", "학생", "challenge", "행사", "성과급 논란",
     "webinar", "summit", "booth", "fan meeting", "박람회", "컨퍼런스", "세미나", "축제", "초청행사", "티켓 오픈",
     "migrant worker", "migrant workers", "shelter", "laboring", "human rights", "refugee",
@@ -2656,6 +2681,8 @@ def etf_asset_kind(title: str, summary: str) -> str:
 
 
 def live_news_category_label(category: str, title: str, summary: str) -> str:
+    if category == "이슈":
+        return "실시간 이슈"
     if etf_asset_kind(title, summary) == "semiconductor_etf" and category in ("한국", "미국", "세계"):
         return f"{category} · 반도체"
     return category
@@ -2831,11 +2858,14 @@ _LIVE_US_NEWS_RSS = (
     "https://news.google.com/rss/search?q=" + quote("(" + _LIVE_US_NEWS_QUERY_INNER + ")") + "&hl=ko&gl=KR&ceid=KR:ko"
 )
 
+_LIVE_GOOGLE_TOP_KR_RSS = "https://news.google.com/rss?hl=ko&gl=KR&ceid=KR:ko"
+
 _COINDESK_RSS = "https://www.coindesk.com/arc/outboundfeeds/rss/"
 _COINTELEGRAPH_RSS = "https://cointelegraph.com/rss"
 
 # 코인·미국(비트코인·ETF·연준) 우선, 한국 주식 속보는 뒤에서 필터링.
 LIVE_CATEGORY_FEEDS = (
+    ("🔥", "이슈", _LIVE_GOOGLE_TOP_KR_RSS),
     ("🟠", "코인", _LIVE_COIN_GOOGLE_RSS),
     ("🟠", "코인", _COINDESK_RSS),
     ("🟠", "코인", _COINTELEGRAPH_RSS),
@@ -3448,6 +3478,8 @@ def live_news_score(title: str, summary: str, category: str, link: str = "") -> 
         score -= 30
     if category == "한국" and any(k in text_low for k in ("btc", "bitcoin", "비트코인", "ethereum", "eth", "알트")):
         score -= 10
+    if category == "이슈":
+        score += 5
     now = now_kst()
     if is_weekend_mode(now) and category == "한국":
         score -= 8
@@ -4275,6 +4307,10 @@ def source_quality_rank(source: str, link: str) -> str:
         "edaily.co.kr",
         "investing.com",
         "finance.yahoo.com",
+        "news.naver.com",
+        "n.news.naver.com",
+        "news.daum.net",
+        "v.daum.net",
     )
     if host:
         for h in a_hosts:
@@ -4310,9 +4346,14 @@ def live_news_mega_catalyst_bypasses_c_source(title: str, summary: str, link: st
     return False
 
 
-def has_clear_source_name(source: str) -> bool:
+def has_clear_source_name(source: str, link: str = "") -> bool:
     src = (source or "").strip().lower()
-    return bool(src and src not in ("google news", "rss", "뉴스"))
+    lk = (link or "").strip()
+    if not src or src in ("rss", "뉴스"):
+        return lk.startswith("http")
+    if src == "google news":
+        return lk.startswith("http")
+    return bool(src)
 
 
 def is_coin_true_critical(title: str, summary: str) -> bool:
@@ -4387,7 +4428,7 @@ def is_live_news_allowed(title: str, summary: str, category: str, now: datetime,
             "bitcoin", "btc", "ethereum", "eth", "sol", "crypto", "etf", "stablecoin", "defi", "hack",
             "비트코인", "이더리움", "솔라나", "스테이블", "해킹",
         )
-        night_floor = 15 if category == "코인" else 18
+        night_floor = LIVE_NEWS_NIGHT_COIN_MIN if category == "코인" else LIVE_NEWS_NIGHT_OTHER_MIN
         return combined >= night_floor and any(k in text_low for k in night_terms)
     return True
 
@@ -4500,6 +4541,10 @@ def topic_key_for_news(title: str, summary: str, category: str) -> str:
         return "crypto_etf"
     if category == "코인":
         return coin_topic_key(title, summary)
+    if category == "이슈":
+        # 제목 지문별로 쿨다운을 쪼개서, 상위 RSS 한 줄이 전체 와이어를 막지 않게 함.
+        h = hashlib.sha256(normalize_title_for_dedup(strip_news_source_tail(title or "")).encode("utf-8")).hexdigest()[:12]
+        return f"issue:{h}"
     if any(k in txt for k in ("hormuz", "호르무즈", "유가", "wti", "brent", "전쟁", "미사일")):
         return "oil_hormuz"
     if any(k in txt for k in ("fomc", "cpi", "pce", "금리", "연준", "달러", "dxy")):
@@ -4928,7 +4973,7 @@ async def build_live_news_message(
     event_line = event_line_from_news(title_ko, title_clean, summary, category)
 
     rel = related_assets_for_coin_news(title_clean, summary) if category == "코인" else related_assets_for_news(title_clean, summary)
-    src_line = f"출처: {source}" if has_clear_source_name(source) else ""
+    src_line = f"출처: {source}" if has_clear_source_name(source, link) else ""
     cat_line = live_news_category_label(category, title_clean, summary)
 
     max_fl = 8 if explanatory else 5
@@ -4954,8 +4999,11 @@ async def build_live_news_message(
         room_line(f"{category_emoji} {cat_line}", now),
         f"〔{importance}/10〕",
         "",
-        SEC_NEWS_FACT,
     ]
+    if LIVE_NEWS_DESK_VOICE_LINE:
+        parts.append(desk_voice_line(now))
+        parts.append("")
+    parts.append(SEC_NEWS_FACT)
     for b in bullets:
         parts.append(f"· {b}")
     merge_ctx = list(bullets) + list(fact_lines)
@@ -5285,7 +5333,7 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                     if not raw_title.strip():
                         remember_live_news_hashes(state, raw_title, raw_link)
                         continue
-                    if not has_clear_source_name(source):
+                    if not has_clear_source_name(source, raw_link):
                         logging.info("live_news blocked reason=unclear_source title=%s", clean_text(raw_title, 90))
                         remember_live_news_hashes(state, raw_title, raw_link)
                         state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
@@ -5308,15 +5356,11 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                         recap_grade = grade if grade in ("A", "B") else "A"
                         state.live_recent_items.append((now, cand_emoji, html_clean(title_for_recap, 150), source, combined_score, recap_grade, topic_key))
 
-                    if grade == "B":
-                        remember_live_news_hashes(state, raw_title, raw_link)
-                        state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
-                        continue
                     if topic_on_cooldown:
                         remember_live_news_hashes(state, raw_title, raw_link)
                         state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
                         continue
-                    if importance < 8 or grade not in ("S", "A"):
+                    if importance < LIVE_NEWS_MIN_IMPORTANCE_SEND or grade not in LIVE_NEWS_SEND_GRADES_SET:
                         remember_live_news_hashes(state, raw_title, raw_link)
                         state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
                         continue
@@ -5329,7 +5373,7 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                         remember_live_news_hashes(state, raw_title, raw_link)
                         state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
                         continue
-                    if src_rank == "B" and importance < 9:
+                    if src_rank == "B" and importance < 8:
                         logging.info(
                             "live_news blocked reason=source_rank_b_importance title=%s importance=%s source=%s",
                             clean_text(raw_title, 90),
