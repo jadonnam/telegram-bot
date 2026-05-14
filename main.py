@@ -1085,17 +1085,19 @@ async def get_coingecko_market_ticker(session: aiohttp.ClientSession, symbol: st
 
     url = (
         "https://api.coingecko.com/api/v3/simple/price"
-        f"?ids={coin_id}&vs_currencies=usd&include_24hr_change=true"
+        f"?ids={coin_id}&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true"
     )
     data = await fetch_json(session, url)
     try:
         item = data.get(coin_id) or {}
         last = float(item.get("usd"))
         pct = float(item.get("usd_24h_change") or 0.0)
+        vol = float(item.get("usd_24h_vol") or 0.0)
         return {
             "symbol": symbol,
             "lastPrice": str(last),
             "priceChangePercent": str(pct),
+            "volume24h": vol,
             "source": "CoinGecko",
         }
     except Exception:
@@ -2197,7 +2199,7 @@ def session_data_note(lines: list[str], required_min: int = 2) -> str:
 # ============================================================
 
 def session_section(title: str) -> str:
-    return "━━━━━━━━━━━━━━\n" + title + "\n━━━━━━━━━━━━━━"
+    return f"▸ {title}"
 
 
 def safe_pct_from_snapshot(snap) -> float:
@@ -2277,20 +2279,20 @@ def final_us_close_focus(sp_pct: float, nq_pct: float, dji_pct: float, sox_pct: 
 
 def final_market_recap_focus(btc_pct: float, eth_pct: float, sol_pct: float, nq_pct: float, sox_pct: float, wti_pct: float, dxy_pct: float) -> str:
     if btc_pct <= -2.0:
-        return "BTC가 크게 눌린 구간. 1차 지지선 회복 여부와 알트 수급이 핵심."
+        return "BTC 많이 깎였음. 지금은 반등보다 지지 붙는지."
     if btc_pct >= 2.0:
-        return "BTC에 매수세가 붙은 구간. 거래량 유지되면 위험자산 분위기도 살아날 수 있음."
+        return "BTC 꽤 올랐음. 거래량이 같이 가는지만 보면 됨."
     if nq_pct >= 0.5 or sox_pct >= 1.0:
-        return "미국 기술주·반도체 쪽 수급이 살아있는 흐름. 한국장은 반도체 반응 체크."
+        return "미국 테크·반도체 쪽 숨 돌아온 느낌. 한국장은 반도체부터."
     if wti_pct >= 1.0:
-        return "유가가 움직인 구간. 물가·달러·위험자산 반응을 같이 봐야함."
+        return "유가 튐. 달러·금리랑 같이 읽는 게 빠름."
     if dxy_pct >= 0.3:
-        return "달러가 강한 구간. 위험자산은 추격보다 수급 확인이 먼저."
-    return "큰 방향보다 수급 확인 구간. 지수보다 강한 섹터만 살아남는 흐름."
+        return "달러 셈. 위험자산은 무리한 추격 말고."
+    return "큰 방향보다 수급. 섹터 따라가기 장이면 강한 데만."
 
 
 async def market_session_scheduler(bot: Bot, state: State) -> None:
-    def in_time_window(now: datetime, hour: int, minute: int, width_min: int = 15) -> bool:
+    def in_time_window(now: datetime, hour: int, minute: int, width_min: int = 4) -> bool:
         if now.hour != hour:
             return False
         return minute <= now.minute < minute + width_min
@@ -2616,7 +2618,7 @@ MACRO_PULSE_POLL_MINUTES = env_int("MACRO_PULSE_POLL_MINUTES", 45, min_value=15,
 MACRO_PULSE_MIN_MOVE_PCT = env_float("MACRO_PULSE_MIN_MOVE_PCT", 0.35, min_value=0.05, max_value=3.0)
 MACRO_PULSE_COOLDOWN_HOURS = env_int("MACRO_PULSE_COOLDOWN_HOURS", 3, min_value=1, max_value=24)
 LIVE_TITLE_SIMILARITY_BLOCK_HOURS = 24
-LIVE_TITLE_SIMILARITY_THRESHOLD = 0.5
+LIVE_TITLE_SIMILARITY_THRESHOLD = 0.58
 LIVE_RECAP_HOURS = (18,)
 LIVE_BTC_MIN_IMPORTANCE = 8
 LIVE_MESSAGE_SOFT_LIMIT = 2000
@@ -3163,6 +3165,14 @@ def live_news_dedup_hashes(title: str, link: str) -> Tuple[str, str]:
     return url_hash, combo_hash
 
 
+def live_news_title_fingerprint(title: str) -> str:
+    """같은 기사가 URL만 다르게 들어올 때 막기 위한 제목 지문."""
+    base = normalize_title_for_dedup(strip_news_source_tail(title or ""))
+    if not base.strip():
+        base = normalize_title_for_dedup(html_clean(title or "", 400))
+    return "fp:" + hashlib.sha256(base.encode("utf-8")).hexdigest()
+
+
 _LIVE_NEWS_DB_LOCK = threading.Lock()
 
 
@@ -3432,9 +3442,10 @@ async def bot_state_persist_loop(state: State) -> None:
 
 def is_duplicate_live_news(state: State, title: str, link: str, now: datetime) -> bool:
     url_hash, combo_hash = live_news_dedup_hashes(title, link)
-    if url_hash in state.live_news_seen_set or combo_hash in state.live_news_seen_set:
+    fp_hash = live_news_title_fingerprint(title)
+    if url_hash in state.live_news_seen_set or combo_hash in state.live_news_seen_set or fp_hash in state.live_news_seen_set:
         return True
-    if live_news_db_has_recent((url_hash, combo_hash), now.timestamp()):
+    if live_news_db_has_recent((url_hash, combo_hash, fp_hash), now.timestamp()):
         return True
     if not getattr(state, "live_recent_titles", None):
         return False
@@ -3450,9 +3461,10 @@ def is_duplicate_live_news(state: State, title: str, link: str, now: datetime) -
 
 def remember_live_news_hashes(state: State, title: str, link: str) -> None:
     url_hash, combo_hash = live_news_dedup_hashes(title, link)
+    fp_hash = live_news_title_fingerprint(title)
     now_ts = utc_now().timestamp()
-    live_news_db_store_hashes((url_hash, combo_hash), now_ts)
-    for nid in (url_hash, combo_hash):
+    live_news_db_store_hashes((url_hash, combo_hash, fp_hash), now_ts)
+    for nid in (url_hash, combo_hash, fp_hash):
         if len(state.live_news_seen_ids) == state.live_news_seen_ids.maxlen:
             old = state.live_news_seen_ids.popleft()
             state.live_news_seen_set.discard(old)
@@ -3995,7 +4007,6 @@ LIVE_NEWS_BANNED_PHRASES = (
     "자금 유입 속도가 핵심",
     "먼저 보면 됨",
     "부터 보면 됨",
-    "같이 보면 됨",
     "유가 압력",
     "공급망 이슈",
     "같은 방향으로 붙는 느낌",
@@ -4007,7 +4018,9 @@ def strip_live_news_banned_phrases(text: str) -> str:
     s = text or ""
     for bad in LIVE_NEWS_BANNED_PHRASES:
         s = s.replace(bad, "")
-    return re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r"\s+\.", ".", s).strip()
+    return s
 
 
 def why_important_lines(event_type: str, body_ko: str, category: str, title: str, summary: str) -> list[str]:
@@ -5072,6 +5085,64 @@ def importance_narrative_line(event_type: str) -> str:
     )
 
 
+def live_news_hub_bullets(
+    event_line: str,
+    fact_lines: list[str],
+    title_ko: str,
+    *,
+    prefix: Optional[list[str]] = None,
+    max_total: int = 4,
+) -> list[str]:
+    out: list[str] = []
+    seen_norm: list[str] = []
+
+    def add_line(s: str) -> None:
+        raw = strip_live_news_banned_phrases((s or "").strip())
+        raw = re.sub(r"\s+\.", ".", raw).strip()
+        if len(raw) < 10:
+            return
+        norm = re.sub(r"\s+", "", raw.lower())
+        for prev in seen_norm:
+            if norm == prev or (len(norm) >= 28 and norm in prev) or (len(prev) >= 28 and prev in norm):
+                return
+        out.append(raw)
+        seen_norm.append(norm)
+
+    for s in prefix or []:
+        if len(out) >= max_total:
+            return out[:max_total]
+        add_line(s)
+    add_line(event_line)
+    for fl in fact_lines:
+        if len(out) >= max_total:
+            break
+        add_line(fl)
+    if not out:
+        add_line(html_clean(title_ko, 220).strip() or "뉴스 확인")
+    return out[:max_total]
+
+
+def live_news_hub_watch_line(event_type: str, category: str, title: str, summary: str) -> str:
+    t = f"{title} {summary}".lower()
+    if "discord" in t or "디스코드" in t:
+        return "커뮤니티·채널 규칙 바뀌면 단기 심리만 흔들고, 체결·펀딩이 따라오는지 보면 됨."
+    if "blind" in t or "블라인드" in t or "서명" in t or "signature" in t:
+        return "보안·지갑 쪽이면 온체인·브릿지 TVL이랑 거래소 공지만 짧게 보면 됨."
+    if "cpi" in t or "물가" in t:
+        return "물가면 금리 기대가 먼저라, 달러·국채랑 BTC를 한 줄로 보면 됨."
+    if event_type in ("etf", "crypto_etf"):
+        return "ETF·규제면 유입·보관 숫자랑 선물 펀딩이 가격보다 빠름."
+    if event_type == "rates":
+        return "금리면 달러·국채 먼저, BTC는 나스닥 선물이랑 같이 움직이는 날이 많음."
+    if event_type == "security":
+        return "거래소·지갑 이슈면 스프레드랑 출금 큐만 보면 됨."
+    if event_type == "liquidation":
+        return "청산이면 펀딩·미결제 줄었는지, 알트는 BTC랑 같이 가는지."
+    if category == "코인":
+        return "코인 뉴스면 레버·펀딩이 먼저 튀는 경우 많음. 가격은 그 다음."
+    return "지수·환율·외인 방향만 짧게 맞춰 보면 됨."
+
+
 async def build_live_news_message(
     session: aiohttp.ClientSession,
     category_emoji: str,
@@ -5129,44 +5200,39 @@ async def build_live_news_message(
 
     event_type = news_event_type(title_clean, summary, category)
     event_line = event_line_from_news(title_ko, title_clean, summary, category)
-    narrative = importance_narrative_line(event_type)
 
     rel = related_assets_for_coin_news(title_clean, summary) if category == "코인" else related_assets_for_news(title_clean, summary)
     src_line = f"출처: {source}" if has_clear_source_name(source) else ""
     cat_line = live_news_category_label(category, title_clean, summary)
 
-    impact_body = strip_live_news_banned_phrases(live_news_market_impact_body(event_type, category, title_clean, summary))
+    max_fl = 8 if explanatory else 5
+    fc = 280 if explanatory else 210
+    fact_lines = split_body_fact_lines(body_for_facts, max_fl, fc)
+    if len(fact_lines) < 2 and category == "코인":
+        fact_lines.append(coin_news_brief(coin_type, title_clean, summary))
 
-    if explanatory:
-        sev = live_news_severity_label(importance)
-        fact_lines = split_body_fact_lines(body_for_facts, 10, 260)
-        if len(fact_lines) < 2 and category == "코인":
-            fact_lines.append(coin_news_brief(coin_type, title_clean, summary))
-        what_chunks = [event_line]
-        what_chunks.extend(fact_lines[:5])
-        if len([x for x in what_chunks if (x or "").strip()]) < 2:
-            what_chunks.insert(0, title_ko)
-        what_block = "\n".join(strip_live_news_banned_phrases(x) for x in what_chunks if (x or "").strip())[:900]
-        nar_block = strip_live_news_banned_phrases(narrative)
-        msg = f"{category_emoji} {cat_line} · {sev}\n\n내용\n{what_block}\n\n메모\n{nar_block}\n\n시장\n{impact_body}"
-    else:
-        sev_short = live_news_severity_label(importance)
-        ek_depth = etf_asset_kind(title_clean, summary)
-        if ek_depth in ("semiconductor_etf", "ai_etf", "korea_stock_etf") and not is_crypto_etf_content(title_clean, summary):
-            fact_lines = split_body_fact_lines(body_for_facts, 6, 260)
-            depth = kr_equity_etf_depth_paragraph(ek_depth, title_ko, event_line, fact_lines)
-            msg = f"{category_emoji} {cat_line} · {sev_short}\n\n{depth}"
-        else:
-            fact_lines = split_body_fact_lines(body_for_facts, 4, 220)
-            msg = f"{category_emoji} {cat_line} · {sev_short}\n\n{event_line}"
-            if fact_lines:
-                msg += "\n" + "\n".join(fact_lines)
-            msg += f"\n\n{impact_body}"
+    prefix_lines: list[str] = []
+    ek_depth = etf_asset_kind(title_clean, summary)
+    if ek_depth in ("semiconductor_etf", "ai_etf", "korea_stock_etf") and not is_crypto_etf_content(title_clean, summary):
+        etf_facts = split_body_fact_lines(body_for_facts, 6, 240)
+        depth_txt = kr_equity_etf_depth_paragraph(ek_depth, title_ko, event_line, etf_facts)
+        prefix_lines = [ln.strip() for ln in depth_txt.split("\n") if ln.strip()][:2]
 
+    bullets = live_news_hub_bullets(event_line, fact_lines, title_ko, prefix=prefix_lines or None, max_total=4)
+    hook = live_news_hub_watch_line(event_type, category, title_clean, summary)
+
+    headline = html_clean(title_ko, 240).strip()
+    parts: list[str] = [f"{category_emoji} {cat_line}", "", f"📌 {headline}", ""]
+    for b in bullets:
+        parts.append(f"· {b}")
+    parts += ["", f"💡 {hook}"]
+    link_s = (link or "").strip()
+    if link_s.startswith("http"):
+        parts += ["", f"🔗 {link_s}"]
     if src_line:
-        msg += f"\n\n{src_line}"
+        parts.append(src_line)
     if rel:
-        msg += f"\n관련: {rel}"
+        parts.append(f"관련: {rel}")
 
     if category == "코인" and importance >= LIVE_BTC_MIN_IMPORTANCE and should_attach_btc_price(coin_type, title_clean, summary):
         try:
@@ -5174,11 +5240,12 @@ async def build_live_news_message(
             if btc:
                 btc_price = float(btc["lastPrice"])
                 btc_pct = float(btc["priceChangePercent"])
-                msg += f"\nBTC {btc_price:,.0f} ({fmt_pct(btc_pct)})"
+                parts.append(f"BTC {btc_price:,.0f} ({fmt_pct(btc_pct)})")
         except Exception:
             pass
 
-    msg += f"\n〔{importance}/10〕"
+    parts.append(f"〔{importance}/10〕")
+    msg = "\n".join(parts)
     return compact_message(msg, LIVE_MESSAGE_SOFT_LIMIT)
 
 
@@ -5581,10 +5648,18 @@ async def daily_digest_scheduler(bot: Bot, state: State) -> None:
             key_evening = f"day_digest:{now.date()}"
             # 아침 7시는 overnight_recap_scheduler(7:10)와 겹치므로 제거. 저녁 한 번만.
             if now.hour == 18 and now.minute < 5 and state.digest_sent_dates.get(key_evening) != now.date():
-                msg = session_section(f"{now.month}/{now.day} 오늘 시장 한줄 · 코인 허브")
-                msg += "\n\n1. 코인: BTC·ETH 지지·ETF·청산·알트 수급\n2. 미국: 나스닥·금리·반도체(코인과 연동)\n3. 한국: 반도체·환율·외국인\n4. 매크로: 유가·달러"
-                await safe_send(bot, compact_message(msg, LIVE_MESSAGE_SOFT_LIMIT), disable_preview=True)
-                state.digest_sent_dates[key_evening] = now.date()
+                msg = (
+                    f"📋 오늘 허브 체크리스트 · {now.month}/{now.day}\n"
+                    "① 코인: BTC·ETH 레벨 / ETF·청산 / 알트 펀딩\n"
+                    "② 미국: 나스닥·금리·반도체\n"
+                    "③ 한국: 반도체·외인·환율\n"
+                    "④ 매크로: 유가·달러"
+                )
+                try:
+                    await send_message(bot, compact_message(msg, LIVE_MESSAGE_SOFT_LIMIT), disable_preview=True)
+                    state.digest_sent_dates[key_evening] = now.date()
+                except Exception:
+                    logging.exception("daily_digest 전송 실패")
             await asyncio.sleep(60)
         except Exception:
             logging.exception("daily_digest_scheduler 오류")
@@ -5922,31 +5997,32 @@ async def overnight_recap_scheduler(bot: Bot, state: State) -> None:
                         eth_pct = float(eth["priceChangePercent"]) if eth else 0.0
                         sol_price = float(sol["lastPrice"]) if sol else 0.0
                         sol_pct = float(sol["priceChangePercent"]) if sol else 0.0
-                        msg = session_section(f"{now.month}/{now.day} 밤 사이 · 코인·시장")
+                        msg = f"🌙 밤사이 한 줄 · {now.month}/{now.day}\n"
                         if btc:
-                            msg += f"\n1. BTC {btc_price:,.0f} USDT ({fmt_pct(btc_pct)})"
+                            msg += f"BTC {btc_price:,.0f} ({fmt_pct(btc_pct)})"
                         if eth:
-                            msg += f"\n2. ETH {eth_price:,.0f} USDT ({fmt_pct(eth_pct)})"
+                            msg += f" · ETH {fmt_pct(eth_pct)}"
                         if sol:
-                            msg += f"\n3. SOL {sol_price:,.0f} USDT ({fmt_pct(sol_pct)})"
-                        idx = 4
+                            msg += f" · SOL {fmt_pct(sol_pct)}"
+                        msg += "\n"
                         if nq:
-                            msg += f"\n{idx}. 나스닥 선물 {fmt_pct(safe_pct_from_snapshot(nq))}"
-                            idx += 1
+                            msg += f"NQ {fmt_pct(safe_pct_from_snapshot(nq))}"
                         if sox:
-                            msg += f"\n{idx}. 반도체지수 {fmt_pct(safe_pct_from_snapshot(sox))}"
-                            idx += 1
+                            msg += f" · SOX {fmt_pct(safe_pct_from_snapshot(sox))}"
                         if wti:
-                            msg += f"\n{idx}. WTI 유가 {fmt_pct(safe_pct_from_snapshot(wti))}"
-                            idx += 1
+                            msg += f" · 유가 {fmt_pct(safe_pct_from_snapshot(wti))}"
                         if dxy:
-                            msg += f"\n{idx}. 달러인덱스 {fmt_pct(safe_pct_from_snapshot(dxy))}"
-                        msg += f"\n\n📌 한 줄 정리:\n{final_market_recap_focus(btc_pct, eth_pct, sol_pct, safe_pct_from_snapshot(nq), safe_pct_from_snapshot(sox), safe_pct_from_snapshot(wti), safe_pct_from_snapshot(dxy))}"
+                            msg += f" · DXY {fmt_pct(safe_pct_from_snapshot(dxy))}"
+                        msg += f"\n\n💬 {final_market_recap_focus(btc_pct, eth_pct, sol_pct, safe_pct_from_snapshot(nq), safe_pct_from_snapshot(sox), safe_pct_from_snapshot(wti), safe_pct_from_snapshot(dxy))}"
                         if weekend_mode or holiday_mode:
-                            msg += "\n\n오늘 체크:\n- BTC·알트·ETF·청산\n- 유가·달러\n- 다음 뉴스 플로우"
+                            msg += "\n\n👀 오늘: BTC·알트 / 유가·달러 / 뉴스 플로우"
                         else:
-                            msg += "\n\n오늘 체크:\n- BTC·ETH·SOL 수급\n- 나스닥·반도체(코인과 연동)\n- 한국장 외국인·환율"
-                        await safe_send(bot, compact_message(msg, LIVE_MESSAGE_SOFT_LIMIT), disable_preview=True)
+                            msg += "\n\n👀 오늘: BTC·ETH·SOL / 나스닥·반도체 / 환율·외인"
+                        try:
+                            await send_message(bot, compact_message(msg, LIVE_MESSAGE_SOFT_LIMIT), disable_preview=True)
+                            state.overnight_recap_sent_dates[key] = now.date()
+                        except Exception:
+                            logging.exception("overnight_recap 전송 실패")
             except Exception:
                 logging.exception("overnight_recap_scheduler 오류")
             await asyncio.sleep(20)
