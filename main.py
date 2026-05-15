@@ -2469,6 +2469,7 @@ LIVE_NEWS_POLL_SECONDS = env_int("LIVE_NEWS_POLL_SECONDS", 120, min_value=30, ma
 LIVE_NEWS_FEED_HEAD = env_int("LIVE_NEWS_FEED_HEAD", 18, min_value=5, max_value=40)
 LIVE_NEWS_MIN_IMPORTANCE_SEND = env_int("LIVE_NEWS_MIN_IMPORTANCE_SEND", 7, min_value=5, max_value=10)
 LIVE_NEWS_DESK_VOICE_LINE = env_bool("LIVE_NEWS_DESK_VOICE_LINE", True)
+LIVE_NEWS_COMPACT_NUMERIC_BLOCK = env_bool("LIVE_NEWS_COMPACT_NUMERIC_BLOCK", True)
 LIVE_NEWS_NIGHT_COIN_MIN = env_int("LIVE_NEWS_NIGHT_COIN_MIN", 12, min_value=8, max_value=24)
 LIVE_NEWS_NIGHT_OTHER_MIN = env_int("LIVE_NEWS_NIGHT_OTHER_MIN", 15, min_value=8, max_value=28)
 
@@ -2890,6 +2891,19 @@ LIVE_CATEGORY_FEEDS = (
 )
 
 
+def iter_live_news_feeds() -> Tuple[Tuple[str, str, str], ...]:
+    """Railway 등에서 이슈·세계 피드를 끄고 싶을 때 ENABLE_LIVE_ISSUE_FEED / ENABLE_LIVE_WORLD_FEED."""
+    out: list[Tuple[str, str, str]] = []
+    for row in LIVE_CATEGORY_FEEDS:
+        _, cat, _ = row
+        if cat == "이슈" and not env_bool("ENABLE_LIVE_ISSUE_FEED", True):
+            continue
+        if cat == "세계" and not env_bool("ENABLE_LIVE_WORLD_FEED", True):
+            continue
+        out.append(row)
+    return tuple(out)
+
+
 def html_clean(value: str, limit: int = 500) -> str:
     value = value or ""
     value = html.unescape(value)
@@ -3121,6 +3135,8 @@ def _blob_is_geopolitics_mideast(blob: str, blob_l: str) -> bool:
 
 
 def _blob_is_china_us_geopolitics(blob: str, blob_l: str) -> bool:
+    if _blob_is_geopolitics_mideast(blob, blob_l):
+        return False
     china_side = bool(
         any(k in blob for k in ("시진핑", "中", "중국", "대만", "台灣"))
         or re.search(r"\bxi jinping\b", blob_l)
@@ -4731,6 +4747,8 @@ def related_assets_for_news(title: str, summary: str = "") -> str:
         return "원자재 · 인플레 · 달러"
     if ek == "bond_etf":
         return "금리 · 달러 · 나스닥"
+    if _blob_is_geopolitics_mideast(blob, txt):
+        return "유가 · 해운 · 공급망"
     if _blob_is_china_us_geopolitics(blob, txt):
         return "관세 · 반도체 밸류체인 · 환율"
     if any(k in txt for k in ("hormuz", "호르무즈", "유가", "원유", "해운", "선박", "supply chain", "공급망")) or re.search(
@@ -4760,14 +4778,14 @@ def classify_coin_news_type(title: str, summary: str) -> str:
     if any(k in txt for k in ("eth", "ethereum", "이더리움", "l2", "layer 2", "layer2")):
         if any(k in txt for k in ("보안", "취약", "audit", "hack", "exploit")) or re.search(r"\bsecurity\b", txt):
             return "eth_security"
-    if any(k in txt for k in ("스테이블코인", "stablecoin", "usdc", "circle", "coinbase", "stripe", "aws")):
-        return "stablecoin_payment"
     if any(k in txt for k in ("청산", "liquidation", "급락", "급등", "volatility", "변동성", "거래량")):
         return "volatility"
     if any(k in txt for k in ("btc", "bitcoin", "비트코인", "현물 etf", "spot etf")):
         return "btc_flow"
     if ek == "crypto_etf" or (any(k in txt for k in ("etf", "sec", "승인", "유입", "inflow")) and is_crypto_etf_content(title, summary)):
         return "etf_flow"
+    if any(k in txt for k in ("스테이블코인", "stablecoin", "usdc", "circle", "coinbase", "stripe", "aws")):
+        return "stablecoin_payment"
     return "coin_general"
 
 
@@ -5115,16 +5133,14 @@ def live_news_hub_watch_line(event_type: str, category: str, title: str, summary
         return "미국 반도체·AI칩: 실적·캐파 가이던스가 단기 주가보다 길게 붙는 경우가 많음."
     if category == "미국" and event_type in ("rates", "oil", "fx"):
         return "금리·유가·달러 라인. 나스닥·코인은 같은 날 베타만 짧게."
-    if category == "세계" and _blob_is_china_us_geopolitics(raw, t):
-        return "미중 동선: 관세·수출통제·환율이 같은 날 베타를 잡는 경우가 많음."
     if category == "세계" and _blob_is_geopolitics_mideast(raw, t):
         return "지정학·에너지: 유가·DXY·10Y·해운까지 같은 맥락으로만 점검."
+    if category == "세계" and _blob_is_china_us_geopolitics(raw, t):
+        return "미중 동선: 관세·수출통제·환율이 같은 날 베타를 잡는 경우가 많음."
     if category == "한국" and _blob_is_kr_corporate_earnings(raw, t):
         return "실적 라인: 가이던스·마진·환율이 헤드라인보다 먼저 움직이는 경우가 많음."
     if category == "코인":
-        return (
-            "코인 데스크: BTC·ETH 방향에 펀딩·OI를 얹고, 알트는 고래·온체인·거래대금·이슈(상장·해킹·규제)까지 같이 보는 경우가 많음."
-        )
+        return "코인: BTC 방향·펀딩·OI·거래대금을 한 묶음으로 보면 됨."
     return "지수·환율·외국인 흐름을 한 줄로 압축."
 
 
@@ -5199,6 +5215,22 @@ def _numeric_fact_is_btc_price_level_noise(s: str) -> bool:
     return 12_000 <= val <= 250_000
 
 
+def _live_news_numeric_block_is_redundant(category: str, title: str, summary: str, event_line: str, nums: list[str]) -> bool:
+    """코인 카드에서 제목에 이미 나온 가격 숫자만 인용 수치로 또 붙이지 않음."""
+    if not LIVE_NEWS_COMPACT_NUMERIC_BLOCK:
+        return False
+    if category != "코인" or len(nums) != 1:
+        return False
+    n = (nums[0] or "").strip()
+    if not n.startswith("$"):
+        return False
+    digits = re.sub(r"\D", "", n)
+    if len(digits) < 4:
+        return False
+    ctx = re.sub(r"\W", "", f"{title}{summary}{event_line}".lower())
+    return digits in ctx
+
+
 def extract_article_numerical_facts(title: str, summary: str, body: str = "", *, max_items: int = 6) -> list[str]:
     """기사 제목·요약·본문에서 달러·%·억/조·inflow 등 숫자 조각만 짧게 뽑아 데스크 확인용으로 씀."""
     raw = html_clean(f"{title}\n{summary}\n{body}", 4000)
@@ -5209,6 +5241,7 @@ def extract_article_numerical_facts(title: str, summary: str, body: str = "", *,
 
     def add(fragment: str) -> None:
         s = re.sub(r"\s+", " ", fragment).strip()
+        s = re.sub(r"[,;:\s·]+$", "", s).strip()
         if len(s) < 3 or len(s) > 92:
             return
         key = re.sub(r"\s+", "", s).lower()
@@ -5356,7 +5389,7 @@ async def build_live_news_message(
         for x in extract_article_numerical_facts(title_clean, summary, body_for_facts, max_items=6)
         if not _fact_line_redundant(x, merge_ctx)
     ]
-    if extra_nums:
+    if extra_nums and not _live_news_numeric_block_is_redundant(category, title_clean, summary, event_line, extra_nums):
         parts.append(SEC_NUM_BLOCK)
         for x in extra_nums:
             parts.append(f"· {x}")
@@ -5605,7 +5638,7 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                 if state.live_last_sent_at and now - state.live_last_sent_at < min_interval:
                     await asyncio.sleep(LIVE_NEWS_POLL_SECONDS)
                     continue
-                for category_emoji, category, feed_url in LIVE_CATEGORY_FEEDS:
+                for category_emoji, category, feed_url in iter_live_news_feeds():
                     if state.live_news_daily_count >= LIVE_NEWS_DAILY_LIMIT or sent_this_scan >= LIVE_NEWS_MAX_PER_SCAN:
                         break
                     feed = await fetch_rss(session, feed_url)
@@ -6277,7 +6310,9 @@ async def overnight_recap_scheduler(bot: Bot, state: State) -> None:
 
 
 async def run_forever() -> None:
-    # Railway: Variables에 TELEGRAM_TOKEN(또는 BOT_TOKEN 등)·TELEGRAM_CHANNEL_ID 넣으면 워커 기동. PORT는 헬스체크용.
+    # Railway: TELEGRAM_TOKEN·TELEGRAM_CHANNEL_ID. PORT=헬스.
+    # 속보 피드: ENABLE_LIVE_ISSUE_FEED=false(이슈 제외), ENABLE_LIVE_WORLD_FEED=false(세계 제외),
+    # LIVE_NEWS_COMPACT_NUMERIC_BLOCK=false(가격 인용 수치 블록 항상 표시).
     token, _ = resolve_telegram_token()
     if not token:
         raise RuntimeError("TELEGRAM_TOKEN 환경변수가 필요합니다.")
@@ -6353,6 +6388,10 @@ async def run_forever() -> None:
     if flags["ENABLE_LIVE_NEWS"]:
         tasks.append(asyncio.create_task(live_news_monitor(bot, state)))
         enabled_workers.append("live_news_monitor")
+        logging.info(
+            "live_news RSS 카테고리: %s",
+            " · ".join(cat for _, cat, _ in iter_live_news_feeds()),
+        )
     if flags["ENABLE_RECAP"]:
         tasks.append(asyncio.create_task(live_recap_scheduler(bot, state)))
         enabled_workers.append("live_recap_scheduler")
