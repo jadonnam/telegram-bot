@@ -1109,6 +1109,103 @@ async def get_okx_ohlc_candles(
     return out
 
 
+TRADINGVIEW_OKX_SYMBOLS = {
+    "BTCUSDT": "OKX:BTCUSDT",
+    "ETHUSDT": "OKX:ETHUSDT",
+    "SOLUSDT": "OKX:SOLUSDT",
+}
+
+CHART_IMG_API_BASE = "https://api.chart-img.com"
+
+
+def chart_img_api_key() -> str:
+    return (os.getenv("CHART_IMG_API_KEY") or os.getenv("TRADINGVIEW_CHART_API_KEY") or "").strip()
+
+
+def tradingview_symbol_for_usdt(symbol: str) -> str:
+    return TRADINGVIEW_OKX_SYMBOLS.get(symbol, f"OKX:{symbol}")
+
+
+async def fetch_tradingview_chart_storage_url(
+    session: aiohttp.ClientSession,
+    tv_symbol: str,
+    *,
+    interval: str = "15m",
+    support: Optional[float] = None,
+    resist: Optional[float] = None,
+) -> Optional[str]:
+    """chart-img.com → TradingView advanced chart 공개 스냅샷 URL."""
+    api_key = chart_img_api_key()
+    if not api_key:
+        return None
+
+    body: dict = {
+        "symbol": tv_symbol,
+        "interval": interval,
+        "width": 920,
+        "height": 520,
+        "theme": "dark",
+        "style": "candle",
+        "timezone": "Asia/Seoul",
+        "format": "png",
+        "range": "1D",
+        "studies": [{"name": "Volume", "forceOverlay": True}],
+    }
+    drawings: list[dict] = []
+    if support and support > 0:
+        drawings.append(
+            {
+                "name": "Horizontal Line",
+                "input": {"price": round(support, 6), "text": "지지"},
+                "override": {"lineWidth": 1, "lineColor": "rgb(67,160,71)"},
+            }
+        )
+    if resist and resist > 0:
+        drawings.append(
+            {
+                "name": "Horizontal Line",
+                "input": {"price": round(resist, 6), "text": "저항"},
+                "override": {"lineWidth": 1, "lineColor": "rgb(229,57,53)"},
+            }
+        )
+    if drawings:
+        body["drawings"] = drawings
+
+    headers = {"x-api-key": api_key, "content-type": "application/json"}
+    url = f"{CHART_IMG_API_BASE}/v2/tradingview/advanced-chart/storage"
+    try:
+        async with session.post(
+            url,
+            json=body,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=50),
+        ) as response:
+            if response.status == 200:
+                data = await response.json()
+                if isinstance(data, dict) and data.get("url"):
+                    return str(data["url"])
+            logging.warning(
+                "chart-img v2 storage status=%s symbol=%s",
+                response.status,
+                tv_symbol,
+            )
+    except Exception:
+        logging.exception("chart-img v2 storage failed symbol=%s", tv_symbol)
+
+    params = {
+        "symbol": tv_symbol,
+        "interval": interval,
+        "width": 920,
+        "height": 520,
+        "theme": "dark",
+        "key": api_key,
+    }
+    data = await fetch_json(session, f"{CHART_IMG_API_BASE}/v1/tradingview/advanced-chart/storage", params)
+    if isinstance(data, dict) and data.get("url"):
+        return str(data["url"])
+    return None
+
+
 def primary_symbol_for_coin_news(title: str, summary: str, coin_type: str) -> str:
     raw = f"{title} {summary}".lower()
     if coin_type in ("sol_alt_flow",) or any(
@@ -1185,7 +1282,7 @@ def build_trade_desk_lines(
     phi = _fmt_trade_price(symbol, hi)
     pmid = _fmt_trade_price(symbol, mid)
 
-    lines = [f"추세(15m·OKX {tag}): {trend} · 박스 {plo}~{phi}"]
+    lines = [f"추세(15m·TV {tag}): {trend} · 박스 {plo}~{phi}"]
     span = hi - lo
     pos = (last - lo) / span if span > 0 else 0.5
 
@@ -1275,7 +1372,7 @@ async def coin_news_trade_desk(
     summary: str,
     coin_type: str,
 ) -> Tuple[Optional[str], list[str]]:
-    """기사 관련 종목 OKX 15m 캔들 차트 + 지지·저항·매매 흐름."""
+    """기사 종목 TradingView 15m 스냅샷 + OKX 데이터 기반 자리·흐름."""
     symbol = primary_symbol_for_coin_news(title, summary, coin_type)
     candles = await get_okx_ohlc_candles(session, symbol, bar="15m", limit=64)
     if len(candles) < 16:
@@ -1285,7 +1382,15 @@ async def coin_news_trade_desk(
     hi = max(c[2] for c in candles[-window:])
     funding = await get_funding_rate(session, symbol)
     lines = build_trade_desk_lines(symbol, candles, funding)
-    chart_url = build_okx_candlestick_chart_url(candles, symbol, support=lo, resist=hi) or None
+
+    tv_symbol = tradingview_symbol_for_usdt(symbol)
+    chart_url = await fetch_tradingview_chart_storage_url(
+        session, tv_symbol, interval="15m", support=lo, resist=hi
+    )
+    if not chart_url:
+        chart_url = build_okx_candlestick_chart_url(candles, symbol, support=lo, resist=hi) or None
+        if chart_url and not chart_img_api_key():
+            logging.info("CHART_IMG_API_KEY 미설정 → QuickChart 대체 차트 사용")
     return chart_url, lines
 
 
@@ -6840,6 +6945,14 @@ async def run_forever() -> None:
         market_mode_lines.append("Weekend crypto mode enabled")
     if market_mode_lines:
         logging.info("Market mode:\n- %s", "\n- ".join(market_mode_lines))
+
+    if chart_img_api_key():
+        logging.info("TradingView chart: chart-img API key configured")
+    else:
+        logging.warning(
+            "TradingView chart: CHART_IMG_API_KEY 없음 — 코인 뉴스 차트는 QuickChart 대체 "
+            "(https://chart-img.com 무료 키 발급 후 Railway 환경변수 설정)"
+        )
 
     flags = {
         "ENABLE_LIVE_NEWS": env_bool("ENABLE_LIVE_NEWS", True),
