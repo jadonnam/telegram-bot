@@ -1085,65 +1085,208 @@ async def get_okx_btc_candles(session: aiohttp.ClientSession, bar: str = "5m", l
     return candles
 
 
-def build_okx_btc_chart_url(candles: list[tuple[int, float]], *, title: str = "BTC · OKX 5m") -> str:
+async def get_okx_ohlc_candles(
+    session: aiohttp.ClientSession,
+    symbol: str,
+    *,
+    bar: str = "15m",
+    limit: int = 64,
+) -> list[tuple[int, float, float, float, float, float]]:
+    inst = OKX_SYMBOLS.get(symbol)
+    if not inst:
+        return []
+    url = f"https://www.okx.com/api/v5/market/candles?instId={inst}&bar={bar}&limit={limit}"
+    data = await fetch_json(session, url)
+    out: list[tuple[int, float, float, float, float, float]] = []
+    try:
+        for row in data.get("data", []):
+            out.append(
+                (int(row[0]), float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5] or 0))
+            )
+        out.sort(key=lambda x: x[0])
+    except Exception:
+        return []
+    return out
+
+
+def primary_symbol_for_coin_news(title: str, summary: str, coin_type: str) -> str:
+    raw = f"{title} {summary}".lower()
+    if coin_type in ("sol_alt_flow",) or any(
+        k in raw for k in ("solana", "솔라나", "firedancer", " firedancer", "jump crypto")
+    ):
+        return "SOLUSDT"
+    if coin_type in ("eth_security",) or any(
+        k in raw for k in ("ethereum", "이더리움", " ether", " eth ", "eth ")
+    ):
+        return "ETHUSDT"
+    if any(k in raw for k in ("bitcoin", "btc", "비트코인")):
+        return "BTCUSDT"
+    return "BTCUSDT"
+
+
+def _sma(vals: list[float], n: int) -> float:
+    if not vals:
+        return 0.0
+    if len(vals) < n:
+        return sum(vals) / len(vals)
+    return sum(vals[-n:]) / n
+
+
+def _fmt_trade_price(symbol: str, price: float) -> str:
+    if price >= 1000:
+        return f"{price:,.0f}"
+    if price >= 10:
+        return f"{price:,.2f}"
+    return f"{price:.4f}"
+
+
+def coin_article_interpretation(title: str, summary: str, coin_type: str) -> str:
+    t = f"{title} {summary}".lower()
+    if "firedancer" in t or ("jump" in t and "sol" in t):
+        return "Firedancer는 SOL 체인 성능·수수료 이슈라, 헤드라인보다 SOL 거래량·TPS 반응을 먼저 보면 됩니다."
+    if any(k in t for k in ("infrastructure", "rollout", "인프라", "출시", "메인넷")):
+        return "인프라·출시 뉴스는 가격보다 체인 사용량·수수료·거래량이 먼저 움직이는 경우가 많습니다."
+    if any(k in t for k in ("clarity", "클래리티", "congress", "의회", "법안")):
+        return "규제·입법은 단기 심리(펀딩)가 먼저, 현물·ETF 수급은 며칠 늦게 따라오는 편입니다."
+    if "etf" in t and any(k in t for k in ("inflow", "outflow", "유입", "유출")):
+        return "ETF 유입·유출 숫자가 나오면 BTC·ETH가 같은 방향으로 움직이는지가 핵심입니다."
+    if coin_type == "volatility":
+        return "급등·급락 뉴스는 펀딩·미결제가 한쪽으로 쏠렸는지부터 확인하는 편이 낫습니다."
+    return ""
+
+
+def build_trade_desk_lines(
+    symbol: str,
+    candles: list[tuple[int, float, float, float, float, float]],
+    funding: Optional[float],
+) -> list[str]:
+    if len(candles) < 12:
+        return []
+    tag = symbol.replace("USDT", "")
+    closes = [c[4] for c in candles]
+    highs = [c[2] for c in candles]
+    lows = [c[3] for c in candles]
+    last = closes[-1]
+    window = min(48, len(candles))
+    hi = max(highs[-window:])
+    lo = min(lows[-window:])
+    mid = (hi + lo) / 2
+    e9 = _sma(closes, 9)
+    e21 = _sma(closes, 21)
+    if last >= e9 >= e21:
+        trend = "단기 상승"
+    elif last <= e9 <= e21:
+        trend = "단기 하락"
+    else:
+        trend = "횡보"
+
+    pf = _fmt_trade_price(symbol, last)
+    plo = _fmt_trade_price(symbol, lo)
+    phi = _fmt_trade_price(symbol, hi)
+    pmid = _fmt_trade_price(symbol, mid)
+
+    lines = [f"추세(15m·OKX {tag}): {trend} · 박스 {plo}~{phi}"]
+    span = hi - lo
+    pos = (last - lo) / span if span > 0 else 0.5
+
+    if pos >= 0.72:
+        lines.append(f"지금 {pf} — 박스 상단. {phi} 돌파 확인 전 추격은 부담")
+        lines.append(f"관심: {phi} 위 15m 마감 · 되밀림 {pmid}~{phi} 지지")
+    elif pos <= 0.28:
+        lines.append(f"지금 {pf} — 박스 하단. {plo} 이탈이 관건")
+        lines.append(f"관심: {plo}~{pmid} 반등 · 이탈 시 약세 이어질 수 있음")
+    else:
+        lines.append(f"지금 {pf} — 박스 중단({pmid} 부근)")
+        lines.append(f"관심: 저항 {phi} · 지지 {plo}")
+
+    if funding is not None:
+        if funding >= 0.03:
+            lines.append(f"펀딩 +{funding:.3f}% — 롱 쏠림, 급락 시 청산 주의")
+        elif funding <= -0.01:
+            lines.append(f"펀딩 {funding:.3f}% — 숏 우위")
+
+    return lines[:4]
+
+
+def build_okx_candlestick_chart_url(
+    candles: list[tuple[int, float, float, float, float, float]],
+    symbol: str,
+    *,
+    support: float,
+    resist: float,
+) -> str:
     from urllib.parse import quote
 
     if len(candles) < 8:
         return ""
-    values = [round(x[1], 1) for x in candles[-30:]]
-    chart = {
-        "type": "line",
-        "data": {
-            "labels": [str(i + 1) for i in range(len(values))],
-            "datasets": [{"label": "BTC", "data": values, "fill": False, "borderColor": "#f7931a", "tension": 0.2}],
-        },
+    tag = symbol.replace("USDT", "")
+    subset = candles[-36:]
+    data = []
+    for i, row in enumerate(subset):
+        _, o, h, l, c, _ = row
+        data.append(
+            {"t": str(i + 1), "o": round(o, 6), "h": round(h, 6), "l": round(l, 6), "c": round(c, 6)}
+        )
+    chart: dict = {
+        "type": "candlestick",
+        "data": {"datasets": [{"label": tag, "data": data}]},
         "options": {
-            "plugins": {"legend": {"display": False}, "title": {"display": True, "text": title}},
-            "scales": {"x": {"display": False}},
+            "plugins": {
+                "title": {"display": True, "text": f"{tag} · OKX 15m"},
+                "legend": {"display": False},
+            },
+            "scales": {
+                "x": {"display": True, "ticks": {"maxTicksLimit": 6}},
+                "y": {"position": "right"},
+            },
         },
     }
-    return "https://quickchart.io/chart?width=900&height=480&c=" + quote(json.dumps(chart, ensure_ascii=False))
+    if support > 0 and resist > 0:
+        chart["options"]["plugins"]["annotation"] = {
+            "annotations": {
+                "sup": {
+                    "type": "line",
+                    "yMin": support,
+                    "yMax": support,
+                    "borderColor": "#43a047",
+                    "borderWidth": 1,
+                    "borderDash": [5, 4],
+                },
+                "res": {
+                    "type": "line",
+                    "yMin": resist,
+                    "yMax": resist,
+                    "borderColor": "#e53935",
+                    "borderWidth": 1,
+                    "borderDash": [5, 4],
+                },
+            }
+        }
+    encoded = quote(json.dumps(chart, ensure_ascii=False))
+    if len(encoded) > 7800:
+        chart["options"]["plugins"].pop("annotation", None)
+        encoded = quote(json.dumps(chart, ensure_ascii=False))
+    return f"https://quickchart.io/chart?width=920&height=520&version=4&c={encoded}"
 
 
-async def btc_news_market_bundle(session: aiohttp.ClientSession) -> Tuple[Optional[str], str]:
-    """코인 뉴스 카드용 OKX 5m 차트 URL + 한 줄 시세·펀딩·OI·흐름."""
-    candles = await get_okx_btc_candles(session, bar="5m", limit=48)
-    chart_url = build_okx_btc_chart_url(candles) or None
-    bits: list[str] = []
-    try:
-        ticker = await get_market_ticker(session, "BTCUSDT")
-        if ticker:
-            bits.append(f"BTC {float(ticker['lastPrice']):,.0f} ({fmt_pct(float(ticker['priceChangePercent']))})")
-    except Exception:
-        pass
-    try:
-        fr = await get_funding_rate(session, "BTCUSDT")
-        if fr is not None:
-            bits.append(f"펀딩 {fr * 100:+.3f}%")
-    except Exception:
-        pass
-    try:
-        oi = await get_open_interest(session, "BTCUSDT")
-        oi_s = fmt_oi_compact("OI", oi).strip()
-        if oi_s:
-            bits.append(oi_s)
-    except Exception:
-        pass
-    if len(candles) >= 12:
-        p0, p1 = candles[-24][1], candles[-1][1]
-        if p0:
-            move = (p1 - p0) / p0 * 100.0
-            bits.append(f"최근 2h {fmt_pct(move)}")
-            if abs(move) < 0.35:
-                bits.append("흐름 박스")
-            elif move < 0:
-                bits.append("흐름 약세")
-            else:
-                bits.append("흐름 강세")
-    line = " · ".join(bits)
-    if line:
-        line += "\n📈 OKX BTCUSDT · TradingView에서도 동일 심볼로 확인 가능"
-    return chart_url, line
+async def coin_news_trade_desk(
+    session: aiohttp.ClientSession,
+    title: str,
+    summary: str,
+    coin_type: str,
+) -> Tuple[Optional[str], list[str]]:
+    """기사 관련 종목 OKX 15m 캔들 차트 + 지지·저항·매매 흐름."""
+    symbol = primary_symbol_for_coin_news(title, summary, coin_type)
+    candles = await get_okx_ohlc_candles(session, symbol, bar="15m", limit=64)
+    if len(candles) < 16:
+        return None, []
+    window = min(48, len(candles))
+    lo = min(c[3] for c in candles[-window:])
+    hi = max(c[2] for c in candles[-window:])
+    funding = await get_funding_rate(session, symbol)
+    lines = build_trade_desk_lines(symbol, candles, funding)
+    chart_url = build_okx_candlestick_chart_url(candles, symbol, support=lo, resist=hi) or None
+    return chart_url, lines
 
 
 def source_name_from_link(link: str) -> str:
@@ -2598,7 +2741,7 @@ LIVE_NEWS_FEED_HEAD = env_int("LIVE_NEWS_FEED_HEAD", 18, min_value=5, max_value=
 LIVE_NEWS_MIN_IMPORTANCE_SEND = env_int("LIVE_NEWS_MIN_IMPORTANCE_SEND", 7, min_value=5, max_value=10)
 LIVE_NEWS_DESK_VOICE_LINE = env_bool("LIVE_NEWS_DESK_VOICE_LINE", False)
 LIVE_ROOM_HOST_LINE = env_bool("LIVE_ROOM_HOST_LINE", False)
-LIVE_NEWS_BTC_CHART = env_bool("LIVE_NEWS_BTC_CHART", True)
+LIVE_NEWS_BTC_CHART = env_bool("LIVE_NEWS_BTC_CHART", True)  # 코인 뉴스: OKX 15m 캔들 + 자리·흐름
 LIVE_NEWS_COMPACT_NUMERIC_BLOCK = env_bool("LIVE_NEWS_COMPACT_NUMERIC_BLOCK", True)
 LIVE_NEWS_CARD_DISCLAIMER = "※ 정리용 · 투자 권유 아님 · 레버·청산·슬리피지·거래소·규제 리스크 전제."
 LIVE_NEWS_NIGHT_COIN_MIN = env_int("LIVE_NEWS_NIGHT_COIN_MIN", 12, min_value=8, max_value=24)
@@ -5157,9 +5300,11 @@ def related_assets_for_coin_news(title: str, summary: str) -> str:
         return "ETH · 네트워크 · 검증"
     if news_type == "sol_alt_flow":
         txt = f"{title} {summary}".lower()
+        if any(k in txt for k in ("firedancer", "infrastructure", "인프라", "rollout")):
+            return "SOL · 네트워크 · 인프라"
         if any(k in txt for k in ("jpmorgan", "jp morgan", "jp모건")):
             return "SOL · ETF · 기관수급"
-        return "SOL · ETF · 알트"
+        return "SOL · 알트 · SOL-USDT"
     if news_type == "btc_flow":
         return "BTC · ETF · 기관수급"
     if news_type == "stablecoin_payment":
@@ -5190,6 +5335,10 @@ def _coin_brief_redundant(brief: str, ctx: str) -> bool:
 
 def coin_news_brief(news_type: str, title: str, summary: str) -> str:
     txt = f"{title} {summary}".lower()
+    if "firedancer" in txt or ("jump" in txt and "sol" in txt):
+        return ""
+    if any(k in txt for k in ("infrastructure", "rollout", "인프라")) and any(k in txt for k in ("sol", "solana", "솔라나")):
+        return ""
     if any(k in txt for k in ("clarity", "클래리티", "congress", "의회", "법안", "legislation")):
         return "규제·입법 보도는 심리(펀딩·SNS)가 먼저, ETF·현물 수급은 며칠 늦게 따라오는 경우가 많아요."
     if any(k in txt for k in ("santiment", "행복", "euphoria", "급증")):
@@ -5662,10 +5811,12 @@ async def build_live_news_message(
 
     bullet_cap = 4 if explanatory else 3
     bullets = live_news_hub_bullets(event_line, fact_lines, title_ko, prefix=prefix_lines or None, max_total=bullet_cap)
-    hook = live_news_hub_watch_line(event_type, category, title_clean, summary)
-    if desk_ctx and category == "코인":
+    article_hook = coin_article_interpretation(title_clean, summary, coin_type) if category == "코인" else ""
+    hook = article_hook or live_news_hub_watch_line(event_type, category, title_clean, summary)
+    if not article_hook and desk_ctx and category == "코인":
         hook = desk_ctx
     actions = live_news_action_bullets(event_type, category, title_clean, summary)
+    trade_lines: list[str] = []
 
     headline = html_clean(title_ko, 240).strip()
     now = now_kst()
@@ -5685,8 +5836,16 @@ async def build_live_news_message(
     ]
     if extra_nums and not _live_news_numeric_block_is_redundant(category, title_clean, summary, event_line, extra_nums):
         parts.append(f"· 숫자: {' / '.join(extra_nums[:3])}")
-    parts += ["", SEC_NEWS_CONTEXT, f"· {hook}", "", SEC_NEWS_CHECK]
-    for a in actions[:1]:
+    parts += ["", SEC_NEWS_CONTEXT, f"· {hook}", ""]
+    chart_url: Optional[str] = None
+    if category == "코인" and importance >= LIVE_BTC_MIN_IMPORTANCE and LIVE_NEWS_BTC_CHART:
+        try:
+            chart_url, trade_lines = await coin_news_trade_desk(session, title_clean, summary, coin_type)
+        except Exception:
+            logging.debug("coin_news_trade_desk failed", exc_info=True)
+    check_label = "③ 자리 · 흐름" if trade_lines else SEC_NEWS_CHECK
+    parts.append(check_label)
+    for a in trade_lines if trade_lines else actions[:1]:
         parts.append(f"· {a}")
     link_s = (link or "").strip()
     if link_s.startswith("http"):
@@ -5695,24 +5854,6 @@ async def build_live_news_message(
         parts.append(src_line)
     if rel:
         parts.append(f"관련: {rel}")
-
-    chart_url: Optional[str] = None
-    if category == "코인" and importance >= LIVE_BTC_MIN_IMPORTANCE and LIVE_NEWS_BTC_CHART:
-        try:
-            chart_url, mkt_line = await btc_news_market_bundle(session)
-            if mkt_line:
-                parts += ["", "📊 OKX · BTC", f"· {mkt_line}"]
-        except Exception:
-            logging.debug("btc_news_market_bundle failed", exc_info=True)
-    elif category == "코인" and importance >= LIVE_BTC_MIN_IMPORTANCE and should_attach_btc_price(coin_type, title_clean, summary):
-        try:
-            btc = await get_market_ticker(session, "BTCUSDT")
-            if btc:
-                btc_price = float(btc["lastPrice"])
-                btc_pct = float(btc["priceChangePercent"])
-                parts.append(f"· BTC {btc_price:,.0f} ({fmt_pct(btc_pct)})")
-        except Exception:
-            pass
 
     parts += ["", LIVE_NEWS_CARD_DISCLAIMER]
     msg = "\n".join(parts)
