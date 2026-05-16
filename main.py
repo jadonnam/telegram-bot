@@ -1085,6 +1085,67 @@ async def get_okx_btc_candles(session: aiohttp.ClientSession, bar: str = "5m", l
     return candles
 
 
+def build_okx_btc_chart_url(candles: list[tuple[int, float]], *, title: str = "BTC · OKX 5m") -> str:
+    from urllib.parse import quote
+
+    if len(candles) < 8:
+        return ""
+    values = [round(x[1], 1) for x in candles[-30:]]
+    chart = {
+        "type": "line",
+        "data": {
+            "labels": [str(i + 1) for i in range(len(values))],
+            "datasets": [{"label": "BTC", "data": values, "fill": False, "borderColor": "#f7931a", "tension": 0.2}],
+        },
+        "options": {
+            "plugins": {"legend": {"display": False}, "title": {"display": True, "text": title}},
+            "scales": {"x": {"display": False}},
+        },
+    }
+    return "https://quickchart.io/chart?width=900&height=480&c=" + quote(json.dumps(chart, ensure_ascii=False))
+
+
+async def btc_news_market_bundle(session: aiohttp.ClientSession) -> Tuple[Optional[str], str]:
+    """코인 뉴스 카드용 OKX 5m 차트 URL + 한 줄 시세·펀딩·OI·흐름."""
+    candles = await get_okx_btc_candles(session, bar="5m", limit=48)
+    chart_url = build_okx_btc_chart_url(candles) or None
+    bits: list[str] = []
+    try:
+        ticker = await get_market_ticker(session, "BTCUSDT")
+        if ticker:
+            bits.append(f"BTC {float(ticker['lastPrice']):,.0f} ({fmt_pct(float(ticker['priceChangePercent']))})")
+    except Exception:
+        pass
+    try:
+        fr = await get_funding_rate(session, "BTCUSDT")
+        if fr is not None:
+            bits.append(f"펀딩 {fr * 100:+.3f}%")
+    except Exception:
+        pass
+    try:
+        oi = await get_open_interest(session, "BTCUSDT")
+        oi_s = fmt_oi_compact("OI", oi).strip()
+        if oi_s:
+            bits.append(oi_s)
+    except Exception:
+        pass
+    if len(candles) >= 12:
+        p0, p1 = candles[-24][1], candles[-1][1]
+        if p0:
+            move = (p1 - p0) / p0 * 100.0
+            bits.append(f"최근 2h {fmt_pct(move)}")
+            if abs(move) < 0.35:
+                bits.append("흐름 박스")
+            elif move < 0:
+                bits.append("흐름 약세")
+            else:
+                bits.append("흐름 강세")
+    line = " · ".join(bits)
+    if line:
+        line += "\n📈 OKX BTCUSDT · TradingView에서도 동일 심볼로 확인 가능"
+    return chart_url, line
+
+
 def source_name_from_link(link: str) -> str:
     lowered = (link or "").lower()
     if "coindesk" in lowered:
@@ -1743,10 +1804,9 @@ SEC_DESK_TONE = "④ 톤 · 메이저 3종"
 US_CLOSE_DESK_RISK = "③ 리스크 · F&G·김치·펀딩·OI"
 US_CLOSE_DESK_OPS = "④ 운영 메모"
 US_CLOSE_DESK_TONE = "⑤ 톤 · 메이저 3종"
-SEC_NEWS_FACT = "① 팩트"
-SEC_NEWS_CONTEXT = "② 맥락 · 왜 읽는지"
-SEC_NEWS_CHECK = "③ 체크 · 차트·수급·거시"
-SEC_NUM_BLOCK = "· ━ 인용 수치"
+SEC_NEWS_FACT = "① 헤드"
+SEC_NEWS_CONTEXT = "② 해석"
+SEC_NEWS_CHECK = "③ 볼 것"
 
 
 def desk_voice_line(now: datetime, title_seed: str = "") -> str:
@@ -2536,8 +2596,9 @@ LIVE_NIGHT_NEWS_MIN_INTERVAL = timedelta(minutes=env_int("LIVE_NEWS_NIGHT_INTERV
 LIVE_NEWS_POLL_SECONDS = env_int("LIVE_NEWS_POLL_SECONDS", 120, min_value=30, max_value=900)
 LIVE_NEWS_FEED_HEAD = env_int("LIVE_NEWS_FEED_HEAD", 18, min_value=5, max_value=40)
 LIVE_NEWS_MIN_IMPORTANCE_SEND = env_int("LIVE_NEWS_MIN_IMPORTANCE_SEND", 7, min_value=5, max_value=10)
-LIVE_NEWS_DESK_VOICE_LINE = env_bool("LIVE_NEWS_DESK_VOICE_LINE", True)
-LIVE_ROOM_HOST_LINE = env_bool("LIVE_ROOM_HOST_LINE", True)
+LIVE_NEWS_DESK_VOICE_LINE = env_bool("LIVE_NEWS_DESK_VOICE_LINE", False)
+LIVE_ROOM_HOST_LINE = env_bool("LIVE_ROOM_HOST_LINE", False)
+LIVE_NEWS_BTC_CHART = env_bool("LIVE_NEWS_BTC_CHART", True)
 LIVE_NEWS_COMPACT_NUMERIC_BLOCK = env_bool("LIVE_NEWS_COMPACT_NUMERIC_BLOCK", True)
 LIVE_NEWS_CARD_DISCLAIMER = "※ 정리용 · 투자 권유 아님 · 레버·청산·슬리피지·거래소·규제 리스크 전제."
 LIVE_NEWS_NIGHT_COIN_MIN = env_int("LIVE_NEWS_NIGHT_COIN_MIN", 12, min_value=8, max_value=24)
@@ -3032,9 +3093,53 @@ def recap_title_hash(title: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+def is_stale_spot_etf_rehash(title: str, summary: str) -> bool:
+    """현물 ETF 승인 당시 리캡·낚시 제목(이미 알려진 이슈) 필터."""
+    t = f"{title} {summary}".lower()
+    rehash = (
+        "etf 승인",
+        "bitcoin etf",
+        "비트코인 etf",
+        "spot etf",
+        "spot bitcoin",
+        "환호하는",
+        "그 이유",
+        "의미는",
+        "why it matters",
+        "what it means",
+        "celebrat",
+    )
+    if not any(k in t for k in rehash):
+        return False
+    fresh = (
+        "유입",
+        "유출",
+        "inflow",
+        "outflow",
+        "billion",
+        "million",
+        "억",
+        "조",
+        "record",
+        "어제",
+        "today",
+        "일일",
+        "daily",
+        "sec filing",
+        "공시",
+        "순매수",
+        "net flow",
+    )
+    return not any(k in t for k in fresh)
+
+
 def coin_news_block_reason(title: str, summary: str) -> str:
     text_value = f"{title} {summary}".lower()
     raw_h = f"{title} {summary}"
+    if is_stale_spot_etf_rehash(title, summary):
+        return "coin_stale_etf_rehash"
+    if re.search(r"(그 이유와|의미는\s*\?|why it matters|what it means)", raw_h, re.I):
+        return "coin_clickbait_question"
     if "solana나의" in raw_h:
         return "coin_broken_translation"
     if "what happened in crypto today" in text_value or "what-happened-in-crypto" in text_value:
@@ -5315,10 +5420,12 @@ def live_news_hub_watch_line(event_type: str, category: str, title: str, summary
         return "지정학·에너지: 유가·달러·지수가 같은 날 겹치는지만."
     if category == "코인":
         if any(k in t for k in ("clarity", "클래리티", "congress", "의회", "법안")):
-            return "규제·입법은 심리(펀딩·SNS)가 먼저, ETF·현물 수급은 며칠 늦게 따라오는 경우가 많음."
+            return "법안·규제 뉴스는 가격보다 펀딩·SNS 반응이 먼저 나오는 경우가 많습니다."
         if event_type in ("etf", "crypto_etf") or "etf" in t:
-            return "ETF·규제: 순유입·보관 코인·선물 펀딩 괴리가 현물보다 빠른 경우가 많음."
-        return "코인: BTC 방향·펀딩·OI·거래대금을 한 묶음으로."
+            return "헤드라인보다 어제 ETF 유입·오늘 펀딩이 맞는지가 먼저입니다."
+        if any(k in t for k in ("eth", "ethereum", "이더")):
+            return "ETH 이슈도 BTC·펀딩 방향이 같이 가는지 보면 됩니다."
+        return "가격·거래대금·펀딩이 같은 쪽인지만 보면 됩니다."
     if "discord" in t or "디스코드" in t:
         return "커뮤니티 규정 이슈는 단기 심리·노이즈 비중이 큼. 체결·펀딩·선물 스큐로만 검증."
     if "blind" in t or "블라인드" in t or "서명" in t or "signature" in t:
@@ -5340,25 +5447,11 @@ def live_news_action_bullets(event_type: str, category: str, title: str, summary
     out: list[str] = []
     if category == "코인":
         etf_hit = "etf" in t or "sec" in t or "승인" in t or "거절" in t
+        if event_type == "security" or any(k in t for k in ("hack", "exploit", "해킹", "출금", "동결")):
+            return ["거래소 공지·출금·USDT 페그만 먼저 확인."]
         if etf_hit:
-            out.append("차트·ETF: 이벤트 전후 15~60m 거래대금·윅 + 전일 순유입·NAV 괴리·펀딩 동시.")
-        else:
-            out.append("차트: 이벤트 전후 15~60m 거래대금·윅·스프레드.")
-        if not etf_hit:
-            if event_type == "security" or any(k in t for k in ("hack", "exploit", "해킹", "출금", "동결")):
-                out.append("거래소: 공지·출금 지연·스테이블 페그.")
-            elif "discord" in t or "디스코드" in t or "ban" in t:
-                out.append("커뮤니티: 체결·펀딩·대형 호가 소멸만.")
-            elif any(k in t for k in ("whale", "on-chain", "onchain", "온체인")) or "고래" in raw:
-                out.append("온체인·고래: 대형 이동·거래소 입금이 단기 가격보다 앞설 때가 있음.")
-            elif any(k in t for k in ("airdrop", "meme", "tvl", "defi", "staking", "layer 2", "arbitrum", "optimism")) or any(
-                k in raw for k in ("에어드랍", "밈코인", "스테이킹", "레이어2")
-            ):
-                out.append("알트·이슈: 유동성·캐리·베이스(BTC) 방향을 같이 보는 게 안전한 경우가 많음.")
-            elif any(k in t for k in ("volume", "volumes", "turnover")) or "거래대금" in raw or "거래량" in raw:
-                out.append("수급: 거래대금·깊이가 뉴스 방향과 같은 쪽으로 붙는지.")
-            else:
-                out.append("체결·선물: 15~60m 거래대금·윅 + BTC 펀딩·OI 쏠림 동시.")
+            return ["전일 ETF 유입 · 오늘 펀딩 · 15~60분 거래대금을 같이 보면 됩니다."]
+        return ["15~60분 봉에서 거래량·꼬리(윅)·펀딩 쏠림만 확인."]
     elif category == "세계":
         if _blob_is_geopolitics_mideast(raw, t):
             out.append("지정학: 유가·DXY·10Y·해운·VIX가 같은 날 교차하는지만.")
@@ -5439,6 +5532,10 @@ def extract_article_numerical_facts(title: str, summary: str, body: str = "", *,
         s = re.sub(r"[,;:\s·]+$", "", s).strip()
         if len(s) < 3 or len(s) > 92:
             return
+        if re.fullmatch(r"\$\s*[\d,]+(?:\.\d+)?", s):
+            return
+        if re.fullmatch(r"\d+(?:\.\d+)?\s*%", s):
+            return
         key = re.sub(r"\s+", "", s).lower()
         for ex in seen:
             if key == ex or (len(key) > 10 and (key in ex or ex in key)):
@@ -5491,7 +5588,7 @@ async def build_live_news_message(
     summary: str,
     source: str,
     link: str = "",
-) -> str:
+) -> Tuple[str, Optional[str]]:
     title_clean = strip_news_source_tail(title or "")
     title_ko = await ensure_korean_text(session, polish_korean_news_text(html_clean(title_clean, 200)))
 
@@ -5548,11 +5645,12 @@ async def build_live_news_message(
     max_fl = 8 if explanatory else 5
     fc = 280 if explanatory else 210
     fact_lines = dedupe_fact_lines(split_body_fact_lines(body_for_facts, max_fl, fc))
-    if len(fact_lines) < 2 and category == "코인":
-        brief = coin_news_brief(coin_type, title_clean, summary)
+    desk_ctx = ""
+    if category == "코인":
         ctx_merge = " ".join(fact_lines + [event_line, title_ko or ""])
+        brief = coin_news_brief(coin_type, title_clean, summary)
         if brief and not _coin_brief_redundant(brief, ctx_merge):
-            fact_lines.append(brief)
+            desk_ctx = brief
     fact_lines = dedupe_fact_lines(fact_lines)
 
     prefix_lines: list[str] = []
@@ -5565,6 +5663,8 @@ async def build_live_news_message(
     bullet_cap = 4 if explanatory else 3
     bullets = live_news_hub_bullets(event_line, fact_lines, title_ko, prefix=prefix_lines or None, max_total=bullet_cap)
     hook = live_news_hub_watch_line(event_type, category, title_clean, summary)
+    if desk_ctx and category == "코인":
+        hook = desk_ctx
     actions = live_news_action_bullets(event_type, category, title_clean, summary)
 
     headline = html_clean(title_ko, 240).strip()
@@ -5574,26 +5674,19 @@ async def build_live_news_message(
         f"〔{importance}/10〕",
         "",
     ]
-    opener = live_news_opener_line(now, title_clean or title)
-    if opener:
-        parts.append(opener)
-        parts.append("")
     parts.append(SEC_NEWS_FACT)
     for b in bullets:
         parts.append(f"· {b}")
     merge_ctx = list(bullets) + list(fact_lines)
     extra_nums = [
         x
-        for x in extract_article_numerical_facts(title_clean, summary, body_for_facts, max_items=6)
+        for x in extract_article_numerical_facts(title_clean, summary, body_for_facts, max_items=4)
         if not _fact_line_redundant(x, merge_ctx)
     ]
     if extra_nums and not _live_news_numeric_block_is_redundant(category, title_clean, summary, event_line, extra_nums):
-        parts.append(SEC_NUM_BLOCK)
-        for x in extra_nums:
-            parts.append(f"· {x}")
-            merge_ctx.append(x)
+        parts.append(f"· 숫자: {' / '.join(extra_nums[:3])}")
     parts += ["", SEC_NEWS_CONTEXT, f"· {hook}", "", SEC_NEWS_CHECK]
-    for a in actions:
+    for a in actions[:1]:
         parts.append(f"· {a}")
     link_s = (link or "").strip()
     if link_s.startswith("http"):
@@ -5603,19 +5696,27 @@ async def build_live_news_message(
     if rel:
         parts.append(f"관련: {rel}")
 
-    if category == "코인" and importance >= LIVE_BTC_MIN_IMPORTANCE and should_attach_btc_price(coin_type, title_clean, summary):
+    chart_url: Optional[str] = None
+    if category == "코인" and importance >= LIVE_BTC_MIN_IMPORTANCE and LIVE_NEWS_BTC_CHART:
+        try:
+            chart_url, mkt_line = await btc_news_market_bundle(session)
+            if mkt_line:
+                parts += ["", "📊 OKX · BTC", f"· {mkt_line}"]
+        except Exception:
+            logging.debug("btc_news_market_bundle failed", exc_info=True)
+    elif category == "코인" and importance >= LIVE_BTC_MIN_IMPORTANCE and should_attach_btc_price(coin_type, title_clean, summary):
         try:
             btc = await get_market_ticker(session, "BTCUSDT")
             if btc:
                 btc_price = float(btc["lastPrice"])
                 btc_pct = float(btc["priceChangePercent"])
-                parts.append(f"지금 BTC {btc_price:,.0f} ({fmt_pct(btc_pct)})")
+                parts.append(f"· BTC {btc_price:,.0f} ({fmt_pct(btc_pct)})")
         except Exception:
             pass
 
     parts += ["", LIVE_NEWS_CARD_DISCLAIMER]
     msg = "\n".join(parts)
-    return compact_message(msg, LIVE_MESSAGE_SOFT_LIMIT)
+    return compact_message(msg, LIVE_MESSAGE_SOFT_LIMIT), chart_url
 
 
 async def send_news_card(bot: Bot, text: str, image_url: Optional[str] = None, use_s_grade_photo: bool = False) -> None:
@@ -6003,7 +6104,7 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                         await safe_send(bot, tape_msg, disable_preview=False)
                     else:
                         image_url = await resolve_article_image_url(session, entry, source, raw_link)
-                        msg = await build_live_news_message(
+                        msg, btc_chart_url = await build_live_news_message(
                             session, cand_emoji, cand_category, raw_title, raw_summary, source, raw_link
                         )
                         if not msg:
@@ -6014,7 +6115,9 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                         want_photo = live_news_should_send_photo(
                             grade, importance, raw_title, raw_summary, has_article_image=bool(image_url)
                         )
-                        await send_news_card(bot, msg, image_url=image_url, use_s_grade_photo=want_photo)
+                        photo_url = btc_chart_url or image_url
+                        use_photo = bool(btc_chart_url) or want_photo
+                        await send_news_card(bot, msg, image_url=photo_url, use_s_grade_photo=use_photo)
                     if cand_category == "코인":
                         state.coin_topic_last_sent[coin_topic_key(raw_title, raw_summary)] = now
                         state.coin_live_daily_count += 1
