@@ -1130,6 +1130,14 @@ _chart_img_lock = asyncio.Lock()
 _chart_img_last_call_mono = 0.0
 
 
+def live_news_chart_source() -> str:
+    """okx=워터마크 없는 OKX 15m 캔들(기본) · tradingview=chart-img TV 스냅(BASIC은 CHART-IMG 워터마크)."""
+    raw = (os.getenv("LIVE_NEWS_CHART_SOURCE") or "okx").strip().lower()
+    if raw in ("tv", "tradingview", "chart-img", "chartimg"):
+        return "tradingview"
+    return "okx"
+
+
 def chart_img_api_key() -> str:
     return (os.getenv("CHART_IMG_API_KEY") or os.getenv("TRADINGVIEW_CHART_API_KEY") or "").strip()
 
@@ -1324,7 +1332,7 @@ def build_trade_desk_lines(
     phi = _fmt_trade_price(symbol, hi)
     pmid = _fmt_trade_price(symbol, mid)
 
-    lines = [f"추세(15m·TV {tag}): {trend} · 박스 {plo}~{phi}"]
+    lines = [f"추세(15m·{tag}): {trend} · 박스 {plo}~{phi}"]
     span = hi - lo
     pos = (last - lo) / span if span > 0 else 0.5
 
@@ -1368,15 +1376,37 @@ def build_okx_candlestick_chart_url(
         )
     chart: dict = {
         "type": "candlestick",
-        "data": {"datasets": [{"label": tag, "data": data}]},
+        "data": {
+            "datasets": [
+                {
+                    "label": tag,
+                    "data": data,
+                    "color": {"up": "#26a69a", "down": "#ef5350", "unchanged": "#999999"},
+                }
+            ]
+        },
         "options": {
+            "backgroundColor": "#131722",
             "plugins": {
-                "title": {"display": True, "text": f"{tag} · OKX 15m"},
+                "title": {
+                    "display": True,
+                    "text": f"{tag}/USDT · OKX 15m",
+                    "color": "#d1d4dc",
+                    "font": {"size": 14},
+                },
                 "legend": {"display": False},
             },
             "scales": {
-                "x": {"display": True, "ticks": {"maxTicksLimit": 6}},
-                "y": {"position": "right"},
+                "x": {
+                    "display": True,
+                    "ticks": {"maxTicksLimit": 6, "color": "#787b86"},
+                    "grid": {"color": "#2a2e39"},
+                },
+                "y": {
+                    "position": "right",
+                    "ticks": {"color": "#787b86"},
+                    "grid": {"color": "#2a2e39"},
+                },
             },
         },
     }
@@ -1417,7 +1447,7 @@ async def coin_news_trade_desk(
     state: Optional[State] = None,
     importance: int = 7,
 ) -> Tuple[Optional[str], list[str]]:
-    """기사 종목 TradingView 15m 스냅샷 + OKX 데이터 기반 자리·흐름."""
+    """OKX 15m 캔들(기본·워터마크 없음) 또는 chart-img TV 스냅 + 자리·흐름."""
     symbol = primary_symbol_for_coin_news(title, summary, coin_type)
     candles = await get_okx_ohlc_candles(session, symbol, bar="15m", limit=64)
     if len(candles) < 16:
@@ -1429,8 +1459,14 @@ async def coin_news_trade_desk(
     lines = build_trade_desk_lines(symbol, candles, funding)
 
     chart_url: Optional[str] = None
-    use_tv = chart_img_api_key() and importance >= CHART_IMG_MIN_IMPORTANCE
-    if use_tv and (state is None or chart_img_quota_available(state)):
+    src = live_news_chart_source()
+    if src == "okx":
+        chart_url = build_okx_candlestick_chart_url(candles, symbol, support=lo, resist=hi) or None
+    elif (
+        chart_img_api_key()
+        and importance >= CHART_IMG_MIN_IMPORTANCE
+        and (state is None or chart_img_quota_available(state))
+    ):
         tv_symbol = tradingview_symbol_for_usdt(symbol)
         chart_url = await fetch_tradingview_chart_storage_url(
             session,
@@ -1440,7 +1476,9 @@ async def coin_news_trade_desk(
             support=lo,
             resist=hi,
         )
-    if not chart_url:
+        if not chart_url:
+            chart_url = build_okx_candlestick_chart_url(candles, symbol, support=lo, resist=hi) or None
+    else:
         chart_url = build_okx_candlestick_chart_url(candles, symbol, support=lo, resist=hi) or None
     return chart_url, lines
 
@@ -7021,20 +7059,20 @@ async def run_forever() -> None:
     if market_mode_lines:
         logging.info("Market mode:\n- %s", "\n- ".join(market_mode_lines))
 
-    if chart_img_api_key():
+    chart_src = live_news_chart_source()
+    if chart_src == "okx":
         logging.info(
-            "TradingView chart-img: key OK · daily=%s · rate=%.2fs · %dx%d · overlays≤%s · TV≥%s/10",
+            "코인 차트: OKX 15m 캔들(워터마크 없음). TV 스냅은 LIVE_NEWS_CHART_SOURCE=tradingview (chart-img PRO↑ 워터마크 제거)"
+        )
+    elif chart_img_api_key():
+        logging.info(
+            "코인 차트: TradingView(chart-img) · daily=%s · ≥%s/10 · BASIC 플랜은 CHART-IMG 워터마크 있음",
             CHART_IMG_DAILY_LIMIT,
-            CHART_IMG_MIN_INTERVAL_SEC,
-            CHART_IMG_WIDTH,
-            CHART_IMG_HEIGHT,
-            CHART_IMG_MAX_OVERLAY_PARAMS,
             CHART_IMG_MIN_IMPORTANCE,
         )
     else:
         logging.warning(
-            "TradingView chart: CHART_IMG_API_KEY 없음 — 코인 뉴스 차트는 QuickChart 대체 "
-            "(https://chart-img.com 무료 키 발급 후 Railway 환경변수 설정)"
+            "코인 차트: OKX 15m. TV 스냅은 CHART_IMG_API_KEY + LIVE_NEWS_CHART_SOURCE=tradingview"
         )
 
     flags = {
