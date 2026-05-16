@@ -1750,18 +1750,85 @@ SEC_NUM_BLOCK = "· ━ 인용 수치"
 
 
 def desk_voice_line(now: datetime, title_seed: str = "") -> str:
-    """짧은 데스크 한 줄(로테이션 · 기사마다 문구가 바뀌게)."""
+    """짧은 데스크 한 줄(로테이션 · 기기마다 문구가 바뀌게)."""
     lines = (
         "· 이슈만 짧게 정리했습니다.",
         "· 출처·링크 기준으로 팩트 위주로만 남겼습니다.",
         "· 숫자·맥락만 올립니다. 매매 권유는 없습니다.",
         "· 데스크에서 흐름만 점검한 카드입니다.",
-        "· 방송용 톤으로 한 장에 한 메시지: 중복·추측은 넣지 않았습니다.",
         "· 낚시성·과장 제목은 걸러서, 확인 가능한 팩트만 남겼습니다.",
-        "· 광고·리딩 없이 오늘 손대볼 축만 붙였습니다.",
     )
     h = hashlib.md5(f"{now.day}:{now.hour}:{title_seed}".encode("utf-8")).hexdigest()
     return lines[int(h, 16) % len(lines)]
+
+
+def room_host_line(now: datetime, seed: str, slot: str) -> str:
+    """방 운영자 톤 한 줄 — 인사·코멘트 로테이션."""
+    wd = now.weekday()
+    hour = now.hour
+    pool: Tuple[str, ...]
+    if slot == "macro":
+        pool = (
+            "· 데스크 켜둔 상태예요. 오늘은 자산끼리 방향이 갈리는지부터 볼게요.",
+            "· 맥박만 짧게 찍습니다. 추격보다 범위·체결 쪽이 안전해 보여요.",
+            "· BTC랑 유가·달러가 엇갈리면 잠깐 노이즈 구간일 수 있어요.",
+        )
+    elif slot == "level":
+        pool = (
+            "· 레벨 터치라서 짧게 알려드려요. 유지되는지만 먼저 보시면 됩니다.",
+            "· 숫자 한 줄 찍고 갑니다. 여기서 버티는지가 오늘 톤을 정해요.",
+            "· 데스크에서 레벨만 체크 중이에요. 큰 매매보다 확인용으로 보세요.",
+        )
+    elif slot == "digest":
+        if hour < 12:
+            pool = (
+                "· 좋은 아침이에요. 오늘 손대볼 축만 체크리스트로 묶었습니다.",
+                "· 장 열리기 전에 데스크만 켜둔 상태예요. 아래 순서대로만 훑어보시면 됩니다.",
+            )
+        else:
+            pool = (
+                "· 저녁 데스크입니다. 내일 장·코인 같이 볼 때 아래만 훑어보세요.",
+                "· 오늘도 고생 많으셨어요. 밤에는 추격보다 체크리스트만 드릴게요.",
+                "· 주말이면 더 짧게 갑니다. 큰 매매보다 레벨·수급만.",
+            )
+    else:
+        if wd >= 5:
+            pool = (
+                "· 주말 데스크예요. 헤드라인만 짧게 정리했습니다.",
+                "· 방 켜둔 상태입니다. 확인용으로만 보시면 됩니다.",
+                "· 토·일은 노이즈가 많아서, 출처 있는 팩트만 올립니다.",
+            )
+        elif hour < 10:
+            pool = (
+                "· 아침 데스크입니다. 밤새 나온 이슈만 짧게.",
+                "· 좋은 아침이에요. 오늘 첫 카드입니다.",
+            )
+        elif hour >= 20:
+            pool = (
+                "· 저녁 이슈라 짧게 올립니다.",
+                "· 데스크에서 방송 톤으로 한 장만 정리했어요.",
+                "· 밤장·뉴스 나올 때마다 이렇게 찍어드릴게요.",
+            )
+        else:
+            pool = (
+                "· 데스크에서 방송 톤으로 한 장만 정리했어요.",
+                "· 이슈 나오면 이렇게 짧게 찍어드릴게요.",
+                "· 광고·리딩 없이, 손대볼 축만 붙였습니다.",
+            )
+    h = hashlib.md5(f"{slot}:{now.date()}:{hour}:{seed}".encode("utf-8")).hexdigest()
+    return pool[int(h, 16) % len(pool)]
+
+
+def live_news_opener_line(now: datetime, title_seed: str) -> str:
+    """데스크 문구 vs 방장 톤 — 로테이션."""
+    if not LIVE_NEWS_DESK_VOICE_LINE and not LIVE_ROOM_HOST_LINE:
+        return ""
+    if LIVE_ROOM_HOST_LINE and LIVE_NEWS_DESK_VOICE_LINE:
+        pick_host = int(hashlib.md5(f"opener:{title_seed}:{now.hour}".encode()).hexdigest(), 16) % 5 != 0
+        return room_host_line(now, title_seed, "news") if pick_host else desk_voice_line(now, title_seed)
+    if LIVE_ROOM_HOST_LINE:
+        return room_host_line(now, title_seed, "news")
+    return desk_voice_line(now, title_seed)
 
 
 def room_line(subtitle: str, now: datetime) -> str:
@@ -2470,6 +2537,7 @@ LIVE_NEWS_POLL_SECONDS = env_int("LIVE_NEWS_POLL_SECONDS", 120, min_value=30, ma
 LIVE_NEWS_FEED_HEAD = env_int("LIVE_NEWS_FEED_HEAD", 18, min_value=5, max_value=40)
 LIVE_NEWS_MIN_IMPORTANCE_SEND = env_int("LIVE_NEWS_MIN_IMPORTANCE_SEND", 7, min_value=5, max_value=10)
 LIVE_NEWS_DESK_VOICE_LINE = env_bool("LIVE_NEWS_DESK_VOICE_LINE", True)
+LIVE_ROOM_HOST_LINE = env_bool("LIVE_ROOM_HOST_LINE", True)
 LIVE_NEWS_COMPACT_NUMERIC_BLOCK = env_bool("LIVE_NEWS_COMPACT_NUMERIC_BLOCK", True)
 LIVE_NEWS_CARD_DISCLAIMER = "※ 정리용 · 투자 권유 아님 · 레버·청산·슬리피지·거래소·규제 리스크 전제."
 LIVE_NEWS_NIGHT_COIN_MIN = env_int("LIVE_NEWS_NIGHT_COIN_MIN", 12, min_value=8, max_value=24)
@@ -3155,6 +3223,29 @@ def _blob_is_china_us_geopolitics(blob: str, blob_l: str) -> bool:
     ):
         return True
     return False
+
+
+def _blob_is_kr_semiconductor_risk(blob: str, blob_l: str) -> bool:
+    if not any(k in blob for k in ("반도체", "semiconductor", "hbm", "nvidia", "엔비디아", "sox")):
+        if not any(k in blob for k in ("삼성전자", "SK하이닉스", "하이닉스", "美 반도체", "미국 반도체")):
+            return False
+    return any(
+        k in blob or k in blob_l
+        for k in (
+            "급락",
+            "급등",
+            "crash",
+            "plunge",
+            "sell-off",
+            "selloff",
+            "월요일",
+            "검은",
+            "갭",
+            "gap",
+            "4%",
+            "5%",
+        )
+    )
 
 
 def _blob_is_kr_corporate_earnings(blob: str, blob_l: str) -> bool:
@@ -4085,8 +4176,15 @@ def news_event_type(title: str, summary: str, category: str) -> str:
         return "geopolitics"
     if any(k in t for k in ("hack", "hacked", "exploit", "breach", "해킹", "보안")):
         return "security"
-    if any(k in t for k in ("청산", "liquidation", "급락", "급등", "volatility")):
+    if any(k in t for k in ("청산", "liquidation")):
         return "liquidation"
+    if any(k in t for k in ("급락", "급등", "volatility")):
+        if category in ("한국", "미국") and any(
+            k in t for k in ("반도체", "semiconductor", "hbm", "코스피", "kospi", "나스닥", "nasdaq", "주가", "stock")
+        ):
+            return "semiconductor" if any(k in t for k in ("반도체", "semiconductor", "hbm", "삼성", "하이닉스", "nvidia")) else "general"
+        if category == "코인" or any(k in t for k in ("btc", "bitcoin", "비트코인", "crypto", "암호화")):
+            return "liquidation"
     if any(k in t for k in ("fomc", "cpi", "pce", "ppi", "fed", "연준", "금리", "파월")):
         return "rates"
     if any(k in t for k in ("hormuz", "iran", "israel", "oil", "wti", "brent", "호르무즈", "이란", "이스라엘", "유가", "원유")):
@@ -4167,6 +4265,18 @@ def strip_live_news_banned_phrases(text: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     s = re.sub(r"\s+\.", ".", s).strip()
     return s
+
+
+def sanitize_news_fact_line(s: str) -> str:
+    raw = (s or "").strip()
+    raw = re.sub(
+        r"Google\s*뉴스.*?(?:더보기|보기)\s*|헤드라인\s*및\s*의견\s*더보기|의견\s*더보기",
+        "",
+        raw,
+        flags=re.I,
+    )
+    raw = re.sub(r"\s+", " ", raw).strip(" -–—:·.")
+    return raw
 
 
 def why_important_lines(event_type: str, body_ko: str, category: str, title: str, summary: str) -> list[str]:
@@ -4378,7 +4488,7 @@ def split_body_fact_lines(body_ko: str, max_lines: int, max_chars: int) -> list[
     parts = re.split(r"(?<=[.!?。])\s+|\n+", raw)
     out: list[str] = []
     for p in parts:
-        p = p.strip()
+        p = sanitize_news_fact_line(p)
         if not p or any(b in p for b in LIVE_NEWS_BANNED_PHRASES):
             continue
         if len(p) > max_chars * 2:
@@ -4750,6 +4860,12 @@ def clean_news_body_for_message(title: str, summary: str, source: str = "", summ
             body = body.replace(str(s), "").strip()
 
     body = polish_korean_news_text(body)
+    body = re.sub(
+        r"Google\s*뉴스.*?(?:더보기|보기)\s*|헤드라인\s*및\s*의견\s*더보기|의견\s*더보기",
+        "",
+        body,
+        flags=re.I,
+    ).strip()
 
     if title_clean and body:
         body_no_space = re.sub(r"\s+", "", body)
@@ -4954,7 +5070,11 @@ def _coin_brief_redundant(brief: str, ctx: str) -> bool:
     """이미 팩트/헤드에 있는 말이면 코인 한 줄 브리핑은 생략."""
     b = (brief or "").lower()
     c = (ctx or "").lower()
-    if ("btc etf" in b or "온체인" in brief) and ("etf" in c and any(x in c for x in ("비트코인", "btc", "bitcoin"))):
+    if ("btc etf" in b or "온체인" in brief) and (
+        "etf" in c or "온체인" in c or any(x in c for x in ("비트코인", "btc", "bitcoin", "clarity", "클래리티", "santiment"))
+    ):
+        return True
+    if any(k in b for k in ("입법", "규제", "의회")) and any(k in c for k in ("clarity", "클래리티", "의회", "congress", "법안", "sec")):
         return True
     if "스테이블" in brief and "스테이블" in ctx:
         return True
@@ -4964,6 +5084,11 @@ def _coin_brief_redundant(brief: str, ctx: str) -> bool:
 
 
 def coin_news_brief(news_type: str, title: str, summary: str) -> str:
+    txt = f"{title} {summary}".lower()
+    if any(k in txt for k in ("clarity", "클래리티", "congress", "의회", "법안", "legislation")):
+        return "규제·입법 보도는 심리(펀딩·SNS)가 먼저, ETF·현물 수급은 며칠 늦게 따라오는 경우가 많아요."
+    if any(k in txt for k in ("santiment", "행복", "euphoria", "급증")):
+        return "온체인·SNS 심리 지표는 단기 과열 신호로 쓰고, 체결·펀딩으로만 검증하는 편이 안전해요."
     if news_type == "equity_etf_non_crypto":
         return "주식 ETF 뉴스는 반도체 지수랑 삼전·하이닉스가 같은 방향인지만 보면 돼요."
     if news_type == "eth_security":
@@ -5123,7 +5248,7 @@ def live_news_hub_bullets(
     seen_norm: list[str] = []
 
     def add_line(s: str) -> None:
-        raw = strip_live_news_banned_phrases((s or "").strip())
+        raw = sanitize_news_fact_line(strip_live_news_banned_phrases((s or "").strip()))
         raw = re.sub(r"\s+\.", ".", raw).strip()
         if len(raw) < 10:
             return
@@ -5137,15 +5262,29 @@ def live_news_hub_bullets(
         out.append(raw)
         seen_norm.append(norm)
 
+    title_base = html_clean(title_ko or "", 220).strip()
+    skip_event = False
+    if fact_lines and title_base:
+        if max(title_similarity(sanitize_news_fact_line(fl), title_base) for fl in fact_lines) >= 0.52:
+            skip_event = True
+        elif event_line and title_similarity(event_line, title_base) >= 0.72:
+            skip_event = True
+
     for s in prefix or []:
         if len(out) >= max_total:
             return out[:max_total]
         add_line(s)
-    add_line(event_line)
+    if not skip_event:
+        add_line(event_line)
     for fl in fact_lines:
         if len(out) >= max_total:
             break
-        add_line(fl)
+        fl_clean = sanitize_news_fact_line(fl)
+        if event_line and title_similarity(fl_clean, event_line) >= 0.58:
+            continue
+        if title_base and title_similarity(fl_clean, title_base) >= 0.88:
+            continue
+        add_line(fl_clean)
     if not out:
         add_line(html_clean(title_ko, 220).strip() or "뉴스 확인")
     return out[:max_total]
@@ -5154,34 +5293,44 @@ def live_news_hub_bullets(
 def live_news_hub_watch_line(event_type: str, category: str, title: str, summary: str) -> str:
     t = f"{title} {summary}".lower()
     raw = f"{title} {summary}"
+    if category == "한국":
+        if _blob_is_kr_semiconductor_risk(raw, t):
+            return "美 반도체 급락은 월요인 코스피 갭·외국인·삼성·하닉 선물 포지션부터 확인."
+        if _blob_is_kr_corporate_earnings(raw, t):
+            return "실적 라인: 가이던스·마진·환율이 헤드라인보다 먼저 움직이는 경우가 많음."
+        if any(k in raw for k in ("블룸버그", "Bloomberg", "시총", "잇슈 머니", "잇슈머니")):
+            return "국내장: 해외언급과 실제 수급(외국인·반도체) 온도차만 한 줄로."
+        return "한국장: 코스피·환율·외국인·반도체 대형주를 한 묶음으로."
+    if category == "미국":
+        if event_type in ("semiconductor", "capex", "semiconductor_etf", "ai_etf"):
+            return "미국 반도체·AI칩: 실적·캐파 가이던스가 단기 주가보다 길게 붙는 경우가 많음."
+        if event_type in ("rates", "oil", "fx"):
+            return "금리·유가·달러 라인. 나스닥·코인은 같은 날 베타만 짧게."
+        return "미국장: 나스닥·SOX·대형주 가이던스가 헤드라인보다 길게 가는 날이 많음."
+    if category == "세계":
+        if _blob_is_geopolitics_mideast(raw, t):
+            return "중동 헤드라인은 유가·운임이 지수보다 먼저 움직이는 경우가 많음."
+        if _blob_is_china_us_geopolitics(raw, t):
+            return "미중 동선: 관세·수출통제·환율이 같은 날 베타를 잡는 경우가 많음."
+        return "지정학·에너지: 유가·달러·지수가 같은 날 겹치는지만."
+    if category == "코인":
+        if any(k in t for k in ("clarity", "클래리티", "congress", "의회", "법안")):
+            return "규제·입법은 심리(펀딩·SNS)가 먼저, ETF·현물 수급은 며칠 늦게 따라오는 경우가 많음."
+        if event_type in ("etf", "crypto_etf") or "etf" in t:
+            return "ETF·규제: 순유입·보관 코인·선물 펀딩 괴리가 현물보다 빠른 경우가 많음."
+        return "코인: BTC 방향·펀딩·OI·거래대금을 한 묶음으로."
     if "discord" in t or "디스코드" in t:
         return "커뮤니티 규정 이슈는 단기 심리·노이즈 비중이 큼. 체결·펀딩·선물 스큐로만 검증."
     if "blind" in t or "블라인드" in t or "서명" in t or "signature" in t:
         return "지갑·보안 이슈: 거래소 공지·USDT 페그·출금 지연만 압축 확인."
     if "cpi" in t or "물가" in t:
         return "물가 이벤트: 금리 경로·달러·국채 수익률 → BTC 상관 순으로."
-    if category == "코인":
-        return "코인: BTC 방향·펀딩·OI·거래대금을 한 묶음으로 보면 됨."
-    if event_type in ("etf", "crypto_etf"):
-        return "ETF·규제: 순유입·보관 코인·선물 펀딩 괴리가 현물보다 빠른 경우가 많음."
     if event_type == "rates":
         return "금리: DXY·10Y 먼저. 코인은 NQ 선물과 단기 베타."
     if event_type == "security":
         return "거래소·지갑: 공지·출금 큐·스테이블 페그 이탈만."
     if event_type == "liquidation":
         return "청산: 레버 감소·OI 변화·알트-BTC 베타 순."
-    if category == "미국" and event_type in ("semiconductor", "capex", "semiconductor_etf", "ai_etf"):
-        return "미국 반도체·AI칩: 실적·캐파 가이던스가 단기 주가보다 길게 붙는 경우가 많음."
-    if category == "미국" and event_type in ("rates", "oil", "fx"):
-        return "금리·유가·달러 라인. 나스닥·코인은 같은 날 베타만 짧게."
-    if category == "세계" and _blob_is_geopolitics_mideast(raw, t):
-        return "중동 헤드라인은 유가·운임이 지수보다 먼저 움직이는 경우가 많음."
-    if category == "세계" and _blob_is_china_us_geopolitics(raw, t):
-        return "미중 동선: 관세·수출통제·환율이 같은 날 베타를 잡는 경우가 많음."
-    if category == "한국" and any(k in raw for k in ("블룸버그", "Bloomberg", "시총", "잇슈 머니", "잇슈머니")):
-        return "국내장: 해외언급과 실제 수급(외국인·반도체) 온도차만 한 줄로."
-    if category == "한국" and _blob_is_kr_corporate_earnings(raw, t):
-        return "실적 라인: 가이던스·마진·환율이 헤드라인보다 먼저 움직이는 경우가 많음."
     return "지수·환율·외국인 흐름을 한 줄로 압축."
 
 
@@ -5209,7 +5358,7 @@ def live_news_action_bullets(event_type: str, category: str, title: str, summary
             elif any(k in t for k in ("volume", "volumes", "turnover")) or "거래대금" in raw or "거래량" in raw:
                 out.append("수급: 거래대금·깊이가 뉴스 방향과 같은 쪽으로 붙는지.")
             else:
-                out.append("선물: BTC 펀딩·OI 한쪽 쏠림 시 변동성 팽창.")
+                out.append("체결·선물: 15~60m 거래대금·윅 + BTC 펀딩·OI 쏠림 동시.")
     elif category == "세계":
         if _blob_is_geopolitics_mideast(raw, t):
             out.append("지정학: 유가·DXY·10Y·해운·VIX가 같은 날 교차하는지만.")
@@ -5220,11 +5369,12 @@ def live_news_action_bullets(event_type: str, category: str, title: str, summary
             else:
                 out.append("지수: S&P·나스닥 선물 방향.")
     elif category == "한국":
-        out.append("증시: 코스피·환율·외국인 순매수.")
-        if _blob_is_kr_corporate_earnings(raw, t):
-            out.append("실적: 컨센서스 대비·가이던스·환율 민감도.")
+        if _blob_is_kr_semiconductor_risk(raw, t):
+            out.append("한국장: 코스피·환율·외국인 + NQ·SOX·삼성·하닉 갭·선물 동시.")
+        elif _blob_is_kr_corporate_earnings(raw, t):
+            out.append("증시·실적: 코스피·환율·외국인 + 컨센서스·가이던스·환율 민감도.")
         else:
-            out.append("수급: 기관·연기금·반도체 흐름.")
+            out.append("증시: 코스피·환율·외국인·기관·반도체 대형주.")
     elif category == "미국":
         out.append("미국장: 나스닥 선물·SOX·실적 캘린더를 한 줄로.")
         if event_type in ("rates", "oil", "fx"):
@@ -5412,7 +5562,8 @@ async def build_live_news_message(
         depth_txt = kr_equity_etf_depth_paragraph(ek_depth, title_ko, event_line, etf_facts)
         prefix_lines = [ln.strip() for ln in depth_txt.split("\n") if ln.strip()][:2]
 
-    bullets = live_news_hub_bullets(event_line, fact_lines, title_ko, prefix=prefix_lines or None, max_total=4)
+    bullet_cap = 4 if explanatory else 3
+    bullets = live_news_hub_bullets(event_line, fact_lines, title_ko, prefix=prefix_lines or None, max_total=bullet_cap)
     hook = live_news_hub_watch_line(event_type, category, title_clean, summary)
     actions = live_news_action_bullets(event_type, category, title_clean, summary)
 
@@ -5423,8 +5574,9 @@ async def build_live_news_message(
         f"〔{importance}/10〕",
         "",
     ]
-    if LIVE_NEWS_DESK_VOICE_LINE:
-        parts.append(desk_voice_line(now, title_clean or title))
+    opener = live_news_opener_line(now, title_clean or title)
+    if opener:
+        parts.append(opener)
         parts.append("")
     parts.append(SEC_NEWS_FACT)
     for b in bullets:
@@ -5546,12 +5698,24 @@ async def btc_key_level_monitor(bot: Bot, state: State) -> None:
                             direction = "회복" if side == "above" else "이탈"
                             icon = "🟢" if side == "above" else "🔴"
                             nk = now_kst()
+                            if side == "above":
+                                check = (
+                                    "· 15~60m 종가가 레벨 위에서 마감되는지\n"
+                                    "· 펀딩·OI가 한쪽으로 더 쏠리지 않는지"
+                                )
+                            else:
+                                check = (
+                                    "· 반등 시 레벨 재진입(회복) 여부\n"
+                                    "· 청산·거래대금이 이어지면 범위 하단만"
+                                )
+                            host = room_host_line(nk, f"btc{level}", "level") if LIVE_ROOM_HOST_LINE else ""
                             msg = (
                                 room_line(f"BTC 레벨 · {level:,.0f} · {direction}", nk)
+                                + (f"\n\n{host}" if host else "")
                                 + f"\n\n① 가격\n"
                                 f"· {icon} 현재 {price:,.0f} USDT ({fmt_pct(pct)})\n\n② 체크\n"
-                                "· 레벨 유지 여부 먼저\n\n"
-                                + ROOM_DISCLAIMER
+                                f"{check}\n\n"
+                                + LIVE_NEWS_CARD_DISCLAIMER
                             )
                             await safe_send(bot, msg, disable_preview=True)
                             state.btc_key_level_last[key] = {"side": side, "sent_at": now}
@@ -5868,6 +6032,50 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                 await asyncio.sleep(LIVE_NEWS_POLL_SECONDS)
 
 
+async def build_evening_checklist_message(session: aiohttp.ClientSession, now: datetime) -> str:
+    parts: list[str] = [room_line("데스크 체크리스트 · 장전", now)]
+    if LIVE_ROOM_HOST_LINE:
+        parts += ["", room_host_line(now, "digest", "digest")]
+    parts += ["", SEC_DESK_SNAP]
+    snap_lines: list[str] = []
+    try:
+        btc = await get_market_ticker(session, "BTCUSDT")
+        if btc:
+            p = float(btc["lastPrice"])
+            snap_lines.append(f"· BTC {p:,.0f} ({fmt_pct(float(btc['priceChangePercent']))})")
+    except Exception:
+        pass
+    for sym, label in (("ETHUSDT", "ETH"), ("SOLUSDT", "SOL")):
+        try:
+            t = await get_market_ticker(session, sym)
+            if t:
+                snap_lines.append(f"· {label} {float(t['lastPrice']):,.0f} ({fmt_pct(float(t['priceChangePercent']))})")
+        except Exception:
+            pass
+    if snap_lines:
+        parts.extend(snap_lines)
+    else:
+        parts.append("· BTC·ETH·SOL: 구간·24h 변동·거래대금")
+    parts.append("· 선물: 펀딩·OI·청산 클러스터")
+    parts += [
+        "",
+        "② 이벤트·뉴스",
+        "· ETF 순유입·규제 캘린더·온체인 대형 이동",
+        "",
+        "③ 미국·매크로",
+        "· NQ·SOX·금리·DXY·유가",
+        "",
+        "④ 한국",
+        "· 반도체·외국인·원달러 (월요 갭·선물 포지션)",
+        "",
+        "⑤ 리스크",
+        "· 포지션 사이즈·레버·슬리피지·거래소 공지",
+        "",
+        LIVE_NEWS_CARD_DISCLAIMER,
+    ]
+    return compact_message("\n".join(parts), LIVE_MESSAGE_SOFT_LIMIT)
+
+
 async def daily_digest_scheduler(bot: Bot, state: State) -> None:
     while True:
         try:
@@ -5875,23 +6083,10 @@ async def daily_digest_scheduler(bot: Bot, state: State) -> None:
             key_evening = f"day_digest:{now.date()}"
             # 아침 7시는 overnight_recap_scheduler(7:10)와 겹치므로 제거. 저녁 한 번만.
             if now.hour == 18 and now.minute < 5 and state.digest_sent_dates.get(key_evening) != now.date():
-                msg = (
-                    room_line("데스크 체크리스트 · 장전", now)
-                    + f"\n\n{SEC_DESK_SNAP}"
-                    + "\n· BTC·ETH·SOL: 구간·24h 변동·거래대금"
-                    + "\n· 선물: 펀딩·OI·청산 클러스터"
-                    + "\n\n② 이벤트·뉴스"
-                    + "\n· ETF 순유입·규제 캘린더·온체인 대형 이동"
-                    + "\n\n③ 미국·매크로"
-                    + "\n· NQ·SOX·금리·DXY·유가"
-                    + "\n\n④ 한국"
-                    + "\n· 반도체·외국인·원달러"
-                    + "\n\n⑤ 리스크 관리"
-                    + "\n· 포지션 사이즈·레버·슬리피지·거래소 공지"
-                    + f"\n\n{ROOM_DISCLAIMER}"
-                )
                 try:
-                    await send_message(bot, compact_message(msg, LIVE_MESSAGE_SOFT_LIMIT), disable_preview=True)
+                    async with aiohttp.ClientSession() as session:
+                        msg = await build_evening_checklist_message(session, now)
+                    await send_message(bot, msg, disable_preview=True)
                     state.digest_sent_dates[key_evening] = now.date()
                 except Exception:
                     logging.exception("daily_digest 전송 실패")
@@ -5936,23 +6131,41 @@ async def macro_pulse_monitor(bot: Bot, state: State) -> None:
                 if max_delta < MACRO_PULSE_MIN_MOVE_PCT or not cooldown_ok:
                     continue
                 nk = now_kst()
-                parts = [room_line("매크로 맥박 · 코인 베타", nk), "", "① 당일 변동률(스냅)"]
+                parts = [room_line("매크로 맥박 · 코인 베타", nk)]
+                if LIVE_ROOM_HOST_LINE:
+                    parts += ["", room_host_line(nk, "macro", "macro")]
+                parts += ["", "① 당일 변동률(스냅)"]
                 order = ("BTC", "NQ", "WTI", "DXY")
                 for label in order:
-                    if label in cur:
-                        parts.append(f"· {label} {fmt_pct(cur[label])}")
+                    if label not in cur:
+                        continue
+                    extra = ""
+                    if label in baseline:
+                        d = cur[label] - baseline[label]
+                        if abs(d) >= 0.08:
+                            extra = f" · 직전대비 {'+' if d > 0 else ''}{d:.1f}%p"
+                    parts.append(f"· {label} {fmt_pct(cur[label])}{extra}")
                 for label in sorted(cur):
                     if label not in order:
                         parts.append(f"· {label} {fmt_pct(cur[label])}")
+                btc_v = cur.get("BTC")
+                wti_v = cur.get("WTI")
+                nq_v = cur.get("NQ")
+                if btc_v is not None and wti_v is not None and btc_v * wti_v < 0 and abs(btc_v) >= 0.4 and abs(wti_v) >= 0.4:
+                    corr_line = "· BTC·유가가 반대로 움직이면 리스크오프·인플레 우려가 섞인 날일 수 있음."
+                elif btc_v is not None and nq_v is not None and btc_v * nq_v > 0 and abs(btc_v) >= 0.5:
+                    corr_line = "· BTC·NQ가 같이 가면 베타 확대 구간 — 펀딩·OI 쏠림만 추가 확인."
+                else:
+                    corr_line = "· BTC·NQ·DXY·유가가 크게 엇갈리면 상관 붕괴·범위 구간일 수 있음."
                 parts += [
                     "",
                     "② 체크 · 상관·유동성",
-                    "· BTC·NQ·DXY·유가가 같은 날 크게 엇갈리면 상관 붕괴·범위 구간일 수 있음.",
+                    corr_line,
                     "",
                     "③ 운영 메모",
                     "· 다자산 동시 출렁임: 추격 금지, 범위·체결만.",
                     "",
-                    ROOM_DISCLAIMER,
+                    LIVE_NEWS_CARD_DISCLAIMER,
                 ]
                 await safe_send(bot, compact_message("\n".join(parts), LIVE_MESSAGE_SOFT_LIMIT), disable_preview=True)
                 state.macro_pulse_last_sent = now
