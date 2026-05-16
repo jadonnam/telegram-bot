@@ -260,6 +260,9 @@ class State:
         self.macro_pulse_last_pcts: Optional[Dict[str, float]] = None
         self.macro_pulse_last_sent: Optional[datetime] = None
 
+        self.chart_img_daily_date: Optional[date] = None
+        self.chart_img_daily_count = 0
+
     def is_on_cooldown(self, signal_key: str, now: datetime) -> bool:
         expires_at = self.cooldowns.get(signal_key)
         return bool(expires_at and expires_at > now)
@@ -1116,6 +1119,15 @@ TRADINGVIEW_OKX_SYMBOLS = {
 }
 
 CHART_IMG_API_BASE = "https://api.chart-img.com"
+# chart-img.com 무료(개인) 플랜: 일 50 · 1/초 · studies+drawings≤3 · 800×600
+CHART_IMG_DAILY_LIMIT = env_int("CHART_IMG_DAILY_LIMIT", 50, min_value=1, max_value=500)
+CHART_IMG_MIN_INTERVAL_SEC = env_float("CHART_IMG_MIN_INTERVAL_SEC", 1.05, min_value=1.0, max_value=10.0)
+CHART_IMG_WIDTH = env_int("CHART_IMG_WIDTH", 800, min_value=400, max_value=800)
+CHART_IMG_HEIGHT = env_int("CHART_IMG_HEIGHT", 600, min_value=300, max_value=600)
+CHART_IMG_MAX_OVERLAY_PARAMS = env_int("CHART_IMG_MAX_OVERLAY_PARAMS", 3, min_value=1, max_value=3)
+CHART_IMG_MIN_IMPORTANCE = env_int("CHART_IMG_MIN_IMPORTANCE", 8, min_value=5, max_value=10)
+_chart_img_lock = asyncio.Lock()
+_chart_img_last_call_mono = 0.0
 
 
 def chart_img_api_key() -> str:
@@ -1126,31 +1138,28 @@ def tradingview_symbol_for_usdt(symbol: str) -> str:
     return TRADINGVIEW_OKX_SYMBOLS.get(symbol, f"OKX:{symbol}")
 
 
-async def fetch_tradingview_chart_storage_url(
-    session: aiohttp.ClientSession,
-    tv_symbol: str,
-    *,
-    interval: str = "15m",
-    support: Optional[float] = None,
-    resist: Optional[float] = None,
-) -> Optional[str]:
-    """chart-img.com → TradingView advanced chart 공개 스냅샷 URL."""
-    api_key = chart_img_api_key()
-    if not api_key:
-        return None
+def chart_img_reset_daily(state: State) -> None:
+    today = now_kst().date()
+    if state.chart_img_daily_date != today:
+        state.chart_img_daily_date = today
+        state.chart_img_daily_count = 0
 
-    body: dict = {
-        "symbol": tv_symbol,
-        "interval": interval,
-        "width": 920,
-        "height": 520,
-        "theme": "dark",
-        "style": "candle",
-        "timezone": "Asia/Seoul",
-        "format": "png",
-        "range": "1D",
-        "studies": [{"name": "Volume", "forceOverlay": True}],
-    }
+
+def chart_img_quota_available(state: State) -> bool:
+    chart_img_reset_daily(state)
+    return state.chart_img_daily_count < CHART_IMG_DAILY_LIMIT
+
+
+def chart_img_record_use(state: State) -> None:
+    chart_img_reset_daily(state)
+    state.chart_img_daily_count += 1
+
+
+def build_chart_img_drawings(
+    support: Optional[float],
+    resist: Optional[float],
+) -> list[dict]:
+    """무료 플랜: studies+drawings 합계 최대 3 — 지지·저항 가로선만(Volume 미사용)."""
     drawings: list[dict] = []
     if support and support > 0:
         drawings.append(
@@ -1160,7 +1169,7 @@ async def fetch_tradingview_chart_storage_url(
                 "override": {"lineWidth": 1, "lineColor": "rgb(67,160,71)"},
             }
         )
-    if resist and resist > 0:
+    if resist and resist > 0 and len(drawings) < CHART_IMG_MAX_OVERLAY_PARAMS:
         drawings.append(
             {
                 "name": "Horizontal Line",
@@ -1168,41 +1177,74 @@ async def fetch_tradingview_chart_storage_url(
                 "override": {"lineWidth": 1, "lineColor": "rgb(229,57,53)"},
             }
         )
+    return drawings[:CHART_IMG_MAX_OVERLAY_PARAMS]
+
+
+async def fetch_tradingview_chart_storage_url(
+    session: aiohttp.ClientSession,
+    tv_symbol: str,
+    *,
+    state: Optional[State] = None,
+    interval: str = "15m",
+    support: Optional[float] = None,
+    resist: Optional[float] = None,
+) -> Optional[str]:
+    """chart-img.com → TradingView advanced chart 공개 스냅샷 URL (무료 플랜 한도 준수)."""
+    api_key = chart_img_api_key()
+    if not api_key:
+        return None
+    if state is not None and not chart_img_quota_available(state):
+        logging.info(
+            "chart-img 일일 한도 도달 %s/%s — QuickChart 대체",
+            state.chart_img_daily_count,
+            CHART_IMG_DAILY_LIMIT,
+        )
+        return None
+
+    drawings = build_chart_img_drawings(support, resist)
+    body: dict = {
+        "symbol": tv_symbol,
+        "interval": interval,
+        "width": CHART_IMG_WIDTH,
+        "height": CHART_IMG_HEIGHT,
+        "theme": "dark",
+        "style": "candle",
+        "timezone": "Asia/Seoul",
+        "format": "png",
+        "range": "1D",
+    }
     if drawings:
         body["drawings"] = drawings
 
     headers = {"x-api-key": api_key, "content-type": "application/json"}
     url = f"{CHART_IMG_API_BASE}/v2/tradingview/advanced-chart/storage"
+    global _chart_img_last_call_mono
     try:
-        async with session.post(
-            url,
-            json=body,
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=50),
-        ) as response:
-            if response.status == 200:
-                data = await response.json()
-                if isinstance(data, dict) and data.get("url"):
-                    return str(data["url"])
-            logging.warning(
-                "chart-img v2 storage status=%s symbol=%s",
-                response.status,
-                tv_symbol,
-            )
+        async with _chart_img_lock:
+            wait = CHART_IMG_MIN_INTERVAL_SEC - (time.monotonic() - _chart_img_last_call_mono)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            async with session.post(
+                url,
+                json=body,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=50),
+            ) as response:
+                _chart_img_last_call_mono = time.monotonic()
+                if response.status == 200:
+                    data = await response.json()
+                    if isinstance(data, dict) and data.get("url"):
+                        if state is not None:
+                            chart_img_record_use(state)
+                        return str(data["url"])
+                logging.warning(
+                    "chart-img storage status=%s symbol=%s body_keys=%s",
+                    response.status,
+                    tv_symbol,
+                    list(body.keys()),
+                )
     except Exception:
-        logging.exception("chart-img v2 storage failed symbol=%s", tv_symbol)
-
-    params = {
-        "symbol": tv_symbol,
-        "interval": interval,
-        "width": 920,
-        "height": 520,
-        "theme": "dark",
-        "key": api_key,
-    }
-    data = await fetch_json(session, f"{CHART_IMG_API_BASE}/v1/tradingview/advanced-chart/storage", params)
-    if isinstance(data, dict) and data.get("url"):
-        return str(data["url"])
+        logging.exception("chart-img storage failed symbol=%s", tv_symbol)
     return None
 
 
@@ -1363,7 +1405,7 @@ def build_okx_candlestick_chart_url(
     if len(encoded) > 7800:
         chart["options"]["plugins"].pop("annotation", None)
         encoded = quote(json.dumps(chart, ensure_ascii=False))
-    return f"https://quickchart.io/chart?width=920&height=520&version=4&c={encoded}"
+    return f"https://quickchart.io/chart?width={CHART_IMG_WIDTH}&height={CHART_IMG_HEIGHT}&version=4&c={encoded}"
 
 
 async def coin_news_trade_desk(
@@ -1371,6 +1413,9 @@ async def coin_news_trade_desk(
     title: str,
     summary: str,
     coin_type: str,
+    *,
+    state: Optional[State] = None,
+    importance: int = 7,
 ) -> Tuple[Optional[str], list[str]]:
     """기사 종목 TradingView 15m 스냅샷 + OKX 데이터 기반 자리·흐름."""
     symbol = primary_symbol_for_coin_news(title, summary, coin_type)
@@ -1383,14 +1428,20 @@ async def coin_news_trade_desk(
     funding = await get_funding_rate(session, symbol)
     lines = build_trade_desk_lines(symbol, candles, funding)
 
-    tv_symbol = tradingview_symbol_for_usdt(symbol)
-    chart_url = await fetch_tradingview_chart_storage_url(
-        session, tv_symbol, interval="15m", support=lo, resist=hi
-    )
+    chart_url: Optional[str] = None
+    use_tv = chart_img_api_key() and importance >= CHART_IMG_MIN_IMPORTANCE
+    if use_tv and (state is None or chart_img_quota_available(state)):
+        tv_symbol = tradingview_symbol_for_usdt(symbol)
+        chart_url = await fetch_tradingview_chart_storage_url(
+            session,
+            tv_symbol,
+            state=state,
+            interval="15m",
+            support=lo,
+            resist=hi,
+        )
     if not chart_url:
         chart_url = build_okx_candlestick_chart_url(candles, symbol, support=lo, resist=hi) or None
-        if chart_url and not chart_img_api_key():
-            logging.info("CHART_IMG_API_KEY 미설정 → QuickChart 대체 차트 사용")
     return chart_url, lines
 
 
@@ -2846,7 +2897,7 @@ LIVE_NEWS_FEED_HEAD = env_int("LIVE_NEWS_FEED_HEAD", 18, min_value=5, max_value=
 LIVE_NEWS_MIN_IMPORTANCE_SEND = env_int("LIVE_NEWS_MIN_IMPORTANCE_SEND", 7, min_value=5, max_value=10)
 LIVE_NEWS_DESK_VOICE_LINE = env_bool("LIVE_NEWS_DESK_VOICE_LINE", False)
 LIVE_ROOM_HOST_LINE = env_bool("LIVE_ROOM_HOST_LINE", False)
-LIVE_NEWS_BTC_CHART = env_bool("LIVE_NEWS_BTC_CHART", True)  # 코인 뉴스: OKX 15m 캔들 + 자리·흐름
+LIVE_NEWS_BTC_CHART = env_bool("LIVE_NEWS_BTC_CHART", True)  # 코인 뉴스: TV 스냅 + 자리·흐름
 LIVE_NEWS_COMPACT_NUMERIC_BLOCK = env_bool("LIVE_NEWS_COMPACT_NUMERIC_BLOCK", True)
 LIVE_NEWS_CARD_DISCLAIMER = "※ 정리용 · 투자 권유 아님 · 레버·청산·슬리피지·거래소·규제 리스크 전제."
 LIVE_NEWS_NIGHT_COIN_MIN = env_int("LIVE_NEWS_NIGHT_COIN_MIN", 12, min_value=8, max_value=24)
@@ -3938,6 +3989,11 @@ def bot_state_hydrate(state: State) -> None:
         state.live_news_daily_date = today_kst
         state.live_news_daily_count = int(data.get("live_news_daily_count") or 0)
 
+    cid = data.get("chart_img_daily_date")
+    if isinstance(cid, str) and date.fromisoformat(cid) == today_kst:
+        state.chart_img_daily_date = today_kst
+        state.chart_img_daily_count = int(data.get("chart_img_daily_count") or 0)
+
     lls = data.get("live_last_sent_at")
     if isinstance(lls, str):
         try:
@@ -4000,6 +4056,8 @@ def bot_state_save_snapshot(state: State) -> None:
         "sol_etf_daily_count": state.sol_etf_daily_count,
         "live_news_daily_date": state.live_news_daily_date.isoformat() if state.live_news_daily_date else None,
         "live_news_daily_count": state.live_news_daily_count,
+        "chart_img_daily_date": state.chart_img_daily_date.isoformat() if state.chart_img_daily_date else None,
+        "chart_img_daily_count": state.chart_img_daily_count,
         "live_last_sent_at": state.live_last_sent_at.isoformat() if state.live_last_sent_at else None,
         "last_news_sent_at": state.last_news_sent_at.isoformat() if state.last_news_sent_at else None,
         "recap_sent_keys": sorted(state.recap_sent_keys),
@@ -5842,6 +5900,8 @@ async def build_live_news_message(
     summary: str,
     source: str,
     link: str = "",
+    *,
+    state: Optional[State] = None,
 ) -> Tuple[str, Optional[str]]:
     title_clean = strip_news_source_tail(title or "")
     title_ko = await ensure_korean_text(session, polish_korean_news_text(html_clean(title_clean, 200)))
@@ -5943,9 +6003,17 @@ async def build_live_news_message(
         parts.append(f"· 숫자: {' / '.join(extra_nums[:3])}")
     parts += ["", SEC_NEWS_CONTEXT, f"· {hook}", ""]
     chart_url: Optional[str] = None
+    trade_lines: list[str] = []
     if category == "코인" and importance >= LIVE_BTC_MIN_IMPORTANCE and LIVE_NEWS_BTC_CHART:
         try:
-            chart_url, trade_lines = await coin_news_trade_desk(session, title_clean, summary, coin_type)
+            chart_url, trade_lines = await coin_news_trade_desk(
+                session,
+                title_clean,
+                summary,
+                coin_type,
+                state=state,
+                importance=importance,
+            )
         except Exception:
             logging.debug("coin_news_trade_desk failed", exc_info=True)
     check_label = "③ 자리 · 흐름" if trade_lines else SEC_NEWS_CHECK
@@ -6351,7 +6419,14 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                     else:
                         image_url = await resolve_article_image_url(session, entry, source, raw_link)
                         msg, btc_chart_url = await build_live_news_message(
-                            session, cand_emoji, cand_category, raw_title, raw_summary, source, raw_link
+                            session,
+                            cand_emoji,
+                            cand_category,
+                            raw_title,
+                            raw_summary,
+                            source,
+                            raw_link,
+                            state=state,
                         )
                         if not msg:
                             logging.info("live_news blocked reason=empty_message title=%s", clean_text(raw_title, 90))
@@ -6947,7 +7022,15 @@ async def run_forever() -> None:
         logging.info("Market mode:\n- %s", "\n- ".join(market_mode_lines))
 
     if chart_img_api_key():
-        logging.info("TradingView chart: chart-img API key configured")
+        logging.info(
+            "TradingView chart-img: key OK · daily=%s · rate=%.2fs · %dx%d · overlays≤%s · TV≥%s/10",
+            CHART_IMG_DAILY_LIMIT,
+            CHART_IMG_MIN_INTERVAL_SEC,
+            CHART_IMG_WIDTH,
+            CHART_IMG_HEIGHT,
+            CHART_IMG_MAX_OVERLAY_PARAMS,
+            CHART_IMG_MIN_IMPORTANCE,
+        )
     else:
         logging.warning(
             "TradingView chart: CHART_IMG_API_KEY 없음 — 코인 뉴스 차트는 QuickChart 대체 "
