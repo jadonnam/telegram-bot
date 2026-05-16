@@ -881,6 +881,38 @@ async def get_yahoo_snapshot(session: aiohttp.ClientSession, symbol: str) -> Opt
         return None
 
 
+async def get_yahoo_intraday_candles(
+    session: aiohttp.ClientSession,
+    symbol: str,
+    *,
+    interval: str = "15m",
+    range_: str = "5d",
+) -> list[tuple[int, float, float, float, float, float]]:
+    data = await fetch_json(
+        session,
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
+        {"interval": interval, "range": range_},
+    )
+    try:
+        result = data["chart"]["result"][0]
+        ts = result.get("timestamp") or []
+        q = (result.get("indicators") or {}).get("quote") or [{}]
+        q0 = q[0] if q else {}
+        opens = q0.get("open") or []
+        highs = q0.get("high") or []
+        lows = q0.get("low") or []
+        closes = q0.get("close") or []
+        out: list[tuple[int, float, float, float, float, float]] = []
+        for i, t in enumerate(ts):
+            o, h, l, c = opens[i], highs[i], lows[i], closes[i]
+            if o is None or h is None or l is None or c is None:
+                continue
+            out.append((int(t), float(o), float(h), float(l), float(c), 0.0))
+        return out
+    except Exception:
+        return []
+
+
 async def get_fear_greed(session: aiohttp.ClientSession) -> Optional[Tuple[int, str]]:
     data = await fetch_json(session, "https://api.alternative.me/fng/")
     try:
@@ -1361,12 +1393,13 @@ def build_okx_candlestick_chart_url(
     *,
     support: float,
     resist: float,
+    chart_title: str = "",
 ) -> str:
     from urllib.parse import quote
 
     if len(candles) < 8:
         return ""
-    tag = symbol.replace("USDT", "")
+    tag = chart_title or symbol.replace("USDT", "")
     subset = candles[-36:]
     data = []
     for i, row in enumerate(subset):
@@ -1390,7 +1423,7 @@ def build_okx_candlestick_chart_url(
             "plugins": {
                 "title": {
                     "display": True,
-                    "text": f"{tag}/USDT · OKX 15m",
+                    "text": chart_title or f"{tag}/USDT · OKX 15m",
                     "color": "#d1d4dc",
                     "font": {"size": 14},
                 },
@@ -1481,6 +1514,24 @@ async def coin_news_trade_desk(
     else:
         chart_url = build_okx_candlestick_chart_url(candles, symbol, support=lo, resist=hi) or None
     return chart_url, lines
+
+
+async def kr_market_chart_url(session: aiohttp.ClientSession, title: str, summary: str) -> Optional[str]:
+    """한국 지수 급변·사이드카 등 — Yahoo 15m 캔들(QuickChart, 워터마크 없음)."""
+    blob_l = f"{title} {summary}".lower()
+    sym = "^KS11"
+    label = "KOSPI · 15m"
+    if any(k in blob_l for k in ("코스닥", "kosdaq")) and "코스피" not in blob_l and "kospi" not in blob_l:
+        sym = "^KQ11"
+        label = "KOSDAQ · 15m"
+    candles = await get_yahoo_intraday_candles(session, sym)
+    if len(candles) < 12:
+        return None
+    window = min(48, len(candles))
+    lo = min(c[3] for c in candles[-window:])
+    hi = max(c[2] for c in candles[-window:])
+    url = build_okx_candlestick_chart_url(candles, sym, support=lo, resist=hi, chart_title=label)
+    return url or None
 
 
 def source_name_from_link(link: str) -> str:
@@ -1818,7 +1869,29 @@ async def market_monitor(bot: Bot, state: State) -> None:
                     else:
                         parts.append("· 알트 수급 이어지는지")
                     parts += ["", ROOM_DISCLAIMER]
-                    await safe_send(bot, "\n".join(parts), disable_preview=True)
+                    surge_msg = "\n".join(parts)
+                    surge_chart: Optional[str] = None
+                    if top_symbol:
+                        try:
+                            sc = await get_okx_ohlc_candles(session, top_symbol, bar="15m", limit=48)
+                            if len(sc) >= 12:
+                                w = min(36, len(sc))
+                                lo = min(c[3] for c in sc[-w:])
+                                hi = max(c[2] for c in sc[-w:])
+                                coin = top_symbol.replace("USDT", "")
+                                surge_chart = build_okx_candlestick_chart_url(
+                                    sc,
+                                    top_symbol,
+                                    support=lo,
+                                    resist=hi,
+                                    chart_title=f"{coin}/USDT · OKX 15m",
+                                ) or None
+                        except Exception:
+                            logging.debug("volume_surge chart failed", exc_info=True)
+                    if surge_chart:
+                        await send_news_card(bot, surge_msg, image_url=surge_chart, use_s_grade_photo=True)
+                    else:
+                        await safe_send(bot, surge_msg, disable_preview=True)
             except Exception:
                 logging.exception("market_monitor 오류")
 
@@ -3737,6 +3810,28 @@ def _blob_is_kr_semiconductor_risk(blob: str, blob_l: str) -> bool:
     )
 
 
+def _blob_is_kr_market_circuit(blob: str, blob_l: str) -> bool:
+    if not any(k in blob for k in ("코스피", "코스닥", "kospi", "kosdaq", "지수")):
+        return False
+    return any(
+        k in blob or k in blob_l
+        for k in (
+            "사이드카",
+            "sidecar",
+            "서킷브레이커",
+            "circuit breaker",
+            "급락",
+            "급등",
+            "8천",
+            "8000",
+            "매도 사이드카",
+            "매수 사이드카",
+            "vi ",
+            "변동성 완화",
+        )
+    )
+
+
 def _blob_is_kr_corporate_earnings(blob: str, blob_l: str) -> bool:
     if not any(k in blob for k in ("실적", "매출", "분기", "영업이익", "가이던스", "어닝")):
         return False
@@ -4724,15 +4819,21 @@ def event_line_from_news(title_ko: str, title: str, summary: str, category: str)
         return "AWS가 AI 쓸 때 스테이블코인으로 결제하는 시스템을 내놨어요."
     if any(k in text for k in ("iran", "이란")) and any(k in text for k in ("완화", "긴장 완화", "de-escalation", "hormuz", "호르무즈")):
         return "이란이 긴장을 낮추겠다는 말을 했어요."
+    if any(k in text for k in ("사이드카", "sidecar", "서킷브레이커", "circuit breaker")) and any(
+        k in text for k in ("코스피", "kospi", "코스닥", "kosdaq")
+    ):
+        return "지수 급변으로 사이드카가 걸리면 당일 가격이 잠시 제한되고, 매도·매수 압력이 한동안 멈춥니다."
+    if any(k in text for k in ("8천", "8000", "8,000")) and any(k in text for k in ("코스피", "kospi", "급락", "급등")):
+        return "코스피가 8천 근처에서 급변하면 외국인·기관 수급과 선물 포지션이 같이 흔들리는 날입니다."
 
     base = html_clean(strip_news_source_tail(title_ko or title), 120).strip(" -–—:·.")
     if not base:
         return "제목만 잡힌 이슈입니다."
-    if base.endswith(("다", "됨", "함", ".", "음", "요", "임", "음.", "다.", "요.")):
-        return base if base.endswith(".") else base + "."
-    tails = (" 쪽 보도.", " 기사 기준.", " 이슈 라인.", " 흐름.")
-    ix = int(hashlib.md5(base.encode("utf-8")).hexdigest(), 16) % len(tails)
-    return base + tails[ix]
+    if base.endswith((".", "?", "!", "…")):
+        return base
+    if base.endswith(("다", "됨", "함", "음", "요", "임")):
+        return base + "."
+    return base + "."
 
 
 LIVE_NEWS_BANNED_PHRASES = (
@@ -4849,6 +4950,9 @@ def is_explanatory_live_news(title: str, summary: str) -> bool:
 
 def live_news_photo_topic_hit(title: str, summary: str) -> bool:
     t = f"{title} {summary}".lower()
+    raw = f"{title} {summary}"
+    if _blob_is_kr_market_circuit(raw, t):
+        return True
     if any(k in t for k in ("russia", "ukraine", "iran", "israel", "hormuz", "war", "미사일", "전쟁", "러시아", "우크라", "이란", "호르무즈")):
         return True
     if is_crypto_etf_content(title, summary) and any(k in t for k in ("etf", "승인", "거절", "sec")):
@@ -5802,7 +5906,10 @@ def live_news_hub_bullets(
 
     title_base = html_clean(title_ko or "", 220).strip()
     skip_event = False
-    if fact_lines and title_base:
+    if title_base and len(title_base) >= 12:
+        add_line(title_base)
+        skip_event = True
+    if fact_lines and title_base and not skip_event:
         if max(title_similarity(sanitize_news_fact_line(fl), title_base) for fl in fact_lines) >= 0.52:
             skip_event = True
         elif event_line and title_similarity(event_line, title_base) >= 0.72:
@@ -5832,12 +5939,16 @@ def live_news_hub_watch_line(event_type: str, category: str, title: str, summary
     t = f"{title} {summary}".lower()
     raw = f"{title} {summary}"
     if category == "한국":
+        if _blob_is_kr_market_circuit(raw, t):
+            return "사이드카·급락 날은 코스피 선물·외국인 순매수·환율이 같은 방향인지 먼저 보면 됩니다."
         if _blob_is_kr_semiconductor_risk(raw, t):
             return "美 반도체 급락은 월요인 코스피 갭·외국인·삼성·하닉 선물 포지션부터 확인."
         if _blob_is_kr_corporate_earnings(raw, t):
             return "실적 라인: 가이던스·마진·환율이 헤드라인보다 먼저 움직이는 경우가 많음."
         if any(k in raw for k in ("블룸버그", "Bloomberg", "시총", "잇슈 머니", "잇슈머니")):
             return "국내장: 해외언급과 실제 수급(외국인·반도체) 온도차만 한 줄로."
+        if any(k in t for k in ("코스피", "kospi", "외국인", "환율")):
+            return "코스피·환율·외국인·기관 순매수가 같은 쪽인지, 반도체 대형주가 지수를 끌었는지 보면 됩니다."
         return "한국장: 코스피·환율·외국인·반도체 대형주를 한 묶음으로."
     if category == "미국":
         if event_type in ("semiconductor", "capex", "semiconductor_etf", "ai_etf"):
@@ -5895,7 +6006,9 @@ def live_news_action_bullets(event_type: str, category: str, title: str, summary
             else:
                 out.append("지수: S&P·나스닥 선물 방향.")
     elif category == "한국":
-        if _blob_is_kr_semiconductor_risk(raw, t):
+        if _blob_is_kr_market_circuit(raw, t):
+            out.append("코스피·코스닥 지수 · 외국인·기관 순매수 · 원/달러 · 선물 미결제.")
+        elif _blob_is_kr_semiconductor_risk(raw, t):
             out.append("한국장: 코스피·환율·외국인 + NQ·SOX·삼성·하닉 갭·선물 동시.")
         elif _blob_is_kr_corporate_earnings(raw, t):
             out.append("증시·실적: 코스피·환율·외국인 + 컨센서스·가이던스·환율 민감도.")
@@ -6137,6 +6250,15 @@ async def build_live_news_message(
             )
         except Exception:
             logging.debug("coin_news_trade_desk failed", exc_info=True)
+    elif category == "한국" and importance >= LIVE_BTC_MIN_IMPORTANCE:
+        blob_l = f"{title_clean} {summary}".lower()
+        if _blob_is_kr_market_circuit(f"{title_clean} {summary}", blob_l) or any(
+            k in blob_l for k in ("코스피", "kospi", "코스닥", "급락", "급등", "사이드카")
+        ):
+            try:
+                chart_url = await kr_market_chart_url(session, title_clean, summary)
+            except Exception:
+                logging.debug("kr_market_chart_url failed", exc_info=True)
     check_label = "③ 자리 · 흐름" if trade_lines else SEC_NEWS_CHECK
     parts.append(check_label)
     for a in trade_lines if trade_lines else actions[:1]:
