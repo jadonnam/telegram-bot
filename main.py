@@ -1258,8 +1258,8 @@ async def fetch_tradingview_chart_storage_url(
 
 def primary_symbol_for_coin_news(title: str, summary: str, coin_type: str) -> str:
     raw = f"{title} {summary}".lower()
-    if coin_type in ("sol_alt_flow",) or any(
-        k in raw for k in ("solana", "솔라나", "firedancer", " firedancer", "jump crypto")
+    if coin_type in ("sol_alt_flow",) or _text_has_sol_token(raw) or any(
+        k in raw for k in ("firedancer", " firedancer", "jump crypto")
     ):
         return "SOLUSDT"
     if coin_type in ("eth_security",) or any(
@@ -2939,7 +2939,7 @@ LIVE_NEWS_BTC_CHART = env_bool("LIVE_NEWS_BTC_CHART", True)  # 코인 뉴스: TV
 LIVE_NEWS_COMPACT_NUMERIC_BLOCK = env_bool("LIVE_NEWS_COMPACT_NUMERIC_BLOCK", True)
 LIVE_NEWS_CARD_DISCLAIMER = "※ 정리용 · 투자 권유 아님 · 레버·청산·슬리피지·거래소·규제 리스크 전제."
 LIVE_NEWS_NIGHT_COIN_MIN = env_int("LIVE_NEWS_NIGHT_COIN_MIN", 12, min_value=8, max_value=24)
-LIVE_NEWS_NIGHT_OTHER_MIN = env_int("LIVE_NEWS_NIGHT_OTHER_MIN", 15, min_value=8, max_value=28)
+LIVE_NEWS_NIGHT_OTHER_MIN = env_int("LIVE_NEWS_NIGHT_OTHER_MIN", 12, min_value=8, max_value=28)
 
 
 def live_news_send_grades() -> frozenset[str]:
@@ -2961,7 +2961,7 @@ MACRO_PULSE_COOLDOWN_HOURS = env_int("MACRO_PULSE_COOLDOWN_HOURS", 3, min_value=
 LIVE_TITLE_SIMILARITY_BLOCK_HOURS = 24
 LIVE_TITLE_SIMILARITY_THRESHOLD = 0.58
 LIVE_RECAP_HOURS = (18,)
-LIVE_BTC_MIN_IMPORTANCE = 8
+LIVE_BTC_MIN_IMPORTANCE = 7
 LIVE_MESSAGE_SOFT_LIMIT = 2000
 BTC_LEVEL_ALERT_COOLDOWN_SEC = 3 * 60 * 60
 
@@ -3021,15 +3021,23 @@ EXTRA_LOW_QUALITY_BLOCK_TERMS = (
 )
 
 COIN_REQUIRED_KEYWORDS = (
-    "etf", "sec", "승인", "유입", "청산", "스테이블코인",
+    "etf", "sec", "승인", "유입", "청산", "스테이블코인", "stablecoin",
     "btc", "bitcoin", "eth", "ethereum", "sol", "solana",
-    "coinbase", "jpmorgan", "jp morgan", "blackrock",
+    "coinbase", "jpmorgan", "jp morgan", "blackrock", "microstrategy", "mstr",
     "암호화폐", "가상자산", "비트코인", "이더리움", "솔라나",
     "whale", "고래", "온체인", "on-chain", "onchain",
     "xrp", "ripple", "defi", "nft", "binance", "bybit", "okx",
     "staking", "airdrop", "memecoin", "밈코인", "tvl", "liquidation",
     "업비트", "빗썸", "inflow", "outflow",
+    "hack", "exploit", "해킹", "breach", "rug", "bridge", "rollup",
+    "regulation", "cftc", "treasury", "token", "governance", "uniswap", "aave",
+    "firedancer", "infrastructure", "layer 2", "layer2", "kelp", "morpho",
 )
+
+
+def _text_has_sol_token(txt: str) -> bool:
+    t = (txt or "").lower()
+    return bool(re.search(r"\bsol\b", t) or "solana" in t or "솔라나" in (txt or ""))
 
 
 def is_crypto_etf_content(title: str, summary: str) -> bool:
@@ -3193,6 +3201,38 @@ def is_major_domestic_semi_catalyst(title: str, summary: str) -> bool:
         "가동",
     )
     return any(k in t for k in keys)
+
+
+def is_kr_semi_sector_story(title: str, summary: str) -> bool:
+    """삼성·하이닉스 직접 실적 외 반도체·메모리·장비 등 섹터 헤드라인."""
+    raw = f"{title} {summary}"
+    t = raw.lower()
+    if not any(
+        k in t
+        for k in (
+            "반도체",
+            "semiconductor",
+            "hbm",
+            "메모리",
+            "memory",
+            "dram",
+            "nand",
+            "엔비디아",
+            "nvidia",
+            "tsmc",
+            "asml",
+            "삼성전자",
+            "sk하이닉스",
+            "하이닉스",
+            "hynix",
+            "samsung",
+            "sox",
+        )
+    ):
+        return False
+    return has_market_impact(title, summary) or any(
+        k in t for k in ("급락", "급등", "plunge", "surge", "sell-off", "selloff", "수출", "수주", "실적")
+    )
 
 
 def _live_news_has_domestic_etf_brand(title_ko: str) -> bool:
@@ -3485,7 +3525,14 @@ def coin_news_block_reason(title: str, summary: str) -> str:
         return "coin_daily_roundup_junk"
     if "가격 예측" in text_value or "price prediction" in text_value or "forecast" in text_value:
         return "coin_price_prediction"
-    if any(k in text_value for k in ("전망", "관측", "보는 구간", "분위기")) and "etf 승인" not in text_value and "sec" not in text_value:
+    outlook_hit = any(k in text_value for k in ("전망", "관측", "보는 구간", "분위기"))
+    if outlook_hit and not any(
+        k in text_value
+        for k in (
+            "etf", "sec", "btc", "eth", "sol", "청산", "해킹", "hack", "defi", "유가", "금리",
+            "반도체", "실적", "inflow", "outflow", "승인", "거절", "firedancer", "인프라",
+        )
+    ):
         return "coin_generic_outlook"
     if not any(k in text_value for k in COIN_REQUIRED_KEYWORDS):
         return "coin_missing_required_keyword"
@@ -4233,7 +4280,9 @@ def rewrite_coin_news_title(title_ko: str, title: str, summary: str) -> str:
     fallback = html_clean(strip_news_source_tail(title_ko or title), 90)
     fallback = re.sub(r"\s+", " ", fallback).strip(" -–—:·.")
     fallback = re.sub(r"(공동\s*창립자는|가격\s*예측|전망|분석|보고서|경고했습니다|가능성\s*제기)", "", fallback).strip()
-    return fallback
+    if len(text) >= 18:
+        return text[:200]
+    return fallback or text
 
 
 def live_news_score(title: str, summary: str, category: str, link: str = "") -> int:
@@ -4288,19 +4337,20 @@ def live_news_score(title: str, summary: str, category: str, link: str = "") -> 
     if is_live_ai_without_market_anchor(title, summary):
         score -= 30
     if category == "한국" and any(k in text_low for k in ("btc", "bitcoin", "비트코인", "ethereum", "eth", "알트")):
-        score -= 10
+        if not any(k in text_low for k in ("가상자산", "암호화폐", "업비트", "빗썸", "디지털자산", "코인")):
+            score -= 10
     if category == "이슈":
         score += 5
     now = now_kst()
     if is_weekend_mode(now) and category == "한국":
-        score -= 8
+        score -= 4
     if is_kr_holiday_day(now) and category == "한국":
         score -= 8
     return score
 
 
 def is_night_kst(now: datetime) -> bool:
-    return 1 <= now.astimezone(KST).hour < 7
+    return now.astimezone(KST).hour < 7
 
 
 SOURCE_MAP = {
@@ -5208,6 +5258,8 @@ def live_news_mega_catalyst_bypasses_c_source(title: str, summary: str, link: st
         return True
     if any(k in t for k in ("유가 급등", "유가 급락", "oil surges", "oil spikes", "oil plunges", "wti surges", "brent soars", "brent plunges")):
         return True
+    if any(k in t for k in ("tariff", "관세", "sanction", "제재", "rare earth", "희토류")):
+        return True
     return False
 
 
@@ -5268,34 +5320,65 @@ def live_news_tier_a_hit(title: str, summary: str) -> bool:
         "금리", "fed", "fomc", "cpi", "pce", "ppi", "유가", "wti", "brent",
         "반도체", "hbm", "엔비디아", "nvidia", "외국인", "기관", "연기금", "국민연금",
         "청산", "liquidation", "비트코인", "bitcoin",
+        "hack", "exploit", "해킹", "defi", "regulation", "tariff", "관세", "firedancer",
+        "코스피", "코스닥", "삼성전자", "하이닉스", "china", "중국",
     )
     return any(k in t for k in keys)
 
 
-def is_live_news_allowed(title: str, summary: str, category: str, now: datetime, link: str = "") -> bool:
-    if low_quality_block_reason(title, summary):
-        return False
-    if category == "코인" and coin_news_block_reason(title, summary):
-        return False
+def source_rank_min_importance(src_rank: str, title: str, summary: str, category: str) -> int:
+    if src_rank in ("S", "A"):
+        return LIVE_NEWS_MIN_IMPORTANCE_SEND
+    if src_rank == "B":
+        if category == "코인":
+            return LIVE_NEWS_MIN_IMPORTANCE_SEND
+        if is_kr_semi_sector_story(title, summary):
+            return LIVE_NEWS_MIN_IMPORTANCE_SEND
+        ek = etf_asset_kind(title, summary)
+        if ek in ("semiconductor_etf", "ai_etf", "korea_stock_etf"):
+            return LIVE_NEWS_MIN_IMPORTANCE_SEND
+        if category in ("세계", "미국", "한국") and has_market_impact(title, summary):
+            return LIVE_NEWS_MIN_IMPORTANCE_SEND
+        return 8
+    return 99
+
+
+def live_news_block_reason(title: str, summary: str, category: str, now: datetime, link: str = "") -> str:
+    lq = low_quality_block_reason(title, summary)
+    if lq:
+        return lq
+    if category == "코인":
+        coin_reason = coin_news_block_reason(title, summary)
+        if coin_reason:
+            return coin_reason
     score = live_news_score(title, summary, category, link)
     min_live_score = 6 if category == "코인" else 7
     if score < min_live_score:
-        return False
+        return "live_score_low"
     combined = live_news_combined_score(title, summary, category, link)
     imp = normalize_news_importance(combined)
     if imp <= 5 and not live_news_tier_a_hit(title, summary):
-        return False
+        return "importance_floor"
     if is_night_kst(now):
         text_low = f"{title} {summary}".lower()
         night_terms = (
             "missile", "strike", "war", "hormuz", "oil", "fed", "cpi", "crash", "surge", "liquidation",
             "미사일", "공습", "전쟁", "호르무즈", "유가", "연준", "금리", "급락", "급등", "청산",
-            "bitcoin", "btc", "ethereum", "eth", "sol", "crypto", "etf", "stablecoin", "defi", "hack",
+            "bitcoin", "btc", "ethereum", "eth", "crypto", "etf", "stablecoin", "defi", "hack",
             "비트코인", "이더리움", "솔라나", "스테이블", "해킹",
+            "반도체", "semiconductor", "nvidia", "엔비디아", "코스피", "외국인", "tariff", "관세",
+            "china", "중국", "삼성", "하이닉스", "hbm", "실적", "earnings",
         )
         night_floor = LIVE_NEWS_NIGHT_COIN_MIN if category == "코인" else LIVE_NEWS_NIGHT_OTHER_MIN
-        return combined >= night_floor and any(k in text_low for k in night_terms)
-    return True
+        if combined < night_floor:
+            return "night_importance"
+        if not any(k in text_low for k in night_terms):
+            return "night_terms"
+    return ""
+
+
+def is_live_news_allowed(title: str, summary: str, category: str, now: datetime, link: str = "") -> bool:
+    return not live_news_block_reason(title, summary, category, now, link)
 
 
 def clean_news_body_for_message(title: str, summary: str, source: str = "", summary_limit: int = 155) -> str:
@@ -5373,7 +5456,7 @@ def classify_coin_news_type(title: str, summary: str) -> str:
     ek = etf_asset_kind(title, summary)
     if ek in ("semiconductor_etf", "ai_etf", "korea_stock_etf", "commodity_etf", "bond_etf", "unknown_equity_etf"):
         return "equity_etf_non_crypto"
-    if any(k in txt for k in ("sol", "solana", "솔라나")) or "sol etf" in txt or any(k in txt for k in ("jpmorgan", "jp morgan", "jp모건")):
+    if _text_has_sol_token(txt) or "sol etf" in txt or any(k in txt for k in ("jpmorgan", "jp morgan", "jp모건")):
         return "sol_alt_flow"
     if any(k in txt for k in ("eth", "ethereum", "이더리움", "l2", "layer 2", "layer2")):
         if any(k in txt for k in ("보안", "취약", "audit", "hack", "exploit")) or re.search(r"\bsecurity\b", txt):
@@ -5448,7 +5531,7 @@ def classify_news_grade(title: str, summary: str, category: str) -> str:
     if low_quality_block_reason(title, summary):
         return "C"
     c_terms = (
-        "가격 예측", "price prediction", "forecast", "행사", "홍보", "인터뷰", "칼럼",
+        "가격 예측", "price prediction", "행사", "홍보", "인터뷰", "칼럼",
         "스포츠", "셀럽", "범죄", "사고", "보도자료", "추천 종목",
         "what happened in crypto",
         "오늘 암호화폐 업계",
@@ -6339,155 +6422,162 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                             if topic_last and (now - topic_last) < COIN_TOPIC_COOLDOWN:
                                 logging.info("live_news blocked reason=coin_topic_cooldown topic=%s title=%s", topic_key, clean_text(raw_title, 90))
                                 continue
-                        topic_last_global = state.topic_last_sent.get(topic_key)
-                        topic_on_cooldown = bool(topic_last_global and (now - topic_last_global) < topic_cd)
-                        if topic_on_cooldown:
-                            logging.info("live_news blocked reason=topic_cooldown topic=%s title=%s", topic_key, clean_text(raw_title, 90))
-                        if not is_live_news_allowed(raw_title, raw_summary, cand_category, now, raw_link):
-                            logging.info("live_news blocked reason=policy_filter title=%s category=%s", clean_text(raw_title, 90), cand_category)
+                        policy_reason = live_news_block_reason(raw_title, raw_summary, cand_category, now, raw_link)
+                        if policy_reason:
+                            logging.info(
+                                "live_news blocked reason=%s title=%s category=%s",
+                                policy_reason,
+                                clean_text(raw_title, 90),
+                                cand_category,
+                            )
                             continue
                         score = live_news_score(raw_title, raw_summary, cand_category, raw_link)
-                        candidates.append((score, entry, raw_title, raw_summary, raw_link, cand_emoji, cand_category, grade, topic_key, topic_on_cooldown))
+                        candidates.append(
+                            (score, entry, raw_title, raw_summary, raw_link, cand_emoji, cand_category, grade, topic_key, topic_cd)
+                        )
                     if not candidates:
                         continue
                     candidates.sort(key=lambda x: x[0], reverse=True)
-                    score, entry, raw_title, raw_summary, raw_link, cand_emoji, cand_category, grade, topic_key, topic_on_cooldown = candidates[0]
-                    combined_score = max(score, newsroom_keyword_score(raw_title, raw_summary, cand_category))
-                    importance = normalize_news_importance(combined_score)
-                    ek_live = etf_asset_kind(raw_title, raw_summary)
-                    if not is_crypto_etf_content(raw_title, raw_summary):
-                        if ek_live in ("semiconductor_etf", "ai_etf", "korea_stock_etf"):
-                            if is_major_domestic_semi_catalyst(raw_title, raw_summary):
-                                importance = min(importance, 9)
-                            else:
-                                importance = min(importance, 7)
-                        elif ek_live == "unknown_equity_etf":
-                            importance = min(importance, 7)
-                    if cand_category == "코인" and any(k in f"{raw_title} {raw_summary}".lower() for k in ("jpmorgan", "jp morgan", "jp모건", "sol", "solana", "솔라나", "etf")):
-                        importance = min(8, importance)
-                    if cand_category == "코인" and importance >= 10 and not is_coin_true_critical(raw_title, raw_summary):
-                        importance = 9
-                    if importance <= 5:
-                        logging.info("live_news blocked reason=score_cutoff importance=%s title=%s", importance, clean_text(raw_title, 90))
-                        remember_live_news_hashes(state, raw_title, raw_link)
-                        state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
-                        continue
-                    source = source_name_from_entry(entry)
-                    if not raw_title.strip():
-                        remember_live_news_hashes(state, raw_title, raw_link)
-                        continue
-                    if not has_clear_source_name(source, raw_link):
-                        logging.info("live_news blocked reason=unclear_source title=%s", clean_text(raw_title, 90))
-                        remember_live_news_hashes(state, raw_title, raw_link)
-                        state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
-                        continue
-                    src_rank = source_quality_rank(source, raw_link)
-                    title_for_recap = html_clean(strip_news_source_tail(raw_title), 220)
-                    tape_fast = bool(LIVE_NEWS_TAPE_MODE and LIVE_NEWS_TAPE_SKIP_TRANSLATE)
-                    if tape_fast:
-                        title_for_recap = polish_korean_news_text(title_for_recap)
-                    else:
-                        try:
-                            title_for_recap = await ensure_korean_text(session, title_for_recap)
-                        except Exception:
-                            pass
-                    if not tape_fast and mostly_english(title_for_recap):
-                        continue
-                    if not tape_fast and not is_recap_title_natural(title_for_recap):
-                        continue
-                    if (grade in ("A", "B") or topic_on_cooldown) and src_rank != "C":
-                        recap_grade = grade if grade in ("A", "B") else "A"
-                        state.live_recent_items.append((now, cand_emoji, html_clean(title_for_recap, 150), source, combined_score, recap_grade, topic_key))
-
-                    if topic_on_cooldown:
-                        remember_live_news_hashes(state, raw_title, raw_link)
-                        state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
-                        continue
-                    if importance < LIVE_NEWS_MIN_IMPORTANCE_SEND or grade not in LIVE_NEWS_SEND_GRADES_SET:
-                        remember_live_news_hashes(state, raw_title, raw_link)
-                        state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
-                        continue
-                    if src_rank == "C" and not live_news_mega_catalyst_bypasses_c_source(raw_title, raw_summary, raw_link):
-                        logging.info(
-                            "live_news blocked reason=source_rank_c title=%s source=%s",
-                            clean_text(raw_title, 90),
-                            source,
-                        )
-                        remember_live_news_hashes(state, raw_title, raw_link)
-                        state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
-                        continue
-                    if src_rank == "B" and importance < 8:
-                        logging.info(
-                            "live_news blocked reason=source_rank_b_importance title=%s importance=%s source=%s",
-                            clean_text(raw_title, 90),
-                            importance,
-                            source,
-                        )
-                        remember_live_news_hashes(state, raw_title, raw_link)
-                        state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
-                        continue
-                    if cand_category == "코인":
-                        if state.coin_live_daily_count >= LIVE_COIN_DAILY_LIMIT:
-                            logging.info("live_news blocked reason=coin_daily_limit title=%s", clean_text(raw_title, 90))
-                            remember_live_news_hashes(state, raw_title, raw_link)
-                            state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
+                    sent_feed = False
+                    for score, entry, raw_title, raw_summary, raw_link, cand_emoji, cand_category, grade, topic_key, topic_cd in candidates:
+                        topic_last_global = state.topic_last_sent.get(topic_key)
+                        topic_on_cooldown = bool(topic_last_global and (now - topic_last_global) < topic_cd)
+                        if topic_on_cooldown:
+                            if grade in ("A", "B"):
+                                src_cd = source_name_from_entry(entry)
+                                if has_clear_source_name(src_cd, raw_link) and source_quality_rank(src_cd, raw_link) != "C":
+                                    state.live_recent_items.append(
+                                        (
+                                            now,
+                                            cand_emoji,
+                                            html_clean(strip_news_source_tail(raw_title), 150),
+                                            src_cd,
+                                            score,
+                                            grade,
+                                            topic_key,
+                                        )
+                                    )
                             continue
-                        if topic_key == "sol_etf" and state.sol_etf_daily_count >= LIVE_SOL_ETF_DAILY_LIMIT:
-                            logging.info("live_news blocked reason=sol_etf_daily_limit title=%s", clean_text(raw_title, 90))
-                            remember_live_news_hashes(state, raw_title, raw_link)
-                            state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
+                        combined_score = max(score, newsroom_keyword_score(raw_title, raw_summary, cand_category))
+                        importance = normalize_news_importance(combined_score)
+                        ek_live = etf_asset_kind(raw_title, raw_summary)
+                        if not is_crypto_etf_content(raw_title, raw_summary):
+                            if ek_live in ("semiconductor_etf", "ai_etf", "korea_stock_etf"):
+                                if is_major_domestic_semi_catalyst(raw_title, raw_summary) or is_kr_semi_sector_story(
+                                    raw_title, raw_summary
+                                ):
+                                    importance = min(importance, 9)
+                                else:
+                                    importance = min(importance, 8)
+                            elif ek_live == "unknown_equity_etf":
+                                importance = min(importance, 8)
+                        coin_blob = f"{raw_title} {raw_summary}".lower()
+                        if cand_category == "코인" and (
+                            any(k in coin_blob for k in ("jpmorgan", "jp morgan", "jp모건", "etf"))
+                            or _text_has_sol_token(coin_blob)
+                        ):
+                            importance = min(8, importance)
+                        if cand_category == "코인" and importance >= 10 and not is_coin_true_critical(raw_title, raw_summary):
+                            importance = 9
+                        if importance <= 5:
                             continue
-                    if LIVE_NEWS_TAPE_MODE:
-                        tape_title = html_clean(title_for_recap, 300).strip() or html_clean(strip_news_source_tail(raw_title), 300).strip()
-                        link_out = (raw_link or "").strip()
-                        if not link_out.startswith("http"):
-                            remember_live_news_hashes(state, raw_title, raw_link)
-                            state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
+                        source = source_name_from_entry(entry)
+                        if not raw_title.strip():
                             continue
-                        tape_msg = (
-                            room_line("속보 테이프", now_kst())
-                            + "\n\n① 헤드\n"
-                            + tape_title
-                            + "\n\n② 링크\n"
-                            + link_out
-                            + "\n\n"
-                            + ROOM_DISCLAIMER
-                        )
-                        await safe_send(bot, tape_msg, disable_preview=False)
-                    else:
-                        image_url = await resolve_article_image_url(session, entry, source, raw_link)
-                        msg, btc_chart_url = await build_live_news_message(
-                            session,
-                            cand_emoji,
-                            cand_category,
-                            raw_title,
-                            raw_summary,
-                            source,
-                            raw_link,
-                            state=state,
-                        )
-                        if not msg:
-                            logging.info("live_news blocked reason=empty_message title=%s", clean_text(raw_title, 90))
-                            remember_live_news_hashes(state, raw_title, raw_link)
-                            state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
+                        if not has_clear_source_name(source, raw_link):
                             continue
-                        want_photo = live_news_should_send_photo(
-                            grade, importance, raw_title, raw_summary, has_article_image=bool(image_url)
-                        )
-                        photo_url = btc_chart_url or image_url
-                        use_photo = bool(btc_chart_url) or want_photo
-                        await send_news_card(bot, msg, image_url=photo_url, use_s_grade_photo=use_photo)
-                    if cand_category == "코인":
-                        state.coin_topic_last_sent[coin_topic_key(raw_title, raw_summary)] = now
-                        state.coin_live_daily_count += 1
-                        if topic_key == "sol_etf":
-                            state.sol_etf_daily_count += 1
-                    state.topic_last_sent[topic_key] = now
-                    remember_live_news_hashes(state, raw_title, raw_link)
-                    state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
-                    state.live_last_sent_at = now
-                    state.live_news_daily_count += 1
-                    sent_this_scan += 1
+                        src_rank = source_quality_rank(source, raw_link)
+                        title_for_recap = html_clean(strip_news_source_tail(raw_title), 220)
+                        tape_fast = bool(LIVE_NEWS_TAPE_MODE and LIVE_NEWS_TAPE_SKIP_TRANSLATE)
+                        if tape_fast:
+                            title_for_recap = polish_korean_news_text(title_for_recap)
+                        else:
+                            try:
+                                title_for_recap = await ensure_korean_text(session, title_for_recap)
+                            except Exception:
+                                pass
+                        if not tape_fast and mostly_english(title_for_recap):
+                            continue
+                        if not tape_fast and not is_recap_title_natural(title_for_recap):
+                            continue
+                        if grade in ("A", "B") and src_rank != "C":
+                            state.live_recent_items.append(
+                                (now, cand_emoji, html_clean(title_for_recap, 150), source, combined_score, grade, topic_key)
+                            )
+                        if importance < LIVE_NEWS_MIN_IMPORTANCE_SEND or grade not in LIVE_NEWS_SEND_GRADES_SET:
+                            continue
+                        if src_rank == "C" and not live_news_mega_catalyst_bypasses_c_source(raw_title, raw_summary, raw_link):
+                            continue
+                        rank_floor = source_rank_min_importance(src_rank, raw_title, raw_summary, cand_category)
+                        if importance < rank_floor:
+                            logging.info(
+                                "live_news blocked reason=source_rank_b_importance title=%s importance=%s source=%s",
+                                clean_text(raw_title, 90),
+                                importance,
+                                source,
+                            )
+                            continue
+                        if cand_category == "코인":
+                            if state.coin_live_daily_count >= LIVE_COIN_DAILY_LIMIT:
+                                continue
+                            if topic_key == "sol_etf" and state.sol_etf_daily_count >= LIVE_SOL_ETF_DAILY_LIMIT:
+                                continue
+                        if LIVE_NEWS_TAPE_MODE:
+                            tape_title = html_clean(title_for_recap, 300).strip() or html_clean(
+                                strip_news_source_tail(raw_title), 300
+                            ).strip()
+                            link_out = (raw_link or "").strip()
+                            if not link_out.startswith("http"):
+                                continue
+                            tape_msg = (
+                                room_line("속보 테이프", now_kst())
+                                + "\n\n① 헤드\n"
+                                + tape_title
+                                + "\n\n② 링크\n"
+                                + link_out
+                                + "\n\n"
+                                + ROOM_DISCLAIMER
+                            )
+                            await safe_send(bot, tape_msg, disable_preview=False)
+                        else:
+                            image_url = await resolve_article_image_url(session, entry, source, raw_link)
+                            msg, btc_chart_url = await build_live_news_message(
+                                session,
+                                cand_emoji,
+                                cand_category,
+                                raw_title,
+                                raw_summary,
+                                source,
+                                raw_link,
+                                state=state,
+                            )
+                            if not msg:
+                                logging.info(
+                                    "live_news blocked reason=empty_message title=%s",
+                                    clean_text(raw_title, 90),
+                                )
+                                continue
+                            want_photo = live_news_should_send_photo(
+                                grade, importance, raw_title, raw_summary, has_article_image=bool(image_url)
+                            )
+                            photo_url = btc_chart_url or image_url
+                            use_photo = bool(btc_chart_url) or want_photo
+                            await send_news_card(bot, msg, image_url=photo_url, use_s_grade_photo=use_photo)
+                        if cand_category == "코인":
+                            state.coin_topic_last_sent[coin_topic_key(raw_title, raw_summary)] = now
+                            state.coin_live_daily_count += 1
+                            if topic_key == "sol_etf":
+                                state.sol_etf_daily_count += 1
+                        state.topic_last_sent[topic_key] = now
+                        remember_live_news_hashes(state, raw_title, raw_link)
+                        state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
+                        state.live_last_sent_at = now
+                        state.live_news_daily_count += 1
+                        sent_this_scan += 1
+                        sent_feed = True
+                        break
+                    if not sent_feed:
+                        continue
                 await asyncio.sleep(LIVE_NEWS_POLL_SECONDS)
             except Exception:
                 logging.exception("live_news_monitor 오류")
