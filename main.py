@@ -978,12 +978,14 @@ OKX_SYMBOLS = {
     "BTCUSDT": "BTC-USDT",
     "ETHUSDT": "ETH-USDT",
     "SOLUSDT": "SOL-USDT",
+    "XRPUSDT": "XRP-USDT",
 }
 
 OKX_FUNDING_SYMBOLS = {
     "BTCUSDT": "BTC-USDT-SWAP",
     "ETHUSDT": "ETH-USDT-SWAP",
     "SOLUSDT": "SOL-USDT-SWAP",
+    "XRPUSDT": "XRP-USDT-SWAP",
 }
 
 LAST_GOOD_TICKER: Dict[str, dict] = {}
@@ -1147,6 +1149,7 @@ async def get_okx_ohlc_candles(
 TRADINGVIEW_OKX_SYMBOLS = {
     "BTCUSDT": "OKX:BTCUSDT",
     "ETHUSDT": "OKX:ETHUSDT",
+    "XRPUSDT": "OKX:XRPUSDT",
     "SOLUSDT": "OKX:SOLUSDT",
 }
 
@@ -1298,6 +1301,8 @@ def primary_symbol_for_coin_news(title: str, summary: str, coin_type: str) -> st
         k in raw for k in ("ethereum", "이더리움", " ether", " eth ", "eth ")
     ):
         return "ETHUSDT"
+    if any(k in raw for k in ("xrp", "ripple", "리플")):
+        return "XRPUSDT"
     if any(k in raw for k in ("bitcoin", "btc", "비트코인")):
         return "BTCUSDT"
     return "BTCUSDT"
@@ -1401,29 +1406,28 @@ def build_okx_candlestick_chart_url(
         return ""
     tag = chart_title or symbol.replace("USDT", "")
     subset = candles[-36:]
-    data = []
+    ohlc: list[dict] = []
     for i, row in enumerate(subset):
         _, o, h, l, c, _ = row
-        data.append(
-            {"t": str(i + 1), "o": round(o, 6), "h": round(h, 6), "l": round(l, 6), "c": round(c, 6)}
+        ohlc.append(
+            {
+                "x": i,
+                "o": round(o, 4),
+                "h": round(h, 4),
+                "l": round(l, 4),
+                "c": round(c, 4),
+            }
         )
+    title_txt = chart_title or f"{tag}/USDT · OKX 15m"
     chart: dict = {
         "type": "candlestick",
-        "data": {
-            "datasets": [
-                {
-                    "label": tag,
-                    "data": data,
-                    "color": {"up": "#26a69a", "down": "#ef5350", "unchanged": "#999999"},
-                }
-            ]
-        },
+        "data": {"datasets": [{"label": tag, "data": ohlc}]},
         "options": {
             "backgroundColor": "#131722",
             "plugins": {
                 "title": {
                     "display": True,
-                    "text": chart_title or f"{tag}/USDT · OKX 15m",
+                    "text": title_txt,
                     "color": "#d1d4dc",
                     "font": {"size": 14},
                 },
@@ -1431,8 +1435,8 @@ def build_okx_candlestick_chart_url(
             },
             "scales": {
                 "x": {
-                    "display": True,
-                    "ticks": {"maxTicksLimit": 6, "color": "#787b86"},
+                    "type": "linear",
+                    "display": False,
                     "grid": {"color": "#2a2e39"},
                 },
                 "y": {
@@ -1468,7 +1472,11 @@ def build_okx_candlestick_chart_url(
     if len(encoded) > 7800:
         chart["options"]["plugins"].pop("annotation", None)
         encoded = quote(json.dumps(chart, ensure_ascii=False))
-    return f"https://quickchart.io/chart?width={CHART_IMG_WIDTH}&height={CHART_IMG_HEIGHT}&version=4&c={encoded}"
+    bg = "&backgroundColor=%23131722"
+    return (
+        f"https://quickchart.io/chart?width={CHART_IMG_WIDTH}&height={CHART_IMG_HEIGHT}"
+        f"&version=4{bg}&c={encoded}"
+    )
 
 
 async def coin_news_trade_desk(
@@ -3512,6 +3520,13 @@ def is_non_market_society_noise(title: str, summary: str) -> bool:
     ):
         if not any(k in blob for k in ("코스피", "코스닥", "증시", "외국인", "기관", "환율", "ETF", "실적")):
             return True
+    diplomacy = ("셔틀외교", "정상회담", "정상 회담", "영접", "불놀이", "수운잡방", "다카이치", "외교 순방", "고향 안동")
+    if any(k in blob for k in diplomacy):
+        market_anchor = (
+            "코스피", "코스닥", "증시", "외국인", "환율", "관세", "유가", "반도체", "금리", "수출", "etf", "실적",
+        )
+        if not any(k in blob.lower() for k in market_anchor):
+            return True
     return False
 
 
@@ -3811,25 +3826,16 @@ def _blob_is_kr_semiconductor_risk(blob: str, blob_l: str) -> bool:
 
 
 def _blob_is_kr_market_circuit(blob: str, blob_l: str) -> bool:
+    """당일 사이드카·서킷 등 실제 급변 — '8000 전망' 같은 분석 헤드라인은 제외."""
     if not any(k in blob for k in ("코스피", "코스닥", "kospi", "kosdaq", "지수")):
         return False
-    return any(
-        k in blob or k in blob_l
-        for k in (
-            "사이드카",
-            "sidecar",
-            "서킷브레이커",
-            "circuit breaker",
-            "급락",
-            "급등",
-            "8천",
-            "8000",
-            "매도 사이드카",
-            "매수 사이드카",
-            "vi ",
-            "변동성 완화",
-        )
-    )
+    if any(k in blob or k in blob_l for k in ("사이드카", "sidecar", "서킷브레이커", "circuit breaker", "매도 사이드카", "매수 사이드카")):
+        return True
+    if any(k in blob for k in ("급락", "급등", "plunge", "surge", "sell-off", "selloff")):
+        if any(k in blob for k in ("발목", "될까", "할까", "전망", "예상", "가능성")):
+            return False
+        return True
+    return False
 
 
 def _blob_is_kr_corporate_earnings(blob: str, blob_l: str) -> bool:
@@ -5921,6 +5927,7 @@ def live_news_hub_bullets(
         add_line(s)
     if not skip_event:
         add_line(event_line)
+    extra_facts = 0
     for fl in fact_lines:
         if len(out) >= max_total:
             break
@@ -5929,7 +5936,14 @@ def live_news_hub_bullets(
             continue
         if title_base and title_similarity(fl_clean, title_base) >= 0.88:
             continue
-        add_line(fl_clean)
+        if extra_facts >= 1 and len(fl_clean) < 100:
+            continue
+        for prev in out:
+            if title_similarity(fl_clean, prev) >= 0.55:
+                break
+        else:
+            add_line(fl_clean)
+            extra_facts += 1
     if not out:
         add_line(html_clean(title_ko, 220).strip() or "뉴스 확인")
     return out[:max_total]
@@ -5941,6 +5955,8 @@ def live_news_hub_watch_line(event_type: str, category: str, title: str, summary
     if category == "한국":
         if _blob_is_kr_market_circuit(raw, t):
             return "사이드카·급락 날은 코스피 선물·외국인 순매수·환율이 같은 방향인지 먼저 보면 됩니다."
+        if any(k in raw for k in ("미중", "중국", "美中")) and any(k in t for k in ("반도체", "semiconductor", "nvidia", "엔비디아", "노딜")):
+            return "미중·반도체: 수출통제·HBM 수급이 헤드라인보다 길게 붙는지, 삼성·하닉 갭만 먼저 보면 됩니다."
         if _blob_is_kr_semiconductor_risk(raw, t):
             return "美 반도체 급락은 월요인 코스피 갭·외국인·삼성·하닉 선물 포지션부터 확인."
         if _blob_is_kr_corporate_earnings(raw, t):
@@ -6273,6 +6289,8 @@ async def build_live_news_message(
 
     parts += ["", LIVE_NEWS_CARD_DISCLAIMER]
     msg = "\n".join(parts)
+    if mostly_english(html_clean(title_ko, 200)) and category in ("한국", "미국", "세계"):
+        return "", None
     return compact_message(msg, LIVE_MESSAGE_SOFT_LIMIT), chart_url
 
 
@@ -6707,7 +6725,10 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
 
 
 async def build_evening_checklist_message(session: aiohttp.ClientSession, now: datetime) -> str:
-    parts: list[str] = [room_line("데스크 체크리스트 · 장전", now)]
+    label = "데스크 체크리스트 · 장전"
+    if is_weekend_mode(now):
+        label = "데스크 체크리스트 · 주말"
+    parts: list[str] = [room_line(label, now)]
     if LIVE_ROOM_HOST_LINE:
         parts += ["", room_host_line(now, "digest", "digest")]
     parts += ["", SEC_DESK_SNAP]
@@ -6757,13 +6778,17 @@ async def daily_digest_scheduler(bot: Bot, state: State) -> None:
             key_evening = f"day_digest:{now.date()}"
             # 아침 7시는 overnight_recap_scheduler(7:10)와 겹치므로 제거. 저녁 한 번만.
             if now.hour == 18 and now.minute < 5 and state.digest_sent_dates.get(key_evening) != now.date():
-                try:
-                    async with aiohttp.ClientSession() as session:
-                        msg = await build_evening_checklist_message(session, now)
-                    await send_message(bot, msg, disable_preview=True)
+                if is_weekend_mode(now):
+                    logging.info("daily_digest skipped reason=weekend date=%s", now.date())
                     state.digest_sent_dates[key_evening] = now.date()
-                except Exception:
-                    logging.exception("daily_digest 전송 실패")
+                else:
+                    try:
+                        async with aiohttp.ClientSession() as session:
+                            msg = await build_evening_checklist_message(session, now)
+                        await send_message(bot, msg, disable_preview=True)
+                        state.digest_sent_dates[key_evening] = now.date()
+                    except Exception:
+                        logging.exception("daily_digest 전송 실패")
             await asyncio.sleep(60)
         except Exception:
             logging.exception("daily_digest_scheduler 오류")
@@ -6861,10 +6886,14 @@ async def live_recap_scheduler(bot: Bot, state: State) -> None:
                 state.recap_used_topics = set()
             if now.hour in LIVE_RECAP_HOURS and now.minute < 5:
                 key = f"recap:{now.date()}:{now.hour}"
-                if key not in state.recap_sent_keys and hasattr(state, "live_recent_items"):
+                if is_weekend_mode(now):
+                    if key not in state.recap_sent_keys:
+                        logging.info("recap skipped reason=weekend key=%s", key)
+                        state.recap_sent_keys.add(key)
+                elif key not in state.recap_sent_keys and hasattr(state, "live_recent_items"):
                     items = list(state.live_recent_items)[-8:]
                     if items:
-                        weekend_mode = is_weekend_mode(now)
+                        weekend_mode = False
                         holiday_mode = is_kr_holiday_day(now)
                         logging.info("recap mode weekend=%s holiday_mode=%s key=%s", weekend_mode, holiday_mode, key)
                         if weekend_mode:
@@ -6921,15 +6950,7 @@ async def live_recap_scheduler(bot: Bot, state: State) -> None:
                                 coin_count += 1
                             picked_hashes.append(title_hash)
                             picked_topics.append(topic_key)
-                            title_line = strip_news_source_tail(title)
-                            if bucket == "코인":
-                                title_line = "핵심 코인 이슈는 기대감 대비 실제 자금 유입이 확인되는지 점검 구간."
-                            elif bucket == "유가":
-                                title_line = "유가와 해운 변수는 단기 진정과 재확대 가능성을 함께 봐야 하는 흐름."
-                            elif bucket in ("금리", "달러"):
-                                title_line = "금리·달러 방향이 위험자산 변동성을 키우는지 확인이 필요한 구간."
-                            elif bucket in ("ETF",):
-                                title_line = "ETF 이슈는 헤드라인보다 실제 수급 반응을 먼저 확인할 구간."
+                            title_line = html_clean(strip_news_source_tail(title), 120).strip()
                             recap_blocks.append(f"{idx}. {bucket}\n{title_line}")
                             idx += 1
                             if idx > 3:
