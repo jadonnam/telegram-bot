@@ -17,7 +17,7 @@ from urllib.parse import quote, urlparse
 import aiohttp
 from aiohttp import web
 import feedparser
-from telegram import Bot
+from telegram import Bot, LinkPreviewOptions
 from telegram.error import BadRequest, InvalidToken, NetworkError, RetryAfter, TimedOut
 
 
@@ -116,6 +116,11 @@ REQUEST_HEADERS = {
     "User-Agent": "Mozilla/5.0 Chrome/124 Safari/537.36",
     "Accept": "application/json,text/plain,*/*",
 }
+
+BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
 
 FETCH_WARN_COOLDOWN = timedelta(minutes=10)
 FETCH_WARN_LAST_AT: Dict[str, datetime] = {}
@@ -631,21 +636,40 @@ async def _telegram_send_with_retry(coro_factory, *, op: str) -> None:
         raise last_err
 
 
-async def send_message(bot: Bot, text: str, disable_preview: bool = False) -> None:
+def rich_link_preview_options() -> LinkPreviewOptions:
+    return LinkPreviewOptions(is_disabled=False, prefer_large_media=True, show_above_text=True)
+
+
+async def send_message(
+    bot: Bot,
+    text: str,
+    disable_preview: bool = False,
+    *,
+    rich_preview: bool = False,
+) -> None:
     extra = _telegram_forum_kwargs()
     raw = text or ""
     limits = [TELEGRAM_MAX_MESSAGE_UNITS, 3000, 2000, 1200, 600]
     last_bad: Optional[BaseException] = None
+    lpo = rich_link_preview_options() if rich_preview else None
     for lim in limits:
         body = truncate_telegram_utf16_units(raw, lim).strip() or "…"
 
         async def _do(b: str = body) -> None:
-            await bot.send_message(
-                chat_id=CHANNEL_ID,
-                text=b,
-                disable_web_page_preview=disable_preview,
-                **extra,
-            )
+            if lpo is not None:
+                await bot.send_message(
+                    chat_id=CHANNEL_ID,
+                    text=b,
+                    link_preview_options=lpo,
+                    **extra,
+                )
+            else:
+                await bot.send_message(
+                    chat_id=CHANNEL_ID,
+                    text=b,
+                    disable_web_page_preview=disable_preview,
+                    **extra,
+                )
 
         try:
             await _telegram_send_with_retry(_do, op="send_message")
@@ -661,7 +685,13 @@ async def send_message(bot: Bot, text: str, disable_preview: bool = False) -> No
         raise last_bad
 
 
-async def safe_send(bot: Bot, text: str, disable_preview: bool = False) -> None:
+async def safe_send(
+    bot: Bot,
+    text: str,
+    disable_preview: bool = False,
+    *,
+    rich_preview: bool = False,
+) -> None:
     now = utc_now()
     text_key = hashlib.sha256((text or "").strip().encode("utf-8")).hexdigest()
     last_sent = _LAST_SENT_HASH_AT.get(text_key)
@@ -669,7 +699,7 @@ async def safe_send(bot: Bot, text: str, disable_preview: bool = False) -> None:
         logging.info("safe_send dedup skipped window=%ss", SEND_DEDUP_WINDOW_SECONDS)
         return
     try:
-        await send_message(bot, text, disable_preview=disable_preview)
+        await send_message(bot, text, disable_preview=disable_preview, rich_preview=rich_preview)
         _LAST_SENT_HASH_AT[text_key] = now
     except Exception as e:
         if is_telegram_auth_failure(e):
@@ -4892,14 +4922,117 @@ def news_image_url_passes_heuristics(url: str) -> bool:
     return True
 
 
+def _is_google_news_url(url: str) -> bool:
+    u = (url or "").lower()
+    return "news.google.com" in u or ("google.com" in u and "/rss/articles/" in u)
+
+
+def extract_publisher_url_from_entry(entry) -> Optional[str]:
+    links = getattr(entry, "links", None) or []
+    if isinstance(links, list):
+        for row in links:
+            if not isinstance(row, dict):
+                continue
+            href = (row.get("href") or "").strip()
+            rel = str(row.get("rel", "")).lower()
+            if href.startswith("http") and rel == "alternate" and not _is_google_news_url(href):
+                return href
+    src = getattr(entry, "source", None)
+    if src is not None:
+        href = (getattr(src, "href", None) or "").strip()
+        if href.startswith("http") and not _is_google_news_url(href):
+            return href
+    return None
+
+
+_PUBLISHER_URL_CACHE: dict[str, Tuple[float, str]] = {}
+_PUBLISHER_CACHE_TTL_SEC = 3600.0
+
+
+async def _unwrap_google_news_url(session: aiohttp.ClientSession, google_url: str) -> Optional[str]:
+    headers = {
+        "User-Agent": BROWSER_UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    }
+    try:
+        async with session.get(
+            google_url,
+            timeout=aiohttp.ClientTimeout(total=8),
+            headers=headers,
+            allow_redirects=True,
+        ) as resp:
+            final = str(resp.url)
+            if final.startswith("http") and not _is_google_news_url(final):
+                return final
+            ctype = (resp.headers.get("Content-Type") or "").lower()
+            if ctype and "html" not in ctype:
+                return None
+            html_body = await resp.text(errors="ignore")
+    except Exception:
+        return None
+    if not html_body or len(html_body) < 120:
+        return None
+    for pat in (
+        r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\']([^"\']+)["\']',
+        r'href=["\']([^"\']+)["\'][^>]+rel=["\']canonical["\']',
+        r'property=["\']og:url["\']\s+content=["\']([^"\']+)["\']',
+        r'content=["\']([^"\']+)["\']\s+property=["\']og:url["\']',
+        r'data-n-au=["\']([^"\']+)["\']',
+        r'article-url["\']\s+content=["\']([^"\']+)["\']',
+        r'"url"\s*:\s*"(https?://[^"\\]+)"',
+    ):
+        m = re.search(pat, html_body, re.I)
+        if not m:
+            continue
+        u = html.unescape((m.group(1) or "").strip())
+        if u.startswith("http") and not _is_google_news_url(u):
+            return u
+    return None
+
+
+async def resolve_publisher_url(
+    session: aiohttp.ClientSession, link: str, entry=None
+) -> str:
+    lk = (link or "").strip()
+    if not lk.startswith("http") or not _is_google_news_url(lk):
+        return lk
+    if entry:
+        alt = extract_publisher_url_from_entry(entry)
+        if alt:
+            return alt
+    cached = _PUBLISHER_URL_CACHE.get(lk)
+    if cached and (time.monotonic() - cached[0]) < _PUBLISHER_CACHE_TTL_SEC:
+        return cached[1]
+    pub = await _unwrap_google_news_url(session, lk)
+    out = pub or lk
+    if pub:
+        _PUBLISHER_URL_CACHE[lk] = (time.monotonic(), out)
+    return out
+
+
+async def resolve_live_news_preview_image(
+    session: aiohttp.ClientSession, entry, link: str
+) -> Optional[str]:
+    u = await resolve_entry_image_url(session, entry)
+    if u and news_image_url_passes_heuristics(u) and "quickchart.io" not in u.lower():
+        return u
+    lk = (link or "").strip()
+    if lk.startswith("http") and not _is_google_news_url(lk):
+        og = await fetch_og_image_url(session, lk)
+        if og and news_image_url_passes_heuristics(og):
+            return og
+    return None
+
+
 async def fetch_og_image_url(session: aiohttp.ClientSession, page_url: str) -> Optional[str]:
     if not page_url or not page_url.startswith("http"):
         return None
     try:
         async with session.get(
             page_url,
-            timeout=aiohttp.ClientTimeout(total=2.8),
-            headers={"User-Agent": "Mozilla/5.0 (compatible; NewsBot/1.0)"},
+            timeout=aiohttp.ClientTimeout(total=5.0),
+            headers={"User-Agent": BROWSER_UA, "Accept-Language": "ko-KR,ko;q=0.9"},
             allow_redirects=True,
         ) as resp:
             if resp.status >= 400:
@@ -6610,6 +6743,28 @@ async def build_live_news_message(
     return compact_message(msg, LIVE_MESSAGE_SOFT_LIMIT), chart_url
 
 
+async def send_compact_live_card(
+    bot: Bot,
+    text: str,
+    pub_link: str,
+    preview_img: Optional[str],
+) -> None:
+    """컴팩트 카드: 발행사 URL 링크 프리뷰(큰 이미지) 우선, Google URL·실패 시 OG 사진."""
+    if preview_img and _is_google_news_url(pub_link):
+        await send_news_card(bot, text, image_url=preview_img, use_s_grade_photo=True)
+        return
+    if preview_img and env_bool("LIVE_NEWS_COMPACT_OG_PHOTO", False):
+        await send_news_card(bot, text, image_url=preview_img, use_s_grade_photo=True)
+        return
+    try:
+        await send_news_card(bot, text, enable_link_preview=True, rich_link_preview=True)
+    except BadRequest:
+        if preview_img:
+            await send_news_card(bot, text, image_url=preview_img, use_s_grade_photo=True)
+        else:
+            raise
+
+
 async def send_news_card(
     bot: Bot,
     text: str,
@@ -6617,6 +6772,7 @@ async def send_news_card(
     use_s_grade_photo: bool = False,
     *,
     enable_link_preview: bool = True,
+    rich_link_preview: bool = False,
 ) -> None:
     if use_s_grade_photo and image_url:
         try:
@@ -6636,7 +6792,12 @@ async def send_news_card(
                     sent = True
                     rest = raw_caption[len(cap_plain) :]
                     if rest.strip():
-                        await safe_send(bot, rest, disable_preview=not enable_link_preview)
+                        await safe_send(
+                            bot,
+                            rest,
+                            disable_preview=not enable_link_preview,
+                            rich_preview=rich_link_preview,
+                        )
                     return
                 except BadRequest as e:
                     el = str(e).lower()
@@ -6652,7 +6813,12 @@ async def send_news_card(
                 logging.error("Telegram 토큰 인증 실패. BotFather에서 새 토큰 발급 후 TELEGRAM_TOKEN 교체 필요.")
                 return
             logging.warning("기사 이미지 전송 실패. 텍스트로 대체 image=%s", image_url)
-    await safe_send(bot, text, disable_preview=not enable_link_preview)
+    await safe_send(
+        bot,
+        text,
+        disable_preview=not enable_link_preview,
+        rich_preview=rich_link_preview,
+    )
 
 
 
@@ -7003,7 +7169,17 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                             )
                             await safe_send(bot, tape_msg, disable_preview=False)
                         else:
-                            image_url = await resolve_article_image_url(session, entry, source, raw_link)
+                            compact = live_news_card_style() == "compact"
+                            pub_link = raw_link
+                            preview_img: Optional[str] = None
+                            if compact:
+                                pub_link = await resolve_publisher_url(session, raw_link, entry)
+                                preview_img = await resolve_live_news_preview_image(session, entry, pub_link)
+                            image_url = (
+                                preview_img
+                                if compact
+                                else await resolve_article_image_url(session, entry, source, raw_link)
+                            )
                             msg, btc_chart_url = await build_live_news_message(
                                 session,
                                 cand_emoji,
@@ -7011,7 +7187,7 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                                 raw_title,
                                 raw_summary,
                                 source,
-                                raw_link,
+                                pub_link,
                                 state=state,
                             )
                             if not msg:
@@ -7023,9 +7199,8 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                             want_photo = live_news_should_send_photo(
                                 grade, importance, raw_title, raw_summary, has_article_image=bool(image_url)
                             )
-                            compact = live_news_card_style() == "compact"
                             if compact:
-                                await send_news_card(bot, msg, enable_link_preview=True)
+                                await send_compact_live_card(bot, msg, pub_link, preview_img)
                             else:
                                 photo_url = btc_chart_url or image_url
                                 use_photo = bool(btc_chart_url) or want_photo
