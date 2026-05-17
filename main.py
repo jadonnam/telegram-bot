@@ -637,7 +637,7 @@ async def _telegram_send_with_retry(coro_factory, *, op: str) -> None:
 
 
 def rich_link_preview_options() -> LinkPreviewOptions:
-    return LinkPreviewOptions(is_disabled=False, prefer_large_media=True, show_above_text=True)
+    return LinkPreviewOptions(is_disabled=False, prefer_large_media=True, show_above_text=False)
 
 
 async def send_message(
