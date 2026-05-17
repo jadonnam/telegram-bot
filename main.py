@@ -474,6 +474,49 @@ def title_similarity(a: str, b: str) -> float:
     return len(sa & sb) / max(1, len(sa | sb))
 
 
+def live_news_alert_mark(importance: int) -> str:
+    if importance >= 10:
+        return "🚨"
+    if importance >= 9:
+        return "🔴"
+    if importance >= 8:
+        return "✅"
+    return "📌"
+
+
+def pick_single_live_headline(title_ko: str, summary: str = "") -> str:
+    """RSS에 여러 헤드가 붙어도 채널에는 한 줄만."""
+    t = polish_coin_news_headline(html_clean(strip_news_source_tail(title_ko or ""), 220)).strip()
+    if not t:
+        t = html_clean(strip_news_source_tail(summary or ""), 160).strip()
+    if not t:
+        return "뉴스 확인"
+    if len(t) <= 160 and t.count("\n") == 0 and t.count("·") <= 1:
+        return t[:180]
+    chunks: list[str] = []
+    for seg in re.split(r"\s*…\s*|\s*·\s*|\n+|\|", t):
+        seg = re.sub(r"\s+", " ", seg).strip(" -–—")
+        if len(seg) >= 14:
+            chunks.append(seg)
+    if not chunks:
+        chunks = [t]
+    picked: list[str] = []
+    for c in chunks:
+        if any(headlines_are_near_duplicate(c, p) for p in picked):
+            continue
+        picked.append(c)
+    if not picked:
+        return t[:180]
+    picked.sort(key=len, reverse=True)
+    best = picked[0]
+    if len(best) > 150 and len(picked) > 1:
+        for p in picked:
+            if 40 <= len(p) <= 130:
+                best = p
+                break
+    return best[:180]
+
+
 def headlines_are_near_duplicate(a: str, b: str, *, min_prefix: int = 22) -> bool:
     """제목·RSS 요약 앞부분이 같을 때(…·따옴표 차이) 중복 헤드 방지."""
     if not a or not b:
@@ -3046,6 +3089,12 @@ LIVE_ROOM_HOST_LINE = env_bool("LIVE_ROOM_HOST_LINE", False)
 LIVE_NEWS_BTC_CHART = env_bool("LIVE_NEWS_BTC_CHART", True)  # 코인 뉴스: TV 스냅 + 자리·흐름
 LIVE_NEWS_COMPACT_NUMERIC_BLOCK = env_bool("LIVE_NEWS_COMPACT_NUMERIC_BLOCK", True)
 LIVE_NEWS_CARD_DISCLAIMER = "※ 정리용 · 투자 권유 아님 · 레버·청산·슬리피지·거래소·규제 리스크 전제."
+
+
+def live_news_card_style() -> str:
+    """compact=한 줄 헤드+URL(링크 프리뷰) · desk=①②③ 구형 카드."""
+    raw = (os.getenv("LIVE_NEWS_CARD_STYLE") or "compact").strip().lower()
+    return raw if raw in ("compact", "desk") else "compact"
 LIVE_NEWS_NIGHT_COIN_MIN = env_int("LIVE_NEWS_NIGHT_COIN_MIN", 12, min_value=8, max_value=24)
 LIVE_NEWS_NIGHT_OTHER_MIN = env_int("LIVE_NEWS_NIGHT_OTHER_MIN", 12, min_value=8, max_value=28)
 
@@ -6470,10 +6519,62 @@ async def build_live_news_message(
     if not article_hook and desk_ctx and category == "코인":
         hook = desk_ctx
     actions = live_news_action_bullets(event_type, category, title_clean, summary, coin_type=coin_type)
+
+    chart_url: Optional[str] = None
     trade_lines: list[str] = []
+    attach_chart = live_news_card_style() != "compact" or env_bool("LIVE_NEWS_COMPACT_CHART", False)
+    if (
+        attach_chart
+        and category == "코인"
+        and importance >= LIVE_BTC_MIN_IMPORTANCE
+        and LIVE_NEWS_BTC_CHART
+        and should_attach_coin_chart(coin_type, title_clean, summary)
+    ):
+        try:
+            chart_url, trade_lines = await coin_news_trade_desk(
+                session,
+                title_clean,
+                summary,
+                coin_type,
+                state=state,
+                importance=importance,
+            )
+        except Exception:
+            logging.debug("coin_news_trade_desk failed", exc_info=True)
+    elif attach_chart and category == "한국" and importance >= LIVE_BTC_MIN_IMPORTANCE:
+        blob_l = f"{title_clean} {summary}".lower()
+        if _blob_is_kr_market_circuit(f"{title_clean} {summary}", blob_l) or any(
+            k in blob_l for k in ("코스피", "kospi", "코스닥", "급락", "급등", "사이드카")
+        ):
+            try:
+                chart_url = await kr_market_chart_url(session, title_clean, summary)
+            except Exception:
+                logging.debug("kr_market_chart_url failed", exc_info=True)
+
+    now = now_kst()
+    link_s = (link or "").strip()
+
+    if live_news_card_style() == "compact":
+        headline = pick_single_live_headline(title_ko, summary)
+        mark = live_news_alert_mark(importance)
+        parts = [
+            room_line(f"{category_emoji} {category}", now),
+            f"{mark} {headline}",
+        ]
+        if trade_lines:
+            for tl in trade_lines[:2]:
+                parts.append(f"· {tl}")
+        elif category == "코인" and chart_url and hook and "페그" not in hook and len(hook) < 100:
+            parts.append(f"· {hook}")
+        if link_s.startswith("http"):
+            parts.append("")
+            parts.append(link_s)
+        msg = compact_message("\n".join(parts), 900)
+        if mostly_english(html_clean(title_ko, 200)) and category in ("한국", "미국", "세계"):
+            return "", None
+        return msg, chart_url
 
     headline = html_clean(title_ko, 240).strip()
-    now = now_kst()
     parts: list[str] = [
         room_line(f"{category_emoji} {cat_line}", now),
         f"〔{importance}/10〕",
@@ -6491,39 +6592,10 @@ async def build_live_news_message(
     if extra_nums and not _live_news_numeric_block_is_redundant(category, title_clean, summary, event_line, extra_nums):
         parts.append(f"· 숫자: {' / '.join(extra_nums[:3])}")
     parts += ["", SEC_NEWS_CONTEXT, f"· {hook}", ""]
-    chart_url: Optional[str] = None
-    trade_lines: list[str] = []
-    if (
-        category == "코인"
-        and importance >= LIVE_BTC_MIN_IMPORTANCE
-        and LIVE_NEWS_BTC_CHART
-        and should_attach_coin_chart(coin_type, title_clean, summary)
-    ):
-        try:
-            chart_url, trade_lines = await coin_news_trade_desk(
-                session,
-                title_clean,
-                summary,
-                coin_type,
-                state=state,
-                importance=importance,
-            )
-        except Exception:
-            logging.debug("coin_news_trade_desk failed", exc_info=True)
-    elif category == "한국" and importance >= LIVE_BTC_MIN_IMPORTANCE:
-        blob_l = f"{title_clean} {summary}".lower()
-        if _blob_is_kr_market_circuit(f"{title_clean} {summary}", blob_l) or any(
-            k in blob_l for k in ("코스피", "kospi", "코스닥", "급락", "급등", "사이드카")
-        ):
-            try:
-                chart_url = await kr_market_chart_url(session, title_clean, summary)
-            except Exception:
-                logging.debug("kr_market_chart_url failed", exc_info=True)
     check_label = "③ 자리 · 흐름" if trade_lines else SEC_NEWS_CHECK
     parts.append(check_label)
     for a in trade_lines if trade_lines else actions[:1]:
         parts.append(f"· {a}")
-    link_s = (link or "").strip()
     if link_s.startswith("http"):
         parts += ["", f"🔗 {link_s}"]
     if src_line:
@@ -6538,7 +6610,14 @@ async def build_live_news_message(
     return compact_message(msg, LIVE_MESSAGE_SOFT_LIMIT), chart_url
 
 
-async def send_news_card(bot: Bot, text: str, image_url: Optional[str] = None, use_s_grade_photo: bool = False) -> None:
+async def send_news_card(
+    bot: Bot,
+    text: str,
+    image_url: Optional[str] = None,
+    use_s_grade_photo: bool = False,
+    *,
+    enable_link_preview: bool = True,
+) -> None:
     if use_s_grade_photo and image_url:
         try:
             extra = _telegram_forum_kwargs()
@@ -6557,7 +6636,7 @@ async def send_news_card(bot: Bot, text: str, image_url: Optional[str] = None, u
                     sent = True
                     rest = raw_caption[len(cap_plain) :]
                     if rest.strip():
-                        await safe_send(bot, rest, disable_preview=True)
+                        await safe_send(bot, rest, disable_preview=not enable_link_preview)
                     return
                 except BadRequest as e:
                     el = str(e).lower()
@@ -6573,7 +6652,7 @@ async def send_news_card(bot: Bot, text: str, image_url: Optional[str] = None, u
                 logging.error("Telegram 토큰 인증 실패. BotFather에서 새 토큰 발급 후 TELEGRAM_TOKEN 교체 필요.")
                 return
             logging.warning("기사 이미지 전송 실패. 텍스트로 대체 image=%s", image_url)
-    await safe_send(bot, text, disable_preview=True)
+    await safe_send(bot, text, disable_preview=not enable_link_preview)
 
 
 
@@ -6944,9 +7023,15 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                             want_photo = live_news_should_send_photo(
                                 grade, importance, raw_title, raw_summary, has_article_image=bool(image_url)
                             )
-                            photo_url = btc_chart_url or image_url
-                            use_photo = bool(btc_chart_url) or want_photo
-                            await send_news_card(bot, msg, image_url=photo_url, use_s_grade_photo=use_photo)
+                            compact = live_news_card_style() == "compact"
+                            if compact:
+                                await send_news_card(bot, msg, enable_link_preview=True)
+                            else:
+                                photo_url = btc_chart_url or image_url
+                                use_photo = bool(btc_chart_url) or want_photo
+                                await send_news_card(
+                                    bot, msg, image_url=photo_url if use_photo else None, use_s_grade_photo=use_photo
+                                )
                         if cand_category == "코인":
                             state.coin_topic_last_sent[coin_topic_key(raw_title, raw_summary)] = now
                             state.coin_live_daily_count += 1
