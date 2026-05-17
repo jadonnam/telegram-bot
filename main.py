@@ -474,6 +474,23 @@ def title_similarity(a: str, b: str) -> float:
     return len(sa & sb) / max(1, len(sa | sb))
 
 
+def headlines_are_near_duplicate(a: str, b: str, *, min_prefix: int = 22) -> bool:
+    """제목·RSS 요약 앞부분이 같을 때(…·따옴표 차이) 중복 헤드 방지."""
+    if not a or not b:
+        return False
+    if title_similarity(a, b) >= 0.62:
+        return True
+    ca = re.sub(r"[^\w가-힣]", "", (a or "").lower())
+    cb = re.sub(r"[^\w가-힣]", "", (b or "").lower())
+    if len(ca) < 14 or len(cb) < 14:
+        return False
+    short, long = (ca, cb) if len(ca) <= len(cb) else (cb, ca)
+    if len(short) >= 18 and short in long:
+        return True
+    n = min(len(short), min_prefix, len(long))
+    return n >= 18 and short[:n] == long[:n]
+
+
 def is_duplicate_or_similar_news(state: State, title: str, link: str, now: datetime) -> bool:
     url_hash = hashlib.sha256(normalize_news_url(link).encode("utf-8")).hexdigest()
     if state.has_news(url_hash):
@@ -5132,7 +5149,10 @@ def dedupe_fact_lines(lines: list[str], *, sim_threshold: float = 0.82) -> list[
         s = (ln or "").strip()
         if len(s) < 12:
             continue
-        if any(title_similarity(s, prev) >= sim_threshold for prev in out):
+        if any(
+            title_similarity(s, prev) >= sim_threshold or headlines_are_near_duplicate(s, prev)
+            for prev in out
+        ):
             continue
         out.append(s)
     return out
@@ -5891,6 +5911,7 @@ def live_news_hub_bullets(
     *,
     prefix: Optional[list[str]] = None,
     max_total: int = 4,
+    headline_only: bool = False,
 ) -> list[str]:
     out: list[str] = []
     seen_norm: list[str] = []
@@ -5900,25 +5921,34 @@ def live_news_hub_bullets(
         raw = re.sub(r"\s+\.", ".", raw).strip()
         if len(raw) < 10:
             return
-        norm = re.sub(r"\s+", "", raw.lower())
-        for prev in seen_norm:
-            if norm == prev or (len(norm) >= 28 and norm in prev) or (len(prev) >= 28 and prev in norm):
+        compact = re.sub(r"[^\w가-힣]", "", raw.lower())
+        for prev_c in seen_norm:
+            if compact == prev_c:
                 return
+            if len(compact) >= 18 and len(prev_c) >= 18:
+                short, long = (compact, prev_c) if len(compact) <= len(prev_c) else (prev_c, compact)
+                if short in long:
+                    return
+                n = min(len(short), 28, len(long))
+                if n >= 18 and short[:n] == long[:n]:
+                    return
         for prev_line in out:
-            if title_similarity(raw, prev_line) >= 0.82:
+            if title_similarity(raw, prev_line) >= 0.72 or headlines_are_near_duplicate(raw, prev_line):
                 return
         out.append(raw)
-        seen_norm.append(norm)
+        seen_norm.append(compact)
 
     title_base = html_clean(title_ko or "", 220).strip()
     skip_event = False
     if title_base and len(title_base) >= 12:
         add_line(title_base)
         skip_event = True
+        if headline_only:
+            return out[:max_total]
     if fact_lines and title_base and not skip_event:
-        if max(title_similarity(sanitize_news_fact_line(fl), title_base) for fl in fact_lines) >= 0.52:
+        if any(headlines_are_near_duplicate(sanitize_news_fact_line(fl), title_base) for fl in fact_lines):
             skip_event = True
-        elif event_line and title_similarity(event_line, title_base) >= 0.72:
+        elif event_line and headlines_are_near_duplicate(event_line, title_base):
             skip_event = True
 
     for s in prefix or []:
@@ -5927,23 +5957,21 @@ def live_news_hub_bullets(
         add_line(s)
     if not skip_event:
         add_line(event_line)
-    extra_facts = 0
     for fl in fact_lines:
         if len(out) >= max_total:
             break
         fl_clean = sanitize_news_fact_line(fl)
-        if event_line and title_similarity(fl_clean, event_line) >= 0.58:
+        if title_base and headlines_are_near_duplicate(fl_clean, title_base):
             continue
-        if title_base and title_similarity(fl_clean, title_base) >= 0.88:
+        if event_line and headlines_are_near_duplicate(fl_clean, event_line):
             continue
-        if extra_facts >= 1 and len(fl_clean) < 100:
-            continue
+        dup = False
         for prev in out:
-            if title_similarity(fl_clean, prev) >= 0.55:
+            if headlines_are_near_duplicate(fl_clean, prev):
+                dup = True
                 break
-        else:
+        if not dup:
             add_line(fl_clean)
-            extra_facts += 1
     if not out:
         add_line(html_clean(title_ko, 220).strip() or "뉴스 확인")
     return out[:max_total]
@@ -6224,8 +6252,15 @@ async def build_live_news_message(
         depth_txt = kr_equity_etf_depth_paragraph(ek_depth, title_ko, event_line, etf_facts)
         prefix_lines = [ln.strip() for ln in depth_txt.split("\n") if ln.strip()][:2]
 
-    bullet_cap = 4 if explanatory else 3
-    bullets = live_news_hub_bullets(event_line, fact_lines, title_ko, prefix=prefix_lines or None, max_total=bullet_cap)
+    bullet_cap = 4 if explanatory else 1
+    bullets = live_news_hub_bullets(
+        event_line,
+        fact_lines,
+        title_ko,
+        prefix=prefix_lines or None,
+        max_total=bullet_cap,
+        headline_only=not explanatory,
+    )
     article_hook = coin_article_interpretation(title_clean, summary, coin_type) if category == "코인" else ""
     hook = article_hook or live_news_hub_watch_line(event_type, category, title_clean, summary)
     if not article_hook and desk_ctx and category == "코인":
