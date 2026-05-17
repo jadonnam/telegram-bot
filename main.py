@@ -1343,12 +1343,22 @@ def _fmt_trade_price(symbol: str, price: float) -> str:
 
 def coin_article_interpretation(title: str, summary: str, coin_type: str) -> str:
     t = f"{title} {summary}".lower()
+    if coin_type == "sanctions_stablecoin" or (
+        any(k in t for k in ("russia", "러시아", "moscow", "모스크바"))
+        and any(k in t for k in ("sanction", "제재"))
+        and any(k in t for k in ("stablecoin", "스테이블", "usdt", "usdc"))
+    ):
+        return "제재·러시아 스테이블 이슈는 BTC 차트보다 USDT·USDC 페그·유통·거래소 입출금·제재 명단이 먼저입니다."
     if "firedancer" in t or ("jump" in t and "sol" in t):
         return "Firedancer는 SOL 체인 성능·수수료 이슈라, 헤드라인보다 SOL 거래량·TPS 반응을 먼저 보면 됩니다."
     if any(k in t for k in ("infrastructure", "rollout", "인프라", "출시", "메인넷")):
         return "인프라·출시 뉴스는 가격보다 체인 사용량·수수료·거래량이 먼저 움직이는 경우가 많습니다."
     if any(k in t for k in ("clarity", "클래리티", "congress", "의회", "법안")):
         return "규제·입법은 단기 심리(펀딩)가 먼저, 현물·ETF 수급은 며칠 늦게 따라오는 편입니다."
+    if any(k in t for k in ("stablecoin", "스테이블코인", "usdc", "usdt")) and not any(
+        k in t for k in ("btc", "bitcoin", "eth", "ethereum", "청산", "liquidation", "급락", "급등")
+    ):
+        return "스테이블·결제·규제 보도는 페그·민트·유통량·CEX 입출금만 보면 됩니다. BTC 15m과는 별개입니다."
     if "etf" in t and any(k in t for k in ("inflow", "outflow", "유입", "유출")):
         return "ETF 유입·유출 숫자가 나오면 BTC·ETH가 같은 방향으로 움직이는지가 핵심입니다."
     if coin_type == "volatility":
@@ -3694,9 +3704,76 @@ def is_stale_spot_etf_rehash(title: str, summary: str) -> bool:
     return not any(k in t for k in fresh)
 
 
+def is_coin_policy_opinion_fluff(title: str, summary: str) -> bool:
+    """스테이블·제재 '생존한다' 류 인터뷰/의견 — BTC 차트·펀딩 체크와 무관."""
+    raw = f"{title} {summary}"
+    t = raw.lower()
+    opinion = (
+        "살아남을",
+        "survive even",
+        "can survive",
+        "will survive",
+        "전망했",
+        "라고 밝혔",
+        "밝혔습니다",
+        "said it can",
+        "says it can",
+        "인터뷰",
+        "opinion",
+        "전망",
+    )
+    if not any(k in raw or k in t for k in opinion):
+        return False
+    stable_sanction = any(k in t for k in ("stablecoin", "스테이블", "usdt", "usdc", "tether")) and any(
+        k in t for k in ("russia", "러시아", "sanction", "제재", "ofac", "우크라")
+    )
+    if stable_sanction:
+        hard_fact = (
+            "inflow",
+            "outflow",
+            "유입",
+            "유출",
+            "depeg",
+            "페그",
+            "mint",
+            "burn",
+            "billion",
+            "million",
+            "억",
+            "조",
+            "hack",
+            "해킹",
+            "청산",
+            "listing",
+            "상장",
+            "승인",
+            "거절",
+        )
+        return not any(k in t for k in hard_fact)
+    return False
+
+
+def polish_coin_news_headline(title: str) -> str:
+    s = html_clean(strip_news_source_tail(title or ""), 220).strip()
+    for tail in (
+        "라고 밝혔습니다",
+        "라고 전했습니다",
+        "라고 말했습니다",
+        "라고 했습니다",
+        "밝혔습니다",
+        "전했습니다",
+        "말했습니다",
+    ):
+        if s.endswith(tail):
+            s = s[: -len(tail)].strip(" .…·")
+    return s.strip() or title
+
+
 def coin_news_block_reason(title: str, summary: str) -> str:
     text_value = f"{title} {summary}".lower()
     raw_h = f"{title} {summary}"
+    if is_coin_policy_opinion_fluff(title, summary):
+        return "coin_policy_opinion_fluff"
     if is_stale_spot_etf_rehash(title, summary):
         return "coin_stale_etf_rehash"
     if re.search(r"(그 이유와|의미는\s*\?|why it matters|what it means)", raw_h, re.I):
@@ -5680,6 +5757,10 @@ def classify_coin_news_type(title: str, summary: str) -> str:
         return "btc_flow"
     if ek == "crypto_etf" or (any(k in txt for k in ("etf", "sec", "승인", "유입", "inflow")) and is_crypto_etf_content(title, summary)):
         return "etf_flow"
+    if any(k in txt for k in ("russia", "러시아", "moscow")) and any(
+        k in txt for k in ("sanction", "제재", "ofac")
+    ) and any(k in txt for k in ("stablecoin", "스테이블", "usdt", "usdc")):
+        return "sanctions_stablecoin"
     if any(k in txt for k in ("스테이블코인", "stablecoin", "usdc", "circle", "coinbase", "stripe", "aws")):
         return "stablecoin_payment"
     return "coin_general"
@@ -5694,6 +5775,8 @@ def coin_topic_key(title: str, summary: str) -> str:
         return "sol_etf"
     if news_type == "eth_security":
         return "eth_security"
+    if news_type == "sanctions_stablecoin":
+        return "sanctions_stablecoin"
     if news_type == "stablecoin_payment":
         return "stablecoin_payment"
     if news_type == "btc_flow":
@@ -5805,8 +5888,10 @@ def related_assets_for_coin_news(title: str, summary: str) -> str:
         return "SOL · 알트 · SOL-USDT"
     if news_type == "btc_flow":
         return "BTC · ETF · 기관수급"
+    if news_type == "sanctions_stablecoin":
+        return "USDT · USDC · 제재"
     if news_type == "stablecoin_payment":
-        return "USDC · Coinbase · 결제"
+        return "USDC · USDT · 페그"
     if news_type == "volatility":
         return "BTC · 청산 · 변동성"
     if news_type == "etf_flow":
@@ -5852,20 +5937,38 @@ def coin_news_brief(news_type: str, title: str, summary: str) -> str:
         return "SOL·알트는 ETF·규제 말 나올 때 빚이 먼저 반응하는 경우가 많아요."
     if news_type == "btc_flow":
         return "BTC ETF랑 온체인 돈 들어오는 얘기는 가격 밑받침 말로 바로 붙어요."
+    if news_type == "sanctions_stablecoin":
+        return "러시아·제재 스테이블은 USDT·USDC 페그·유통·거래소 입출금만 보면 됩니다."
     if news_type == "stablecoin_payment":
-        return "결제에 스테이블 쓰겠다는 뉴스는 거래소 가격 차이 구조가 바뀔 수 있어요."
+        return "스테이블·결제 이슈는 페그·민트·CEX 입출금이 먼저입니다."
     if news_type == "volatility":
         return "큰 청산이 나오면 펀딩이랑 미결제가 한꺼번에 줄어서 출렁여요."
     if news_type == "etf_flow":
         return "SEC 서류랑 돈 들어온 통계가 나오면 BTC·ETH가 같이 움직이기 쉬워요."
+    txt = f"{title} {summary}".lower()
+    if not any(k in txt for k in ("btc", "bitcoin", "eth", "ethereum", "sol", "청산", "liquidation", "etf")):
+        return ""
     return "코인은 한 종목보다 BTC랑 규칙·돈 묶임이 같이 움직이는 날이 많아요."
 
 
-def should_attach_btc_price(news_type: str, title: str, summary: str) -> bool:
+def should_attach_coin_chart(coin_type: str, title: str, summary: str) -> bool:
+    """BTC 15m 차트·자리·흐름 — 가격·청산·ETF 이슈에만."""
+    if is_coin_policy_opinion_fluff(title, summary):
+        return False
     txt = f"{title} {summary}".lower()
-    if news_type in ("btc_flow", "volatility"):
+    if coin_type in ("btc_flow", "volatility", "etf_flow", "sol_alt_flow", "eth_security"):
         return True
-    return any(k in txt for k in ("market-wide", "시장 전반", "risk-on", "risk off"))
+    if coin_type in ("sanctions_stablecoin", "stablecoin_payment"):
+        if any(k in txt for k in ("depeg", "페그", "이탈", "mint", "burn", "유출", "유입", "inflow", "outflow")):
+            return True
+        return False
+    if any(k in txt for k in ("btc", "bitcoin", "비트코인", "청산", "liquidation", "급락", "급등", "etf")):
+        return True
+    return False
+
+
+def should_attach_btc_price(news_type: str, title: str, summary: str) -> bool:
+    return should_attach_coin_chart(news_type, title, summary)
 
 
 def coin_news_flag(news_type: str, importance: int) -> str:
@@ -6097,6 +6200,12 @@ def live_news_hub_watch_line(event_type: str, category: str, title: str, summary
             return "헤드라인보다 어제 ETF 유입·오늘 펀딩이 맞는지가 먼저입니다."
         if any(k in t for k in ("eth", "ethereum", "이더")):
             return "ETH 이슈도 BTC·펀딩 방향이 같이 가는지 보면 됩니다."
+        if any(k in t for k in ("stablecoin", "스테이블", "usdc", "usdt")) and any(
+            k in t for k in ("russia", "러시아", "sanction", "제재")
+        ):
+            return "제재·스테이블은 페그·유통·거래소 입출금만. BTC 펀딩과는 별개입니다."
+        if any(k in t for k in ("stablecoin", "스테이블", "usdc", "usdt", "결제", "payment")):
+            return "스테이블·결제 이슈는 USDT·USDC 페그·민트·CEX 공지만 보면 됩니다."
         return "가격·거래대금·펀딩이 같은 쪽인지만 보면 됩니다."
     if "discord" in t or "디스코드" in t:
         return "커뮤니티 규정 이슈는 단기 심리·노이즈 비중이 큼. 체결·펀딩·선물 스큐로만 검증."
@@ -6113,11 +6222,16 @@ def live_news_hub_watch_line(event_type: str, category: str, title: str, summary
     return "지수·환율·외국인 흐름을 한 줄로 압축."
 
 
-def live_news_action_bullets(event_type: str, category: str, title: str, summary: str) -> list[str]:
+def live_news_action_bullets(
+    event_type: str, category: str, title: str, summary: str, *, coin_type: str = ""
+) -> list[str]:
     t = f"{title} {summary}".lower()
     raw = f"{title} {summary}"
     out: list[str] = []
     if category == "코인":
+        ct = coin_type or classify_coin_news_type(title, summary)
+        if ct in ("sanctions_stablecoin", "stablecoin_payment") and not should_attach_coin_chart(ct, title, summary):
+            return ["USDT·USDC 페그 · 스테이블 유통량 · 거래소 입출금·제재 공지."]
         etf_hit = "etf" in t or "sec" in t or "승인" in t or "거절" in t
         if event_type == "security" or any(k in t for k in ("hack", "exploit", "해킹", "출금", "동결")):
             return ["거래소 공지·출금·USDT 페그만 먼저 확인."]
@@ -6266,7 +6380,13 @@ async def build_live_news_message(
     state: Optional[State] = None,
 ) -> Tuple[str, Optional[str]]:
     title_clean = strip_news_source_tail(title or "")
-    title_ko = await ensure_korean_text(session, polish_korean_news_text(html_clean(title_clean, 200)))
+    base_title = polish_korean_news_text(html_clean(title_clean, 200))
+    title_ko = polish_coin_news_headline(await ensure_korean_text(session, base_title))
+    if category == "코인" and re.search(r"(밝혔습니다|전했습니다|말했습니다)\s*$", title_ko) and len(title_ko) > 80:
+        if mostly_english(title_clean):
+            title_ko = polish_coin_news_headline(await ensure_korean_text(session, html_clean(title_clean, 180)))
+        elif len(base_title) >= 12:
+            title_ko = polish_coin_news_headline(base_title)
 
     try:
         raw_score = live_news_score(title_clean, summary, category, link)
@@ -6349,7 +6469,7 @@ async def build_live_news_message(
     hook = article_hook or live_news_hub_watch_line(event_type, category, title_clean, summary)
     if not article_hook and desk_ctx and category == "코인":
         hook = desk_ctx
-    actions = live_news_action_bullets(event_type, category, title_clean, summary)
+    actions = live_news_action_bullets(event_type, category, title_clean, summary, coin_type=coin_type)
     trade_lines: list[str] = []
 
     headline = html_clean(title_ko, 240).strip()
@@ -6373,7 +6493,12 @@ async def build_live_news_message(
     parts += ["", SEC_NEWS_CONTEXT, f"· {hook}", ""]
     chart_url: Optional[str] = None
     trade_lines: list[str] = []
-    if category == "코인" and importance >= LIVE_BTC_MIN_IMPORTANCE and LIVE_NEWS_BTC_CHART:
+    if (
+        category == "코인"
+        and importance >= LIVE_BTC_MIN_IMPORTANCE
+        and LIVE_NEWS_BTC_CHART
+        and should_attach_coin_chart(coin_type, title_clean, summary)
+    ):
         try:
             chart_url, trade_lines = await coin_news_trade_desk(
                 session,
