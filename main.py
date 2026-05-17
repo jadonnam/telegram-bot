@@ -3522,28 +3522,107 @@ def html_clean(value: str, limit: int = 500) -> str:
     return value[:limit].strip()
 
 
+def _market_term_in_text(term: str, text: str) -> bool:
+    """짧은 영문 토큰(ai·sol 등)은 단어 경계로만 — 한글 속 오탐 방지."""
+    t = (term or "").lower()
+    raw = text or ""
+    if not t:
+        return False
+    if len(t) <= 3 and t.isascii():
+        return bool(re.search(rf"\b{re.escape(t)}\b", raw.lower()))
+    return t in raw.lower()
+
+
 def has_market_impact(title: str, summary: str) -> bool:
-    text_value = f"{title} {summary}".lower()
-    return any(k.lower() in text_value for k in MARKET_IMPACT_TERMS)
+    text_value = f"{title} {summary}"
+    return any(_market_term_in_text(k, text_value) for k in MARKET_IMPACT_TERMS)
+
+
+KR_MARKET_STORY_TERMS = (
+    "코스피",
+    "코스닥",
+    "증시",
+    "주가",
+    "외국인",
+    "기관",
+    "연기금",
+    "환율",
+    "원/달러",
+    "원달러",
+    "반도체",
+    "삼성전자",
+    "sk하이닉스",
+    "하이닉스",
+    "실적",
+    "가이던스",
+    "etf",
+    "금리",
+    "급락",
+    "급등",
+    "사이드카",
+    "공매도",
+    "공시",
+    "상장",
+    "배당",
+    "자사주",
+    "매수",
+    "매도",
+    "수급",
+    "kospi",
+    "kosdaq",
+)
+
+
+def has_kr_market_story(title: str, summary: str) -> bool:
+    """한국 피드 — 실제 증시·수급·실적 맥락이 있을 때만."""
+    blob = f"{title} {summary}"
+    bl = blob.lower()
+    return any(k in blob or k in bl for k in KR_MARKET_STORY_TERMS)
 
 
 def is_non_market_society_noise(title: str, summary: str) -> bool:
     """증시·코인·매크로와 거리 먼 사회/생활 이슈(대형 채널 노이즈)."""
     blob = f"{title} {summary}"
+    bl = blob.lower()
+    market_anchor = (
+        "코스피", "코스닥", "증시", "외국인", "기관", "환율", "관세", "유가", "반도체", "금리", "수출", "etf", "실적",
+        "주가", "급락", "급등", "삼성전자", "하이닉스",
+    )
+    has_market = any(k in blob or k in bl for k in market_anchor)
+
     if "인천공항" in blob and ("주차" in blob or "주차장" in blob):
         return True
     if ("범여권" in blob or "야권" in blob) and any(
         k in blob for k in ("시장", "단일화", "지선", "선거", "시의원", "도지사", "구청장", "군수")
     ):
-        if not any(k in blob for k in ("코스피", "코스닥", "증시", "외국인", "기관", "환율", "ETF", "실적")):
+        if not has_market:
             return True
+    commemoration = (
+        "5·18",
+        "5.18",
+        "518",
+        "오월",
+        "광주민주",
+        "민주화",
+        "민주항쟁",
+        "추모식",
+        "추모 행사",
+        "기념식",
+        "국립묘지",
+        "헌법 수록",
+        "빈손 송구",
+        "유가족",
+        "희생자 추모",
+        "촛불집회",
+        "촛불 집회",
+    )
+    if any(k in blob for k in commemoration) and not has_market:
+        return True
+    if any(k in blob for k in ("추모식", "추모 행사", "장례", "조문", "애도")) and not has_market:
+        return True
     diplomacy = ("셔틀외교", "정상회담", "정상 회담", "영접", "불놀이", "수운잡방", "다카이치", "외교 순방", "고향 안동")
-    if any(k in blob for k in diplomacy):
-        market_anchor = (
-            "코스피", "코스닥", "증시", "외국인", "환율", "관세", "유가", "반도체", "금리", "수출", "etf", "실적",
-        )
-        if not any(k in blob.lower() for k in market_anchor):
-            return True
+    if any(k in blob for k in diplomacy) and not has_market:
+        return True
     return False
 
 
@@ -4409,7 +4488,7 @@ def live_news_score(title: str, summary: str, category: str, link: str = "") -> 
         return -100
     if not has_market_impact(title, summary):
         return -30
-    score = sum(2 for k in MARKET_IMPACT_TERMS if k.lower() in text_low)
+    score = sum(2 for k in MARKET_IMPACT_TERMS if _market_term_in_text(k, f"{title} {summary}"))
     if category == "미국" and any(k in text_low for k in ("nvidia", "tesla", "earnings", "guidance", "nasdaq", "fed", "cpi", "엔비디아", "테슬라", "실적", "가이던스", "나스닥", "연준", "금리")):
         score += 10
     if category == "세계" and any(k in text_low for k in ("oil", "dollar", "iran", "israel", "hormuz", "missile", "strike", "sanction", "nuclear", "ceasefire", "유가", "달러", "이란", "이스라엘", "호르무즈", "미사일", "공습", "제재", "핵", "휴전")):
@@ -5477,6 +5556,10 @@ def live_news_block_reason(title: str, summary: str, category: str, now: datetim
     lq = low_quality_block_reason(title, summary)
     if lq:
         return lq
+    if is_non_market_society_noise(title, summary):
+        return "society_non_market"
+    if category == "한국" and not has_kr_market_story(title, summary):
+        return "kr_no_market_anchor"
     if category == "코인":
         coin_reason = coin_news_block_reason(title, summary)
         if coin_reason:
@@ -5662,6 +5745,7 @@ def classify_news_grade(title: str, summary: str, category: str) -> str:
         return "C"
     c_terms = (
         "가격 예측", "price prediction", "행사", "홍보", "인터뷰", "칼럼",
+        "추모식", "5·18", "5.18", "민주화", "헌법 수록",
         "스포츠", "셀럽", "범죄", "사고", "보도자료", "추천 종목",
         "what happened in crypto",
         "오늘 암호화폐 업계",
