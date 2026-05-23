@@ -64,8 +64,19 @@ TOPIC_COOLDOWNS = {
 SIGNAL_COOLDOWN = timedelta(minutes=45)
 FUTURES_SIGNAL_COOLDOWN = timedelta(minutes=90)
 
-BTC_PRICE_MILESTONES = (60000, 70000, 75000, 80000, 85000, 90000, 100000)
-PRICE_MILESTONE_COOLDOWN = timedelta(hours=12)
+BTC_PRICE_MILESTONES = (
+    60000,
+    70000,
+    75000,
+    80000,
+    85000,
+    90000,
+    95000,
+    100000,
+    105000,
+    110000,
+)
+PRICE_MILESTONE_COOLDOWN = timedelta(hours=8)
 PRICE_MILESTONE_BUFFER_PCT = 0.15
 
 NEWS_DAILY_LIMIT = 3
@@ -269,6 +280,11 @@ class State:
 
         self.chart_img_daily_date: Optional[date] = None
         self.chart_img_daily_count = 0
+
+        self.coin_alert_daily_date: Optional[date] = None
+        self.coin_alert_daily_counts: Dict[str, int] = {}
+        self.coin_alert_last_any: Optional[datetime] = None
+        self.liquidation_map_sent_slots: Dict[str, date] = {}
 
     def is_on_cooldown(self, signal_key: str, now: datetime) -> bool:
         expires_at = self.cooldowns.get(signal_key)
@@ -1886,8 +1902,12 @@ async def maybe_send_price_milestone_alert(bot: Bot, state: State, symbol: str, 
                 + ROOM_DISCLAIMER
             )
 
+        if not coin_alert_may_send(state, "btc_milestone", now, priority=(level >= 100000)):
+            continue
         await safe_send(bot, msg)
-        state.price_milestone_cooldowns[key] = now + PRICE_MILESTONE_COOLDOWN
+        coin_alert_mark_sent(state, "btc_milestone", now)
+        ms_h = env_int("BTC_MILESTONE_COOLDOWN_HOURS", 8, min_value=2, max_value=48)
+        state.price_milestone_cooldowns[key] = now + timedelta(hours=ms_h)
 
     state.last_market_price[symbol] = price
 
@@ -1920,10 +1940,16 @@ async def market_monitor(bot: Bot, state: State) -> None:
                         pct = ((price - old_price) / old_price) * 100
                         if symbol != "BTCUSDT":
                             continue
-                        if abs(pct) >= PRICE_CHANGE_THRESHOLD:
+                        thresh = PRICE_CHANGE_THRESHOLD
+                        if is_weekend_mode(now_kst()):
+                            thresh = PRICE_CHANGE_THRESHOLD * 1.35
+                        if abs(pct) >= thresh:
                             direction = "상승" if pct > 0 else "하락"
                             signal_key = f"price:{symbol}:{direction}"
-                            if not state.is_on_cooldown(signal_key, now):
+                            if (
+                                not state.is_on_cooldown(signal_key, now)
+                                and coin_alert_may_send(state, "price_pulse", now, priority=abs(pct) >= 2.2)
+                            ):
                                 nk = now_kst()
                                 line = "추격보다 눌림 확인" if pct > 0 else "지지선 반응 확인"
                                 msg = (
@@ -1934,7 +1960,8 @@ async def market_monitor(bot: Bot, state: State) -> None:
                                     + ROOM_DISCLAIMER
                                 )
                                 await safe_send(bot, msg, disable_preview=True)
-                                state.touch_cooldown(signal_key, now)
+                                coin_alert_mark_sent(state, "price_pulse", now)
+                                coin_alert_touch_cooldown(state, signal_key, now, "price_pulse")
 
                     klines = await get_recent_klines(session, symbol)
                     allow_volume = symbol == "BTCUSDT" or RUNTIME_ENABLE_ALT_VOLUME_ALERT
@@ -2050,22 +2077,31 @@ async def futures_flow_monitor(bot: Bot, state: State) -> None:
 
                     signal_key = f"futures-flow:{symbol}"
                     last_at = state.futures_last_signal.get(signal_key)
-                    if last_at and now - last_at < FUTURES_SIGNAL_COOLDOWN:
+                    fut_cd = FUTURES_SIGNAL_COOLDOWN
+                    if is_weekend_mode(now_kst()):
+                        fut_cd = fut_cd * 1.5
+                    if last_at and now - last_at < fut_cd:
+                        continue
+                    if not coin_alert_may_send(
+                        state, "futures_oi", now, priority=(abs(oi_change) >= 7 or abs(funding) >= 0.12)
+                    ):
                         continue
 
                     strength = "강함" if abs(oi_change) >= 5 or abs(funding) >= 0.08 else "주의"
+                    flow_word = "유입" if oi_change > 0 else "유출"
                     nk = now_kst()
                     coin = symbol.replace("USDT", "")
                     msg = (
                         room_line(f"선물 수급 · {coin} · {strength}", nk)
                         + "\n\n① 숫자\n"
                         f"· 펀딩 {funding:+.3f}%\n"
-                        f"· 미결제 {oi_change:+.1f}%\n"
+                        f"· 미결제(OI) {oi_change:+.1f}% → {flow_word} 성격\n"
                         f"· 호가비 {imbalance:.2f}\n\n② 메모\n"
                         f"· {comment}\n\n"
                         + ROOM_DISCLAIMER
                     )
                     await safe_send(bot, msg, disable_preview=True)
+                    coin_alert_mark_sent(state, "futures_oi", now)
                     state.futures_last_signal[signal_key] = now
             except Exception:
                 logging.exception("futures_flow_monitor 오류")
@@ -2126,11 +2162,13 @@ async def alpha_flow_monitor(bot: Bot, state: State) -> None:
 
                 if big_buy >= ALPHA_BIG_TRADE_NOTIONAL or big_sell >= ALPHA_BIG_TRADE_NOTIONAL:
                     signal_key = "alpha:bigtrade:btc"
-                    if not state.is_on_cooldown(signal_key, now):
+                    if not state.is_on_cooldown(signal_key, now) and coin_alert_may_send(
+                        state, "flow_big", now, priority=max(big_buy, big_sell) >= WHALE_NOTIONAL_THRESHOLD
+                    ):
                         nk = now_kst()
                         if big_buy > big_sell:
                             msg = (
-                                room_line("알파 체결 · BTC 대형 매수 우세", nk)
+                                room_line("고래·대형 체결 · BTC 매수 우세", nk)
                                 + "\n\n① 규모\n"
                                 f"· 매수 {big_buy:,.0f} / 매도 {big_sell:,.0f} USDT\n\n② 체크\n"
                                 "· 단기 지지·돌파 시도 가능성만\n\n"
@@ -2138,33 +2176,41 @@ async def alpha_flow_monitor(bot: Bot, state: State) -> None:
                             )
                         else:
                             msg = (
-                                room_line("알파 체결 · BTC 대형 매도 우세", nk)
+                                room_line("고래·대형 체결 · BTC 매도 우세", nk)
                                 + "\n\n① 규모\n"
                                 f"· 매수 {big_buy:,.0f} / 매도 {big_sell:,.0f} USDT\n\n② 체크\n"
                                 "· 단기 저항·눌림 가능성만\n\n"
                                 + ROOM_DISCLAIMER
                             )
                         await safe_send(bot, msg, disable_preview=True)
-                        state.touch_cooldown(signal_key, now)
+                        coin_alert_mark_sent(state, "flow_big", now)
+                        coin_alert_touch_cooldown(state, signal_key, now, "flow_big")
 
-                if abs(cvd) >= ALPHA_CVD_NOTIONAL_THRESHOLD:
+                cvd_thresh = ALPHA_CVD_NOTIONAL_THRESHOLD
+                if is_weekend_mode(now_kst()):
+                    cvd_thresh = int(cvd_thresh * 1.35)
+                if abs(cvd) >= cvd_thresh:
                     side_label = "매수" if cvd > 0 else "매도"
+                    flow_label = "유입" if cvd > 0 else "유출"
                     ratio = buy_ratio if cvd > 0 else sell_ratio
                     if ratio >= ALPHA_IMBALANCE_THRESHOLD:
                         signal_key = f"alpha:cvd:{side_label}"
-                        if not state.is_on_cooldown(signal_key, now):
+                        if not state.is_on_cooldown(signal_key, now) and coin_alert_may_send(
+                            state, "flow_cvd", now, priority=abs(cvd) >= cvd_thresh * 1.4
+                        ):
                             nk = now_kst()
                             msg = (
-                                room_line(f"체결강도 · BTC {side_label} 우세", nk)
+                                room_line(f"체결 {flow_label} · BTC {side_label} 우세", nk)
                                 + "\n\n① 숫자\n"
                                 f"· 매수 {buy_notional:,.0f} / 매도 {sell_notional:,.0f} USDT\n"
-                                f"· CVD proxy {cvd:+,.0f} USDT\n"
+                                f"· 순유입 proxy {cvd:+,.0f} USDT\n"
                                 f"· {side_label} 비중 {ratio * 100:.1f}%\n\n② 체크\n"
                                 "· 한쪽 체결 과밀 구간\n\n"
                                 + ROOM_DISCLAIMER
                             )
                             await safe_send(bot, msg, disable_preview=True)
-                            state.touch_cooldown(signal_key, now)
+                            coin_alert_mark_sent(state, "flow_cvd", now)
+                            coin_alert_touch_cooldown(state, signal_key, now, "flow_cvd")
             except Exception:
                 logging.exception("alpha_flow_monitor 오류")
 
@@ -2200,18 +2246,23 @@ async def whale_monitor(bot: Bot, state: State) -> None:
                         signal_key = "whale:btc"
                         if state.is_on_cooldown(signal_key, now):
                             continue
+                        if not coin_alert_may_send(
+                            state, "whale", now, priority=notional >= WHALE_NOTIONAL_THRESHOLD * 1.5
+                        ):
+                            continue
 
                         side = "매수" if side_raw == "buy" else "매도"
                         nk = now_kst()
                         msg = (
                             room_line(f"고래 체결 · BTC 대형 {side}", nk)
                             + "\n\n① 규모\n"
-                            f"· {notional:,.0f} USDT\n\n② 체크\n"
-                            "· 단기 변동성만\n\n"
+                            f"· {notional:,.0f} USDT @ {price:,.0f}\n\n② 체크\n"
+                            "· 단기 변동성·청산 연동만\n\n"
                             + ROOM_DISCLAIMER
                         )
                         await safe_send(bot, msg, disable_preview=True)
-                        state.touch_cooldown(signal_key, now)
+                        coin_alert_mark_sent(state, "whale", now)
+                        coin_alert_touch_cooldown(state, signal_key, now, "whale")
             except Exception:
                 logging.exception("whale_monitor 오류")
 
@@ -2612,6 +2663,124 @@ def is_us_market_close_day(now: datetime) -> bool:
 
 def is_weekend_mode(now: datetime) -> bool:
     return now.weekday() >= 5
+
+
+# --- 코인 알람: KST 시간대 · 주말 저빈도 · 일일 횟수 · 전역 최소 간격 ---
+COIN_ALERT_GLOBAL_MIN_SEC = env_int("COIN_ALERT_GLOBAL_MIN_SEC", 480, min_value=120, max_value=3600)
+COIN_ALERT_GLOBAL_MIN_SEC_WEEKEND = env_int("COIN_ALERT_GLOBAL_MIN_SEC_WEEKEND", 900, min_value=180, max_value=7200)
+
+_COIN_ALERT_DAILY_WEEKDAY: Dict[str, int] = {
+    "btc_level": env_int("ALERT_DAY_BTC_LEVEL", 12, min_value=1, max_value=40),
+    "btc_milestone": env_int("ALERT_DAY_BTC_MILESTONE", 6, min_value=1, max_value=20),
+    "btc_move": env_int("ALERT_DAY_BTC_MOVE", 8, min_value=1, max_value=30),
+    "whale": env_int("ALERT_DAY_WHALE", 10, min_value=1, max_value=40),
+    "liquidation": env_int("ALERT_DAY_LIQUIDATION", 8, min_value=1, max_value=30),
+    "liquidation_map": env_int("ALERT_DAY_LIQ_MAP", 4, min_value=1, max_value=12),
+    "flow_cvd": env_int("ALERT_DAY_FLOW_CVD", 10, min_value=1, max_value=40),
+    "flow_big": env_int("ALERT_DAY_FLOW_BIG", 10, min_value=1, max_value=40),
+    "flow_taker": env_int("ALERT_DAY_FLOW_TAKER", 8, min_value=1, max_value=30),
+    "futures_oi": env_int("ALERT_DAY_FUTURES_OI", 8, min_value=1, max_value=30),
+    "price_pulse": env_int("ALERT_DAY_PRICE_PULSE", 6, min_value=1, max_value=20),
+}
+
+_COIN_ALERT_DAILY_WEEKEND: Dict[str, int] = {
+    k: max(1, int(v * env_float("ALERT_WEEKEND_RATIO", 0.45, min_value=0.2, max_value=0.8)))
+    for k, v in _COIN_ALERT_DAILY_WEEKDAY.items()
+}
+
+LIQUIDATION_MAP_SLOTS_WEEKDAY: Tuple[Tuple[int, int], ...] = (
+    (9, 30),
+    (15, 45),
+    (21, 30),
+)
+LIQUIDATION_MAP_SLOTS_WEEKEND: Tuple[Tuple[int, int], ...] = (
+    (12, 0),
+    (20, 0),
+)
+
+
+def _reset_coin_alert_daily(state: State, today: date) -> None:
+    if state.coin_alert_daily_date != today:
+        state.coin_alert_daily_date = today
+        state.coin_alert_daily_counts = {}
+
+
+def kst_alert_profile(now: Optional[datetime] = None) -> str:
+    """full=평일 장중·미국장 / reduced=주말·장전후 / minimal=새벽."""
+    nk = now_kst() if now is None else now.astimezone(KST)
+    h = nk.hour
+    if is_weekend_mode(nk):
+        if 9 <= h < 23:
+            return "reduced"
+        return "minimal"
+    if 7 <= h < 24:
+        return "full"
+    if 0 <= h < 7:
+        return "minimal"
+    return "reduced"
+
+
+def coin_alert_profile_allows(kind: str, profile: str) -> bool:
+    if profile != "minimal":
+        return True
+    return kind in ("btc_level", "btc_milestone", "btc_move", "liquidation", "whale")
+
+
+def coin_alert_daily_cap(kind: str, weekend: bool) -> int:
+    table = _COIN_ALERT_DAILY_WEEKEND if weekend else _COIN_ALERT_DAILY_WEEKDAY
+    return table.get(kind, 5)
+
+
+def coin_alert_global_gap_sec(weekend: bool) -> int:
+    return COIN_ALERT_GLOBAL_MIN_SEC_WEEKEND if weekend else COIN_ALERT_GLOBAL_MIN_SEC
+
+
+def coin_alert_may_send(state: State, kind: str, now: datetime, *, priority: bool = False) -> bool:
+    nk = now_kst()
+    _reset_coin_alert_daily(state, nk.date())
+    weekend = is_weekend_mode(nk)
+    profile = kst_alert_profile(nk)
+    if not coin_alert_profile_allows(kind, profile) and not priority:
+        return False
+    if state.coin_alert_daily_counts.get(kind, 0) >= coin_alert_daily_cap(kind, weekend) and not priority:
+        return False
+    last_any = state.coin_alert_last_any
+    gap = coin_alert_global_gap_sec(weekend)
+    if not priority and last_any and (now - last_any).total_seconds() < gap:
+        return False
+    return True
+
+
+def coin_alert_mark_sent(state: State, kind: str, now: datetime) -> None:
+    nk = now_kst()
+    _reset_coin_alert_daily(state, nk.date())
+    state.coin_alert_daily_counts[kind] = state.coin_alert_daily_counts.get(kind, 0) + 1
+    state.coin_alert_last_any = now
+
+
+def coin_alert_touch_cooldown(state: State, signal_key: str, now: datetime, kind: str) -> None:
+    weekend = is_weekend_mode(now_kst())
+    mult = 1.6 if weekend else 1.0
+    if kind in ("whale", "flow_cvd", "flow_big", "flow_taker"):
+        mult *= 1.15
+    state.cooldowns[signal_key] = now + timedelta(seconds=int(SIGNAL_COOLDOWN.total_seconds() * mult))
+
+
+def btc_dynamic_key_levels(price: float) -> list[int]:
+    if price <= 0:
+        return [80000, 90000, 100000]
+    p = float(price)
+    step = 2500 if p >= 100_000 else 1000
+    base = int(p // step) * step
+    levels: set[int] = set()
+    for d in (-2, -1, 0, 1, 2):
+        lv = base + d * step
+        if lv > 10_000:
+            levels.add(lv)
+    for fixed in BTC_PRICE_MILESTONES:
+        if abs(fixed - p) <= step * 4:
+            levels.add(int(fixed))
+    return sorted(levels)
 
 
 def market_direction_label(*pcts: float) -> str:
@@ -3195,7 +3364,7 @@ LIVE_TITLE_SIMILARITY_THRESHOLD = env_float("LIVE_TITLE_SIMILARITY_THRESHOLD", 0
 LIVE_RECAP_HOURS = (18,)
 LIVE_BTC_MIN_IMPORTANCE = 7
 LIVE_MESSAGE_SOFT_LIMIT = 2000
-BTC_LEVEL_ALERT_COOLDOWN_SEC = 3 * 60 * 60
+BTC_LEVEL_ALERT_COOLDOWN_SEC = env_int("BTC_LEVEL_ALERT_COOLDOWN_SEC", 3 * 60 * 60, min_value=1800, max_value=12 * 3600)
 
 MARKET_IMPACT_TERMS = (
     "nasdaq", "s&p", "dow", "stock", "shares", "pre-market", "after hours", "earnings", "guidance",
@@ -3712,7 +3881,10 @@ def kst_session_slot_open(now: datetime, hour: int, start_minute: int = 0, grace
 
 def live_news_min_interval(now: datetime) -> timedelta:
     """오후 공백(한국 장 마감~미국 프리) 구간은 간격을 줄여 비율 유지."""
-    h = now_kst().hour
+    nk = now_kst()
+    h = nk.hour
+    if is_weekend_mode(nk):
+        return timedelta(minutes=env_int("LIVE_NEWS_WEEKEND_INTERVAL_MINUTES", 6, min_value=2, max_value=60))
     if is_night_kst(now):
         return LIVE_NIGHT_NEWS_MIN_INTERVAL
     if 13 <= h < 18:
@@ -3721,8 +3893,11 @@ def live_news_min_interval(now: datetime) -> timedelta:
 
 
 def live_news_max_per_scan(now: datetime) -> int:
-    h = now_kst().hour
+    nk = now_kst()
+    h = nk.hour
     base = LIVE_NEWS_MAX_PER_SCAN
+    if is_weekend_mode(nk):
+        return min(base, env_int("LIVE_NEWS_WEEKEND_MAX_PER_SCAN", 1, min_value=1, max_value=3))
     if 13 <= h < 18:
         return max(base, env_int("LIVE_NEWS_AFTERNOON_MAX_PER_SCAN", 2, min_value=1, max_value=5))
     return base
@@ -6969,73 +7144,91 @@ async def send_news_card(
 
 async def btc_key_level_monitor(bot: Bot, state: State) -> None:
     if not hasattr(state, "btc_key_level_last"):
-        state.btc_key_level_last = {}
-
-    levels = [80000, 79000, 78000, 75000]
+        state.btc_key_level_last: Dict[str, dict] = {}
+    if not hasattr(state, "btc_key_level_prev_price"):
+        state.btc_key_level_prev_price = None
 
     async with aiohttp.ClientSession() as session:
         while True:
             try:
                 ticker = await get_market_ticker(session, "BTCUSDT")
-                if ticker:
-                    price = float(ticker["lastPrice"])
-                    pct = float(ticker["priceChangePercent"])
-                    now = utc_now()
+                if not ticker:
+                    await asyncio.sleep(60)
+                    continue
+                price = float(ticker["lastPrice"])
+                pct = float(ticker["priceChangePercent"])
+                now = utc_now()
+                prev_price = state.btc_key_level_prev_price
+                levels = btc_dynamic_key_levels(price)
+                level_cd = BTC_LEVEL_ALERT_COOLDOWN_SEC
+                if is_weekend_mode(now_kst()):
+                    level_cd = int(level_cd * 1.4)
 
-                    for level in levels:
-                        key = f"btc_level_{level}"
-                        last = state.btc_key_level_last.get(key, {})
-                        prev_side = last.get("side")
-                        sent_at = last.get("sent_at")
-                        buffer = max(80, level * 0.001)
-                        if level == 80000:
-                            buffer = max(buffer, 250)
-                        if price >= level + buffer:
-                            side = "above"
-                        elif price <= level - buffer:
-                            side = "below"
-                        else:
-                            continue
+                for level in levels:
+                    key = f"btc_level_{level}"
+                    last = state.btc_key_level_last.get(key, {})
+                    prev_side = last.get("side")
+                    sent_at = last.get("sent_at")
+                    buffer = max(120, level * 0.0012)
+                    if level in (100000, 95000, 90000, 80000):
+                        buffer = max(buffer, 200)
+                    if price >= level + buffer:
+                        side = "above"
+                    elif price <= level - buffer:
+                        side = "below"
+                    else:
+                        if not prev_side:
+                            state.btc_key_level_last[key] = {"side": "near", "sent_at": None}
+                        continue
 
-                        cooldown_ok = True
-                        if sent_at:
-                            try:
-                                cooldown_ok = (now - sent_at).total_seconds() >= BTC_LEVEL_ALERT_COOLDOWN_SEC
-                            except Exception:
-                                cooldown_ok = True
+                    crossed = False
+                    event = ""
+                    if prev_price is not None:
+                        if prev_price < level <= price:
+                            crossed = True
+                            event = "상향 돌파"
+                        elif prev_price > level >= price:
+                            crossed = True
+                            event = "하향 이탈"
+                    flipped = bool(prev_side and prev_side != side and prev_side != "near")
 
-                        if prev_side and prev_side != side and cooldown_ok:
-                            direction = "회복" if side == "above" else "이탈"
-                            icon = "🟢" if side == "above" else "🔴"
-                            nk = now_kst()
-                            if side == "above":
-                                check = (
-                                    "· 15~60m 종가가 레벨 위에서 마감되는지\n"
-                                    "· 펀딩·OI가 한쪽으로 더 쏠리지 않는지"
-                                )
-                            else:
-                                check = (
-                                    "· 반등 시 레벨 재진입(회복) 여부\n"
-                                    "· 청산·거래대금이 이어지면 범위 하단만"
-                                )
-                            host = room_host_line(nk, f"btc{level}", "level") if LIVE_ROOM_HOST_LINE else ""
-                            msg = (
-                                room_line(f"BTC 레벨 · {level:,.0f} · {direction}", nk)
-                                + (f"\n\n{host}" if host else "")
-                                + f"\n\n① 가격\n"
-                                f"· {icon} 현재 {price:,.0f} USDT ({fmt_pct(pct)})\n\n② 체크\n"
-                                f"{check}\n\n"
-                                + LIVE_NEWS_CARD_DISCLAIMER
-                            )
-                            await safe_send(bot, msg, disable_preview=True)
-                            state.btc_key_level_last[key] = {"side": side, "sent_at": now}
-                        elif not prev_side:
+                    cooldown_ok = True
+                    if sent_at:
+                        try:
+                            cooldown_ok = (now - sent_at).total_seconds() >= level_cd
+                        except Exception:
+                            cooldown_ok = True
+
+                    if not (crossed or flipped) or not cooldown_ok:
+                        if not prev_side:
                             state.btc_key_level_last[key] = {"side": side, "sent_at": None}
+                        continue
+                    if not coin_alert_may_send(state, "btc_level", now, priority=(level >= 100000)):
+                        continue
 
+                    direction = event or ("회복" if side == "above" else "이탈")
+                    icon = "🟢" if side == "above" else "🔴"
+                    nk = now_kst()
+                    check = (
+                        "· 15~60m 종가가 레벨 위에서 마감되는지\n· 펀딩·OI 쏠림 확인"
+                        if side == "above"
+                        else "· 레벨 재진입(회복) 여부\n· 청산·거래대금 이어지면 하단만"
+                    )
+                    msg = (
+                        room_line(f"BTC 핵심가 · {level:,.0f} · {direction}", nk)
+                        + f"\n\n① 가격\n· {icon} {price:,.0f} USDT ({fmt_pct(pct)})\n\n② 체크\n{check}\n\n"
+                        + LIVE_NEWS_CARD_DISCLAIMER
+                    )
+                    await safe_send(bot, msg, disable_preview=True)
+                    coin_alert_mark_sent(state, "btc_level", now)
+                    state.btc_key_level_last[key] = {"side": side, "sent_at": now}
+
+                state.btc_key_level_prev_price = price
             except Exception:
                 logging.exception("btc_key_level_monitor 오류")
 
-            await asyncio.sleep(60)
+            sleep_sec = 90 if is_weekend_mode(now_kst()) else 60
+            await asyncio.sleep(sleep_sec)
 
 async def btc_move_chart_monitor(bot: Bot, state: State) -> None:
     if not hasattr(state, "btc_move_chart_last_sent"):
@@ -7062,7 +7255,17 @@ async def btc_move_chart_monitor(bot: Bot, state: State) -> None:
                     if state.btc_move_chart_last_sent:
                         cooldown_ok = (now - state.btc_move_chart_last_sent).total_seconds() >= 60 * 30
 
-                    if side and cooldown_ok:
+                    move_thresh = 1.2
+                    if is_weekend_mode(now_kst()):
+                        move_thresh = 1.55
+                    if side == "drop" and move_pct > -move_thresh:
+                        side = None
+                    if side == "pump" and move_pct < move_thresh:
+                        side = None
+
+                    if side and cooldown_ok and coin_alert_may_send(
+                        state, "btc_move", now, priority=abs(move_pct) >= move_thresh * 1.5
+                    ):
                         labels = [str(i + 1) for i in range(len(candles[-18:]))]
                         values = [round(x[1], 2) for x in candles[-18:]]
 
@@ -7123,13 +7326,14 @@ async def btc_move_chart_monitor(bot: Bot, state: State) -> None:
                                 await safe_send(bot, msg, disable_preview=True)
 
                         if not skip_cooldown_bump:
+                            coin_alert_mark_sent(state, "btc_move", now)
                             state.btc_move_chart_last_sent = now
                             state.btc_move_chart_last_side = side
 
             except Exception:
                 logging.exception("btc_move_chart_monitor 오류")
 
-            await asyncio.sleep(120)
+            await asyncio.sleep(150 if is_weekend_mode(now_kst()) else 120)
 
 
 async def live_news_monitor(bot: Bot, state: State) -> None:
@@ -7723,6 +7927,173 @@ async def railway_port_health_server(workers: list[str]) -> None:
     await asyncio.Future()
 
 
+async def fetch_btc_force_orders(session: aiohttp.ClientSession, limit: int = 80) -> list:
+    url = "https://fapi.binance.com/fapi/v1/allForceOrders"
+    try:
+        async with session.get(
+            url,
+            params={"symbol": "BTCUSDT", "limit": limit},
+            timeout=12,
+            headers=REQUEST_HEADERS,
+        ) as response:
+            if response.status != 200:
+                return []
+            data = await response.json()
+            return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+async def fetch_btc_taker_ratio(session: aiohttp.ClientSession) -> Optional[dict]:
+    url = "https://fapi.binance.com/futures/data/takerlongshortRatio"
+    try:
+        async with session.get(
+            url,
+            params={"symbol": "BTCUSDT", "period": "5m", "limit": 1},
+            timeout=12,
+            headers=REQUEST_HEADERS,
+        ) as response:
+            if response.status != 200:
+                return None
+            data = await response.json()
+            if isinstance(data, list) and data:
+                return data[-1]
+    except Exception:
+        return None
+    return None
+
+
+async def build_liquidation_map_message(session: aiohttp.ClientSession, price: float) -> Optional[str]:
+    orders = await fetch_btc_force_orders(session, 100)
+    if not orders:
+        return None
+    bucket = 500
+    long_below: Dict[int, float] = defaultdict(float)
+    short_above: Dict[int, float] = defaultdict(float)
+    for row in orders:
+        try:
+            px = float(row.get("price") or 0)
+            qty = float(row.get("origQty") or row.get("executedQty") or 0)
+            notional = px * qty
+            side = row.get("side")
+            b = int(px // bucket) * bucket
+            if side == "SELL" and px <= price:
+                long_below[b] += notional
+            elif side == "BUY" and px >= price:
+                short_above[b] += notional
+        except Exception:
+            continue
+    top_long = sorted(long_below.items(), key=lambda x: x[1], reverse=True)[:3]
+    top_short = sorted(short_above.items(), key=lambda x: x[1], reverse=True)[:3]
+    nk = now_kst()
+    parts = [
+        room_line("청산 맵 · BTC 스냅", nk),
+        "",
+        f"① 현재가 · {price:,.0f} USDT",
+        "",
+        "② 롱 청산 밀집(아래)",
+    ]
+    if top_long:
+        for lv, amt in top_long:
+            parts.append(f"· {lv:,.0f}~{lv + bucket:,.0f} · {amt:,.0f} USDT")
+    else:
+        parts.append("· 최근 체결 기준 뚜렷한 구간 없음")
+    parts += ["", "③ 숏 청산 밀집(위)"]
+    if top_short:
+        for lv, amt in top_short:
+            parts.append(f"· {lv:,.0f}~{lv + bucket:,.0f} · {amt:,.0f} USDT")
+    else:
+        parts.append("· 최근 체결 기준 뚜렷한 구간 없음")
+    parts += ["", "④ 메모", "· 맵은 최근 강제청산 체결 기준 추정", "· 돌파·이탈 시 변동성 확대 구간", "", ROOM_DISCLAIMER]
+    return compact_message("\n".join(parts), LIVE_MESSAGE_SOFT_LIMIT)
+
+
+async def liquidation_map_scheduler(bot: Bot, state: State) -> None:
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                now = now_kst()
+                if state.coin_alert_daily_date != now.date():
+                    state.liquidation_map_sent_slots = {}
+                slots = LIQUIDATION_MAP_SLOTS_WEEKEND if is_weekend_mode(now) else LIQUIDATION_MAP_SLOTS_WEEKDAY
+                for hour, minute in slots:
+                    key = f"liqmap:{hour:02d}{minute:02d}"
+                    if not kst_session_slot_open(now, hour, minute, 40):
+                        continue
+                    if state.liquidation_map_sent_slots.get(key) == now.date():
+                        continue
+                    if not coin_alert_may_send(state, "liquidation_map", utc_now()):
+                        continue
+                    ticker = await get_market_ticker(session, "BTCUSDT")
+                    if not ticker:
+                        continue
+                    price = float(ticker["lastPrice"])
+                    msg = await build_liquidation_map_message(session, price)
+                    if not msg:
+                        continue
+                    await safe_send(bot, msg, disable_preview=True)
+                    coin_alert_mark_sent(state, "liquidation_map", utc_now())
+                    state.liquidation_map_sent_slots[key] = now.date()
+                    logging.info("liquidation_map sent slot=%s price=%.0f", key, price)
+            except Exception:
+                logging.exception("liquidation_map_scheduler 오류")
+            await asyncio.sleep(50)
+
+
+async def coin_taker_flow_monitor(bot: Bot, state: State) -> None:
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                row = await fetch_btc_taker_ratio(session)
+                if not row:
+                    await asyncio.sleep(90)
+                    continue
+                buy_vol = float(row.get("buyVol") or 0)
+                sell_vol = float(row.get("sellVol") or 0)
+                ratio = float(row.get("buySellRatio") or 1.0)
+                total = buy_vol + sell_vol
+                if total < 2_000_000:
+                    await asyncio.sleep(90)
+                    continue
+                now = utc_now()
+                buy_share = buy_vol / total
+                sell_share = sell_vol / total
+                weekend = is_weekend_mode(now_kst())
+                imb_thresh = 0.72 if weekend else 0.68
+                if buy_share >= imb_thresh:
+                    signal_key = "taker:buy"
+                    label = "유입"
+                    side = "매수"
+                elif sell_share >= imb_thresh:
+                    signal_key = "taker:sell"
+                    label = "유출"
+                    side = "매도"
+                else:
+                    await asyncio.sleep(90 if weekend else 75)
+                    continue
+                if state.is_on_cooldown(signal_key, now):
+                    await asyncio.sleep(60)
+                    continue
+                if not coin_alert_may_send(state, "flow_taker", now, priority=total >= 8_000_000):
+                    await asyncio.sleep(60)
+                    continue
+                nk = now_kst()
+                msg = (
+                    room_line(f"선물 체결 {label} · BTC {side} 우세", nk)
+                    + "\n\n① 숫자 (5m)\n"
+                    f"· 매수 {buy_vol:,.0f} / 매도 {sell_vol:,.0f} USDT\n"
+                    f"· 비율 {ratio:.2f} · {side} {max(buy_share, sell_share) * 100:.1f}%\n\n② 체크\n"
+                    "· 단기 방향만, 추격 자제\n\n"
+                    + ROOM_DISCLAIMER
+                )
+                await safe_send(bot, msg, disable_preview=True)
+                coin_alert_mark_sent(state, "flow_taker", now)
+                coin_alert_touch_cooldown(state, signal_key, now, "flow_taker")
+            except Exception:
+                logging.exception("coin_taker_flow_monitor 오류")
+            await asyncio.sleep(120 if is_weekend_mode(now_kst()) else 90)
+
+
 async def liquidation_monitor(bot: Bot, state: State) -> None:
     cooldown_key_long = "liquidation:long"
     cooldown_key_short = "liquidation:short"
@@ -7762,40 +8133,54 @@ async def liquidation_monitor(bot: Bot, state: State) -> None:
 
                 now = utc_now()
 
-                if total_long >= 5_000_000 and not state.is_on_cooldown(cooldown_key_long, now):
+                liq_thresh = 5_000_000
+                if is_weekend_mode(now_kst()):
+                    liq_thresh = 7_500_000
+
+                if (
+                    total_long >= liq_thresh
+                    and not state.is_on_cooldown(cooldown_key_long, now)
+                    and coin_alert_may_send(state, "liquidation", now, priority=total_long >= liq_thresh * 2)
+                ):
                     nk = now_kst()
                     await safe_send(
                         bot,
                         room_line("청산 감지 · 롱", nk)
                         + "\n\n① 규모\n"
-                        f"· {total_long:,.0f} USDT\n\n② 체크\n"
+                        f"· {total_long:,.0f} USDT (최근 체결 합)\n\n② 체크\n"
                         "· 하방 압력 한 번 크게 나온 구간\n"
                         "· 반등 약하면 추가 하락\n"
                         "· 추격 말고 반등 강도만\n\n"
                         + ROOM_DISCLAIMER,
                         disable_preview=True,
                     )
-                    state.touch_cooldown(cooldown_key_long, now)
+                    coin_alert_mark_sent(state, "liquidation", now)
+                    coin_alert_touch_cooldown(state, cooldown_key_long, now, "liquidation")
 
-                if total_short >= 5_000_000 and not state.is_on_cooldown(cooldown_key_short, now):
+                if (
+                    total_short >= liq_thresh
+                    and not state.is_on_cooldown(cooldown_key_short, now)
+                    and coin_alert_may_send(state, "liquidation", now, priority=total_short >= liq_thresh * 2)
+                ):
                     nk = now_kst()
                     await safe_send(
                         bot,
                         room_line("청산 감지 · 숏", nk)
                         + "\n\n① 규모\n"
-                        f"· {total_short:,.0f} USDT\n\n② 체크\n"
+                        f"· {total_short:,.0f} USDT (최근 체결 합)\n\n② 체크\n"
                         "· 위로 강제 매수 물량\n"
                         "· 급등 직후 위꼬리\n"
                         "· 돌파 유지 여부만\n\n"
                         + ROOM_DISCLAIMER,
                         disable_preview=True,
                     )
-                    state.touch_cooldown(cooldown_key_short, now)
+                    coin_alert_mark_sent(state, "liquidation", now)
+                    coin_alert_touch_cooldown(state, cooldown_key_short, now, "liquidation")
 
             except Exception:
                 logging.exception("liquidation_monitor 오류")
 
-            await asyncio.sleep(60)
+            await asyncio.sleep(90 if is_weekend_mode(now_kst()) else 60)
 
 
 async def alt_coin_pulse_scheduler(bot: Bot, state: State) -> None:
@@ -8004,6 +8389,8 @@ async def run_forever() -> None:
         "ENABLE_FUTURES_FLOW": env_bool("ENABLE_FUTURES_FLOW", True),
         "ENABLE_ALPHA_FLOW": env_bool("ENABLE_ALPHA_FLOW", True),
         "ENABLE_WHALE": env_bool("ENABLE_WHALE", True),
+        "ENABLE_LIQUIDATION_MAP": env_bool("ENABLE_LIQUIDATION_MAP", True),
+        "ENABLE_TAKER_FLOW": env_bool("ENABLE_TAKER_FLOW", True),
         "ENABLE_HEALTH": env_bool("ENABLE_HEALTH", True),
         "ENABLE_ALT_VOLUME_ALERT": env_bool("ENABLE_ALT_VOLUME_ALERT", True),
         "ENABLE_DAILY_DIGEST": env_bool("ENABLE_DAILY_DIGEST", True),
@@ -8031,6 +8418,12 @@ async def run_forever() -> None:
     tasks.append(asyncio.create_task(kimchi_monitor(bot, state)))
     tasks.append(asyncio.create_task(liquidation_monitor(bot, state)))
     enabled_workers.extend(["fear_greed_monitor", "kimchi_monitor", "liquidation_monitor"])
+    if flags["ENABLE_LIQUIDATION_MAP"]:
+        tasks.append(asyncio.create_task(liquidation_map_scheduler(bot, state)))
+        enabled_workers.append("liquidation_map_scheduler")
+    if flags["ENABLE_TAKER_FLOW"]:
+        tasks.append(asyncio.create_task(coin_taker_flow_monitor(bot, state)))
+        enabled_workers.append("coin_taker_flow_monitor")
     if ENABLE_ALT_PULSE and EXTRA_USDT_SYMBOLS:
         tasks.append(asyncio.create_task(alt_coin_pulse_scheduler(bot, state)))
         enabled_workers.append("alt_coin_pulse_scheduler")
