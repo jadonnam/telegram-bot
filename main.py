@@ -3146,7 +3146,7 @@ MACRO_PULSE_POLL_MINUTES = env_int("MACRO_PULSE_POLL_MINUTES", 45, min_value=15,
 MACRO_PULSE_MIN_MOVE_PCT = env_float("MACRO_PULSE_MIN_MOVE_PCT", 0.35, min_value=0.05, max_value=3.0)
 MACRO_PULSE_COOLDOWN_HOURS = env_int("MACRO_PULSE_COOLDOWN_HOURS", 3, min_value=1, max_value=24)
 LIVE_TITLE_SIMILARITY_BLOCK_HOURS = 24
-LIVE_TITLE_SIMILARITY_THRESHOLD = 0.58
+LIVE_TITLE_SIMILARITY_THRESHOLD = env_float("LIVE_TITLE_SIMILARITY_THRESHOLD", 0.68, min_value=0.45, max_value=0.92)
 LIVE_RECAP_HOURS = (18,)
 LIVE_BTC_MIN_IMPORTANCE = 7
 LIVE_MESSAGE_SOFT_LIMIT = 2000
@@ -3178,6 +3178,10 @@ MARKET_IMPACT_TERMS = (
     "lockheed", "boeing", "defense", "drone", "ship", "shipping", "tariff", "rare earth", "battery",
     "국방", "방산", "드론", "해운", "관세", "희토류", "배터리", "2차전지",
     "현대차", "기아", "LG에너지솔루션", "두산에너빌리티", "한화에어로스페이스",
+    "invest", "investment", "invests", "revenue", "profit", "quarterly", "capex",
+    "billion", "million", "factory", "plant", "expansion", "acquisition",
+    "battery", "ev ", "electric vehicle",
+    "posco", "hyosung", "효성", "포스코", "투자", "공장", "매출", "영업이익", "분기", "수출",
 )
 
 LIVE_HARD_BLOCK_TERMS = (
@@ -3664,6 +3668,8 @@ KR_MARKET_STORY_TERMS = (
 
 def has_kr_market_story(title: str, summary: str) -> bool:
     """한국 피드 — 실제 증시·수급·실적 맥락이 있을 때만."""
+    if has_market_impact(title, summary):
+        return True
     blob = f"{title} {summary}"
     bl = blob.lower()
     return any(k in blob or k in bl for k in KR_MARKET_STORY_TERMS)
@@ -5595,9 +5601,9 @@ def normalize_news_importance(score: int) -> int:
         return 8
     if score >= 18:
         return 7
-    if score >= 14:
+    if score >= 12:
         return 6
-    if score >= 10:
+    if score >= 8:
         return 5
     if score >= 6:
         return 4
@@ -5757,8 +5763,9 @@ def newsroom_keyword_score(title: str, summary: str, category: str = "") -> int:
         "전쟁", "공습", "미사일", "호르무즈", "봉쇄", "etf", "sec ", "엔비디아", "nvidia", "hbm",
         "삼성전자", "sk하이닉스", "btc", "비트코인", "청산",
         "실적", "earnings", "guidance", "유가", "wti", "brent", "외국인", "기관", "연기금", "국민연금",
+        "invest", "investment", "revenue", "profit", "quarterly", "battery", "posco", "hyosung", "투자", "매출", "분기",
     )
-    high = ("ai","반도체","데이터센터","cloud","클라우드","oil","wti","brent","유가","원유","달러","dxy","10년물","테슬라","tesla","아이온큐","ionq","양자")
+    high = ("ai","반도체","semiconductor","데이터센터","cloud","클라우드","oil","wti","brent","유가","원유","달러","dxy","10년물","테슬라","tesla","아이온큐","ionq","양자","factory","plant","capex")
     low = ("맛집","행사","기념","인터뷰","칼럼","opinion","blog","생활","문화","입시","수능","홍보","프로모션","webinar","summit")
     score += sum(3 for k in critical if k in txt)
     score += sum(2 for k in high if k in txt)
@@ -5790,8 +5797,14 @@ def live_news_tier_a_hit(title: str, summary: str) -> bool:
         "청산", "liquidation", "비트코인", "bitcoin",
         "hack", "exploit", "해킹", "defi", "regulation", "tariff", "관세", "firedancer",
         "코스피", "코스닥", "삼성전자", "하이닉스", "china", "중국",
+        "invest", "investment", "revenue", "profit", "quarterly", "battery", "posco", "hyosung", "투자", "매출", "분기",
     )
     return any(k in t for k in keys)
+
+
+def live_news_allows_english_headline(title: str, summary: str) -> bool:
+    """번역 실패해도 시장 핵심 영문 헤드는 보냄."""
+    return has_market_impact(title, summary) or live_news_tier_a_hit(title, summary)
 
 
 def source_rank_min_importance(src_rank: str, title: str, summary: str, category: str) -> int:
@@ -5823,13 +5836,12 @@ def live_news_block_reason(title: str, summary: str, category: str, now: datetim
         coin_reason = coin_news_block_reason(title, summary)
         if coin_reason:
             return coin_reason
-    score = live_news_score(title, summary, category, link)
-    min_live_score = 6 if category == "코인" else 7
-    if score < min_live_score:
-        return "live_score_low"
     combined = live_news_combined_score(title, summary, category, link)
+    min_live_score = 6 if category == "코인" else 7
+    if combined < min_live_score and not live_news_tier_a_hit(title, summary):
+        return "live_score_low"
     imp = normalize_news_importance(combined)
-    if imp <= 5 and not live_news_tier_a_hit(title, summary):
+    if imp <= 4 and not live_news_tier_a_hit(title, summary):
         return "importance_floor"
     if is_night_kst(now):
         text_low = f"{title} {summary}".lower()
@@ -6703,7 +6715,11 @@ async def build_live_news_message(
             parts.append("")
             parts.append(link_s)
         msg = compact_message("\n".join(parts), 900)
-        if mostly_english(html_clean(title_ko, 200)) and category in ("한국", "미국", "세계"):
+        if (
+            mostly_english(html_clean(title_ko, 200))
+            and category in ("한국", "미국", "세계")
+            and not live_news_allows_english_headline(title_clean, summary)
+        ):
             return "", None
         return msg, chart_url
 
@@ -6738,7 +6754,11 @@ async def build_live_news_message(
 
     parts += ["", LIVE_NEWS_CARD_DISCLAIMER]
     msg = "\n".join(parts)
-    if mostly_english(html_clean(title_ko, 200)) and category in ("한국", "미국", "세계"):
+    if (
+        mostly_english(html_clean(title_ko, 200))
+        and category in ("한국", "미국", "세계")
+        and not live_news_allows_english_headline(title_clean, summary)
+    ):
         return "", None
     return compact_message(msg, LIVE_MESSAGE_SOFT_LIMIT), chart_url
 
@@ -7060,7 +7080,7 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                                 cand_category,
                             )
                             continue
-                        score = live_news_score(raw_title, raw_summary, cand_category, raw_link)
+                        score = live_news_combined_score(raw_title, raw_summary, cand_category, raw_link)
                         candidates.append(
                             (score, entry, raw_title, raw_summary, raw_link, cand_emoji, cand_category, grade, topic_key, topic_cd)
                         )
@@ -7125,7 +7145,13 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                                 title_for_recap = await ensure_korean_text(session, title_for_recap)
                             except Exception:
                                 pass
-                        if not tape_fast and mostly_english(title_for_recap):
+                        if not tape_fast and mostly_english(title_for_recap) and not live_news_allows_english_headline(
+                            raw_title, raw_summary
+                        ):
+                            logging.info(
+                                "live_news blocked reason=english_headline title=%s",
+                                clean_text(raw_title, 90),
+                            )
                             continue
                         if not tape_fast and not is_recap_title_natural(title_for_recap):
                             continue
@@ -7134,6 +7160,12 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                                 (now, cand_emoji, html_clean(title_for_recap, 150), source, combined_score, grade, topic_key)
                             )
                         if importance < LIVE_NEWS_MIN_IMPORTANCE_SEND or grade not in LIVE_NEWS_SEND_GRADES_SET:
+                            logging.info(
+                                "live_news blocked reason=importance_or_grade title=%s importance=%s grade=%s",
+                                clean_text(raw_title, 90),
+                                importance,
+                                grade,
+                            )
                             continue
                         if src_rank == "C" and not live_news_mega_catalyst_bypasses_c_source(raw_title, raw_summary, raw_link):
                             continue
