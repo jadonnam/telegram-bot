@@ -259,6 +259,8 @@ class State:
         self.live_last_sent_at: Optional[datetime] = None
         self.live_news_daily_date: Optional[date] = None
         self.live_news_daily_count = 0
+        self.live_category_daily_date: Optional[date] = None
+        self.live_category_daily_count: Dict[str, int] = {}
         self.live_recent_items: Deque[Any] = deque(maxlen=80)
         self.live_recent_titles: Deque[Tuple[datetime, str]] = deque(maxlen=600)
         self.recap_sent_keys: set[str] = set()
@@ -2473,7 +2475,7 @@ async def briefing_scheduler(bot: Bot, state: State) -> None:
             try:
                 now = now_kst()
                 for slot_key, (hour, _title) in slots.items():
-                    if now.hour != hour or now.minute > 1:
+                    if not kst_session_slot_open(now, hour, 0, 45):
                         continue
                     if state.briefing_sent_dates.get(slot_key) == now.date():
                         continue
@@ -2720,11 +2722,6 @@ def final_market_recap_focus(btc_pct: float, eth_pct: float, sol_pct: float, nq_
 
 
 async def market_session_scheduler(bot: Bot, state: State) -> None:
-    def in_time_window(now: datetime, hour: int, minute: int, width_min: int = 4) -> bool:
-        if now.hour != hour:
-            return False
-        return minute <= now.minute < minute + width_min
-
     async def btc_line(session: aiohttp.ClientSession) -> Tuple[str, float]:
         btc = await get_market_ticker(session, "BTCUSDT")
         if not btc:
@@ -2761,7 +2758,7 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                 await warm_holiday_cache(session, now.year)
                 await warm_holiday_cache(session, (now - timedelta(days=1)).year)
 
-                if in_time_window(now, 8, 0):
+                if kst_session_slot_open(now, 8, 0, 50):
                     key = "kr_pre_0800"
                     already_sent = state.market_session_sent_dates.get(key) == now.date()
                     kr_closed = not is_korean_market_weekday(now)
@@ -2864,7 +2861,50 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         state.briefing_sent_dates["08"] = now.date()
                         log_slot(key, now, False, kr_closed, us_holiday, weekend, "sent")
 
-                if in_time_window(now, 21, 0):
+                if kst_session_slot_open(now, 15, 30, 50) and not is_weekend_mode(now):
+                    key = "kr_close_1530"
+                    already_sent = state.market_session_sent_dates.get(key) == now.date()
+                    kr_closed = not is_korean_market_weekday(now)
+                    if already_sent:
+                        log_slot(key, now, True, kr_closed, False, False, "already_sent")
+                    elif kr_closed:
+                        log_slot(key, now, False, True, False, False, "kr_holiday_skip")
+                    else:
+                        kospi = await get_yahoo_snapshot(session, "%5EKS11")
+                        kosdaq = await get_yahoo_snapshot(session, "%5EKQ11")
+                        usd_krw = await get_usd_krw(session)
+                        nq_fut = await get_yahoo_snapshot(session, "NQ%3DF")
+                        sox = await get_yahoo_snapshot(session, "%5ESOX")
+                        btc_text, _ = await btc_line(session)
+                        eth = await coin_snapshot(session, "ETHUSDT")
+                        sol = await coin_snapshot(session, "SOLUSDT")
+                        msg = room_line("🇰🇷 한국장 마감", now)
+                        msg += f"\n\n{SEC_DESK_SNAP}"
+                        if kospi:
+                            msg += f"\n{session_snapshot_line('코스피', kospi)}"
+                        if kosdaq:
+                            msg += f"\n{session_snapshot_line('코스닥', kosdaq)}"
+                        if usd_krw:
+                            msg += f"\n달러/원: {usd_krw:,.2f}원"
+                        if nq_fut:
+                            msg += f"\n{session_snapshot_line('나스닥 선물', nq_fut)}"
+                        if sox:
+                            msg += f"\n{session_snapshot_line('필라델피아 반도체', sox)}"
+                        msg += f"\n{btc_text}"
+                        if eth:
+                            msg += f"\n{move_icon(eth[1])} ETH: {eth[0]:,.0f} USDT ({fmt_pct(eth[1])})"
+                        if sol:
+                            msg += f"\n{move_icon(sol[1])} SOL: {sol[0]:,.0f} USDT ({fmt_pct(sol[1])})"
+                        msg += f"\n\n{SEC_DESK_OPS}"
+                        msg += "\n· 오후~저녁: 미국 프리·코인·매크로 위주"
+                        msg += "\n· 익일 갭: 환율·외국인·반도체 ↔ BTC 구간"
+                        msg += f"\n\n{SEC_DESK_TONE}\n{session_mood(safe_pct_from_snapshot(kospi), safe_pct_from_snapshot(kosdaq), safe_pct_from_snapshot(nq_fut), safe_pct_from_snapshot(sox))}"
+                        msg += f"\n\n{ROOM_DISCLAIMER}"
+                        await safe_send(bot, compact_message(msg, LIVE_MESSAGE_SOFT_LIMIT), disable_preview=True)
+                        state.market_session_sent_dates[key] = now.date()
+                        log_slot(key, now, False, False, False, False, "sent")
+
+                if kst_session_slot_open(now, 21, 0, 50):
                     key = "us_pre_2100"
                     already_sent = state.market_session_sent_dates.get(key) == now.date()
                     kr_closed = not is_korean_market_weekday(now)
@@ -2945,7 +2985,7 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                         state.market_session_sent_dates[key] = now.date()
                         log_slot(key, now, False, kr_closed, us_holiday, weekend, "sent")
 
-                if in_time_window(now, 5, 0):
+                if kst_session_slot_open(now, 5, 0, 50):
                     key = "us_close_0500"
                     already_sent = state.market_session_sent_dates.get(key) == now.date()
                     kr_closed = not is_korean_market_weekday(now)
@@ -3106,7 +3146,12 @@ async def kimchi_monitor(bot: Bot, state: State) -> None:
 # ============================================================
 
 LIVE_NEWS_DAILY_LIMIT = env_int("LIVE_NEWS_DAILY_LIMIT", 56, min_value=12, max_value=500)
-LIVE_COIN_DAILY_LIMIT = env_int("LIVE_COIN_DAILY_LIMIT", 40, min_value=3, max_value=200)
+LIVE_COIN_DAILY_LIMIT = env_int(
+    "LIVE_COIN_DAILY_LIMIT",
+    max(12, int(LIVE_NEWS_DAILY_LIMIT * 0.42) + 2),
+    min_value=3,
+    max_value=200,
+)
 LIVE_SOL_ETF_DAILY_LIMIT = env_int("LIVE_SOL_ETF_DAILY_LIMIT", 4, min_value=1, max_value=12)
 LIVE_NEWS_MAX_PER_SCAN = env_int("LIVE_NEWS_MAX_PER_SCAN", 1, min_value=1, max_value=30)
 LIVE_NEWS_MIN_INTERVAL = timedelta(minutes=env_int("LIVE_NEWS_MIN_INTERVAL_MINUTES", 3, min_value=1, max_value=120))
@@ -3578,29 +3623,109 @@ _LIVE_GOOGLE_TOP_KR_RSS = "https://news.google.com/rss?hl=ko&gl=KR&ceid=KR:ko"
 _COINDESK_RSS = "https://www.coindesk.com/arc/outboundfeeds/rss/"
 _COINTELEGRAPH_RSS = "https://cointelegraph.com/rss"
 
-# 코인·미국(비트코인·ETF·연준) 우선, 한국 주식 속보는 뒤에서 필터링.
+# 속보 비율 목표: 한국 10% · 미국 20% · 세계 30% · 코인 40% (코인 정보방 톤, 주식·매크로 혼합)
+LIVE_CATEGORY_TARGET_SHARE: Dict[str, float] = {
+    "한국": env_float("LIVE_SHARE_KR", 0.10, min_value=0.05, max_value=0.35),
+    "미국": env_float("LIVE_SHARE_US", 0.20, min_value=0.05, max_value=0.45),
+    "세계": env_float("LIVE_SHARE_WORLD", 0.30, min_value=0.10, max_value=0.55),
+    "코인": env_float("LIVE_SHARE_COIN", 0.40, min_value=0.15, max_value=0.70),
+}
+
 LIVE_CATEGORY_FEEDS = (
-    ("🔥", "이슈", _LIVE_GOOGLE_TOP_KR_RSS),
     ("🟠", "코인", _LIVE_COIN_GOOGLE_RSS),
     ("🟠", "코인", _COINDESK_RSS),
     ("🟠", "코인", _COINTELEGRAPH_RSS),
     ("🇺🇸", "미국", _LIVE_US_NEWS_RSS),
     ("🌍", "세계", "https://news.google.com/rss/search?q=(oil%20OR%20WTI%20OR%20dollar%20OR%20Iran%20OR%20Israel%20OR%20Hormuz%20OR%20missile%20OR%20ceasefire%20OR%20sanction%20OR%20China%20OR%20supply%20chain%20OR%20tariff%20OR%20rare%20earth%20OR%20shipping%20OR%20uranium%20OR%20power%20grid)&hl=ko&gl=KR&ceid=KR:ko"),
     ("🇰🇷", "한국", _LIVE_KR_NEWS_RSS),
+    ("🔥", "이슈", _LIVE_GOOGLE_TOP_KR_RSS),
 )
 
 
+def live_news_quota_bucket(category: str) -> str:
+    if category in LIVE_CATEGORY_TARGET_SHARE:
+        return category
+    if category == "이슈":
+        return "세계"
+    return "세계"
+
+
+def _reset_live_category_counts_if_new_day(state: State, today: date) -> None:
+    if state.live_category_daily_date != today:
+        state.live_category_daily_date = today
+        state.live_category_daily_count = {}
+
+
+def live_news_category_share(state: State, bucket: str) -> float:
+    total = max(1, state.live_news_daily_count)
+    return state.live_category_daily_count.get(bucket, 0) / total
+
+
+def live_news_category_quota_allows(state: State, category: str, *, importance: int = 0) -> bool:
+    bucket = live_news_quota_bucket(category)
+    target = LIVE_CATEGORY_TARGET_SHARE.get(bucket, 0.25)
+    if importance >= 9:
+        return True
+    total = state.live_news_daily_count
+    if total < 8:
+        return True
+    share = live_news_category_share(state, bucket)
+    slack = 0.07
+    if share <= target + slack:
+        return True
+    if bucket == "코인" and share > target + 0.12:
+        return False
+    return share <= target + slack / 2
+
+
+def live_news_category_rank_boost(state: State, category: str) -> float:
+    bucket = live_news_quota_bucket(category)
+    target = LIVE_CATEGORY_TARGET_SHARE.get(bucket, 0.25)
+    return max(0.0, (target - live_news_category_share(state, bucket)) * 120.0)
+
+
 def iter_live_news_feeds() -> Tuple[Tuple[str, str, str], ...]:
-    """Railway 등에서 이슈·세계 피드를 끄고 싶을 때 ENABLE_LIVE_ISSUE_FEED / ENABLE_LIVE_WORLD_FEED."""
+    """이슈 피드 기본 OFF · ENABLE_LIVE_ISSUE_FEED / ENABLE_LIVE_WORLD_FEED."""
     out: list[Tuple[str, str, str]] = []
     for row in LIVE_CATEGORY_FEEDS:
         _, cat, _ = row
-        if cat == "이슈" and not env_bool("ENABLE_LIVE_ISSUE_FEED", True):
+        if cat == "이슈" and not env_bool("ENABLE_LIVE_ISSUE_FEED", False):
             continue
         if cat == "세계" and not env_bool("ENABLE_LIVE_WORLD_FEED", True):
             continue
         out.append(row)
     return tuple(out)
+
+
+def iter_live_news_feeds_by_deficit(state: State) -> Tuple[Tuple[str, str, str], ...]:
+    feeds = list(iter_live_news_feeds())
+    feeds.sort(key=lambda row: -live_news_category_rank_boost(state, row[1]))
+    return tuple(feeds)
+
+
+def kst_session_slot_open(now: datetime, hour: int, start_minute: int = 0, grace_minutes: int = 50) -> bool:
+    """장전·장후 브리핑 — 4분 창 대신 넉넉한 발송 구간."""
+    if now.hour != hour:
+        return False
+    return start_minute <= now.minute < start_minute + grace_minutes
+
+
+def live_news_min_interval(now: datetime) -> timedelta:
+    """오후 공백(한국 장 마감~미국 프리) 구간은 간격을 줄여 비율 유지."""
+    h = now_kst().hour
+    if is_night_kst(now):
+        return LIVE_NIGHT_NEWS_MIN_INTERVAL
+    if 13 <= h < 18:
+        return timedelta(minutes=env_int("LIVE_NEWS_AFTERNOON_INTERVAL_MINUTES", 2, min_value=1, max_value=30))
+    return LIVE_NEWS_MIN_INTERVAL
+
+
+def live_news_max_per_scan(now: datetime) -> int:
+    h = now_kst().hour
+    base = LIVE_NEWS_MAX_PER_SCAN
+    if 13 <= h < 18:
+        return max(base, env_int("LIVE_NEWS_AFTERNOON_MAX_PER_SCAN", 2, min_value=1, max_value=5))
+    return base
 
 
 def html_clean(value: str, limit: int = 500) -> str:
@@ -7028,13 +7153,15 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                 if state.sol_etf_daily_date != kst_today:
                     state.sol_etf_daily_date = kst_today
                     state.sol_etf_daily_count = 0
+                _reset_live_category_counts_if_new_day(state, kst_today)
                 sent_this_scan = 0
-                min_interval = LIVE_NIGHT_NEWS_MIN_INTERVAL if is_night_kst(now) else LIVE_NEWS_MIN_INTERVAL
+                max_per_scan = live_news_max_per_scan(now)
+                min_interval = live_news_min_interval(now)
                 if state.live_last_sent_at and now - state.live_last_sent_at < min_interval:
                     await asyncio.sleep(LIVE_NEWS_POLL_SECONDS)
                     continue
-                for category_emoji, category, feed_url in iter_live_news_feeds():
-                    if state.live_news_daily_count >= LIVE_NEWS_DAILY_LIMIT or sent_this_scan >= LIVE_NEWS_MAX_PER_SCAN:
+                for category_emoji, category, feed_url in iter_live_news_feeds_by_deficit(state):
+                    if state.live_news_daily_count >= LIVE_NEWS_DAILY_LIMIT or sent_this_scan >= max_per_scan:
                         break
                     feed = await fetch_rss(session, feed_url)
                     entries = list(getattr(feed, "entries", []) or [])[:LIVE_NEWS_FEED_HEAD] if feed else []
@@ -7081,14 +7208,27 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                             )
                             continue
                         score = live_news_combined_score(raw_title, raw_summary, cand_category, raw_link)
+                        rank = score + live_news_category_rank_boost(state, cand_category)
                         candidates.append(
-                            (score, entry, raw_title, raw_summary, raw_link, cand_emoji, cand_category, grade, topic_key, topic_cd)
+                            (
+                                rank,
+                                score,
+                                entry,
+                                raw_title,
+                                raw_summary,
+                                raw_link,
+                                cand_emoji,
+                                cand_category,
+                                grade,
+                                topic_key,
+                                topic_cd,
+                            )
                         )
                     if not candidates:
                         continue
                     candidates.sort(key=lambda x: x[0], reverse=True)
                     sent_feed = False
-                    for score, entry, raw_title, raw_summary, raw_link, cand_emoji, cand_category, grade, topic_key, topic_cd in candidates:
+                    for rank, score, entry, raw_title, raw_summary, raw_link, cand_emoji, cand_category, grade, topic_key, topic_cd in candidates:
                         topic_last_global = state.topic_last_sent.get(topic_key)
                         topic_on_cooldown = bool(topic_last_global and (now - topic_last_global) < topic_cd)
                         if topic_on_cooldown:
@@ -7165,6 +7305,14 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                                 clean_text(raw_title, 90),
                                 importance,
                                 grade,
+                            )
+                            continue
+                        if not live_news_category_quota_allows(state, cand_category, importance=importance):
+                            logging.info(
+                                "live_news blocked reason=category_quota title=%s category=%s share=%.2f",
+                                clean_text(raw_title, 90),
+                                cand_category,
+                                live_news_category_share(state, live_news_quota_bucket(cand_category)),
                             )
                             continue
                         if src_rank == "C" and not live_news_mega_catalyst_bypasses_c_source(raw_title, raw_summary, raw_link):
@@ -7249,6 +7397,8 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                         state.live_recent_titles.append((now, strip_news_source_tail(raw_title)))
                         state.live_last_sent_at = now
                         state.live_news_daily_count += 1
+                        qb = live_news_quota_bucket(cand_category)
+                        state.live_category_daily_count[qb] = state.live_category_daily_count.get(qb, 0) + 1
                         sent_this_scan += 1
                         sent_feed = True
                         break
@@ -7261,7 +7411,7 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
 
 
 async def build_evening_checklist_message(session: aiohttp.ClientSession, now: datetime) -> str:
-    label = "데스크 체크리스트 · 장전"
+    label = "데스크 체크리스트 · 미국장 대비"
     if is_weekend_mode(now):
         label = "데스크 체크리스트 · 주말"
     parts: list[str] = [room_line(label, now)]
@@ -7313,7 +7463,7 @@ async def daily_digest_scheduler(bot: Bot, state: State) -> None:
             now = now_kst()
             key_evening = f"day_digest:{now.date()}"
             # 아침 7시는 overnight_recap_scheduler(7:10)와 겹치므로 제거. 저녁 한 번만.
-            if now.hour == 18 and now.minute < 5 and state.digest_sent_dates.get(key_evening) != now.date():
+            if kst_session_slot_open(now, 18, 0, 50) and state.digest_sent_dates.get(key_evening) != now.date():
                 if is_weekend_mode(now):
                     logging.info("daily_digest skipped reason=weekend date=%s", now.date())
                     state.digest_sent_dates[key_evening] = now.date()
@@ -7741,7 +7891,7 @@ async def overnight_recap_scheduler(bot: Bot, state: State) -> None:
         while True:
             try:
                 now = now_kst()
-                if now.hour == 7 and now.minute == 10:
+                if kst_session_slot_open(now, 7, 10, 40):
                     key = "overnight_0710"
                     if state.overnight_recap_sent_dates.get(key) != now.date():
                         weekend_mode = is_weekend_mode(now)
