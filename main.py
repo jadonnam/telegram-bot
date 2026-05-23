@@ -3853,6 +3853,62 @@ def live_news_category_rank_boost(state: State, category: str) -> float:
     return max(0.0, (target - live_news_category_share(state, bucket)) * 120.0)
 
 
+def _kst_clock_minutes(nk: datetime) -> int:
+    return nk.hour * 60 + nk.minute
+
+
+def kst_kr_stock_session_open(now: Optional[datetime] = None) -> bool:
+    """한국 주식장 시간대(KST): 평일 장전~장마감 후."""
+    nk = now_kst() if now is None else now.astimezone(KST)
+    if nk.weekday() >= 5:
+        return False
+    if is_kr_holiday_day(nk.date()):
+        return False
+    start = env_int("KST_KR_SESSION_START_MIN", 8 * 60, min_value=0, max_value=24 * 60)
+    end = env_int("KST_KR_SESSION_END_MIN", 16 * 60 + 30, min_value=0, max_value=24 * 60)
+    t = _kst_clock_minutes(nk)
+    return start <= t < end
+
+
+def kst_us_stock_session_open(now: Optional[datetime] = None) -> bool:
+    """미국 주식장 시간대(KST): 프리·정규·애프터(대략 21:30~익일 06:00)."""
+    nk = now_kst() if now is None else now.astimezone(KST)
+    if nk.weekday() >= 5:
+        return False
+    us_ref = nk.date()
+    if _kst_clock_minutes(nk) < 6 * 60:
+        us_ref = (nk - timedelta(days=1)).date()
+    if is_us_holiday_day(us_ref):
+        return False
+    evening_start = env_int("KST_US_SESSION_START_MIN", 21 * 60 + 30, min_value=0, max_value=24 * 60)
+    morning_end = env_int("KST_US_SESSION_END_MIN", 6 * 60, min_value=0, max_value=24 * 60)
+    t = _kst_clock_minutes(nk)
+    return t >= evening_start or t < morning_end
+
+
+def live_news_kst_session_allows(category: str, now: datetime) -> bool:
+    """한국·미국 종목 뉴스는 각 장 시간에만 · 코인·세계(매크로)는 상시."""
+    bucket = live_news_quota_bucket(category)
+    if bucket in ("코인", "세계"):
+        return True
+    if bucket == "한국":
+        return kst_kr_stock_session_open(now)
+    if bucket == "미국":
+        return kst_us_stock_session_open(now)
+    return True
+
+
+def live_news_kst_session_rank_boost(category: str, now: datetime) -> float:
+    bucket = live_news_quota_bucket(category)
+    if bucket in ("코인", "세계"):
+        return 25.0
+    if bucket == "한국" and kst_kr_stock_session_open(now):
+        return 90.0
+    if bucket == "미국" and kst_us_stock_session_open(now):
+        return 90.0
+    return 0.0
+
+
 def iter_live_news_feeds() -> Tuple[Tuple[str, str, str], ...]:
     """이슈 피드 기본 OFF · ENABLE_LIVE_ISSUE_FEED / ENABLE_LIVE_WORLD_FEED."""
     out: list[Tuple[str, str, str]] = []
@@ -3866,9 +3922,15 @@ def iter_live_news_feeds() -> Tuple[Tuple[str, str, str], ...]:
     return tuple(out)
 
 
-def iter_live_news_feeds_by_deficit(state: State) -> Tuple[Tuple[str, str, str], ...]:
+def iter_live_news_feeds_by_deficit(state: State, now: Optional[datetime] = None) -> Tuple[Tuple[str, str, str], ...]:
+    ref = now or utc_now()
     feeds = list(iter_live_news_feeds())
-    feeds.sort(key=lambda row: -live_news_category_rank_boost(state, row[1]))
+
+    def _feed_sort_key(row: Tuple[str, str, str]) -> float:
+        cat = row[1]
+        return live_news_category_rank_boost(state, cat) + live_news_kst_session_rank_boost(cat, ref)
+
+    feeds.sort(key=lambda row: -_feed_sort_key(row))
     return tuple(feeds)
 
 
@@ -6130,6 +6192,8 @@ def live_news_block_reason(title: str, summary: str, category: str, now: datetim
         return lq
     if is_non_market_society_noise(title, summary):
         return "society_non_market"
+    if not live_news_kst_session_allows(category, now):
+        return "kst_session_gate"
     if category == "한국" and not has_kr_market_story(title, summary):
         return "kr_no_market_anchor"
     if category == "코인":
@@ -7364,7 +7428,7 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                 if state.live_last_sent_at and now - state.live_last_sent_at < min_interval:
                     await asyncio.sleep(LIVE_NEWS_POLL_SECONDS)
                     continue
-                for category_emoji, category, feed_url in iter_live_news_feeds_by_deficit(state):
+                for category_emoji, category, feed_url in iter_live_news_feeds_by_deficit(state, now):
                     if state.live_news_daily_count >= LIVE_NEWS_DAILY_LIMIT or sent_this_scan >= max_per_scan:
                         break
                     feed = await fetch_rss(session, feed_url)
@@ -7377,6 +7441,14 @@ async def live_news_monitor(bot: Bot, state: State) -> None:
                         cand_emoji, cand_category = effective_live_news_category(
                             category_emoji, category, raw_title, raw_summary, raw_link
                         )
+                        if not live_news_kst_session_allows(cand_category, now):
+                            logging.info(
+                                "live_news blocked reason=kst_session_gate title=%s category=%s feed=%s",
+                                clean_text(raw_title, 90),
+                                cand_category,
+                                category,
+                            )
+                            continue
                         grade = classify_news_grade(raw_title, raw_summary, cand_category)
                         topic_key = topic_key_for_news(raw_title, raw_summary, cand_category)
                         topic_cd = topic_cooldown_for_key(topic_key)
