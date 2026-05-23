@@ -29,6 +29,49 @@ CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "@jadonnam")
 SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
 KST = ZoneInfo("Asia/Seoul")
 
+
+def env_bool(name: str, default: bool = True) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in ("1", "true", "yes", "on", "y"):
+        return True
+    if value in ("0", "false", "no", "off", "n"):
+        return False
+    return default
+
+
+def env_int(name: str, default: int, *, min_value: Optional[int] = None, max_value: Optional[int] = None) -> int:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        v = int(str(raw).strip(), 10)
+    except ValueError:
+        return default
+    if min_value is not None:
+        v = max(min_value, v)
+    if max_value is not None:
+        v = min(max_value, v)
+    return v
+
+
+def env_float(name: str, default: float, *, min_value: Optional[float] = None, max_value: Optional[float] = None) -> float:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        v = float(str(raw).strip())
+    except ValueError:
+        return default
+    if min_value is not None:
+        v = max(min_value, v)
+    if max_value is not None:
+        v = min(max_value, v)
+    return v
+
+
 MARKET_CHECK_SECONDS = 5 * 60
 NEWS_CHECK_SECONDS = 15 * 60
 FUTURES_FLOW_CHECK_SECONDS = 15 * 60
@@ -39,16 +82,16 @@ WHALE_CHECK_SECONDS = 60
 BRIEFING_CHECK_SECONDS = 30
 MARKET_SESSION_CHECK_SECONDS = 30
 
-PRICE_CHANGE_THRESHOLD = 1.5
-VOLUME_SURGE_THRESHOLD = 4.0
-WHALE_NOTIONAL_THRESHOLD = 3_000_000
+PRICE_CHANGE_THRESHOLD = env_float("PRICE_CHANGE_THRESHOLD", 2.8, min_value=1.0, max_value=8.0)
+VOLUME_SURGE_THRESHOLD = env_float("VOLUME_SURGE_THRESHOLD", 5.5, min_value=2.0, max_value=12.0)
+WHALE_NOTIONAL_THRESHOLD = env_int("WHALE_NOTIONAL_THRESHOLD", 5_000_000, min_value=1_000_000, max_value=50_000_000)
 VOLUME_SURGE_MIN_NOTIONAL = {
     "BTCUSDT": 5_000_000,
     "ETHUSDT": 3_000_000,
     "SOLUSDT": 1_000_000,
 }
 VOLUME_SURGE_COOLDOWN_SEC = 90 * 60
-VOLUME_SURGE_DAILY_LIMIT = 5
+VOLUME_SURGE_DAILY_LIMIT = env_int("VOLUME_SURGE_DAILY_LIMIT", 2, min_value=0, max_value=10)
 VOLUME_SURGE_REPEAT_COIN_COOLDOWN_SEC = 90 * 60
 TOPIC_COOLDOWNS = {
     "sol_etf": timedelta(hours=6),
@@ -61,8 +104,8 @@ TOPIC_COOLDOWNS = {
     "liquidation": timedelta(hours=1),
 }
 
-SIGNAL_COOLDOWN = timedelta(minutes=45)
-FUTURES_SIGNAL_COOLDOWN = timedelta(minutes=90)
+SIGNAL_COOLDOWN = timedelta(minutes=env_int("SIGNAL_COOLDOWN_MINUTES", 90, min_value=15, max_value=240))
+FUTURES_SIGNAL_COOLDOWN = timedelta(minutes=env_int("FUTURES_SIGNAL_COOLDOWN_MINUTES", 150, min_value=30, max_value=360))
 
 BTC_PRICE_MILESTONES = (
     60000,
@@ -89,8 +132,8 @@ NEWS_TITLE_SIMILARITY_BLOCK_HOURS = 24
 NEWS_RECENT_TITLE_LIMIT = 200
 
 ALPHA_BIG_TRADE_NOTIONAL = 1_000_000
-ALPHA_CVD_NOTIONAL_THRESHOLD = 8_000_000
-ALPHA_IMBALANCE_THRESHOLD = 0.68
+ALPHA_CVD_NOTIONAL_THRESHOLD = env_int("ALPHA_CVD_NOTIONAL_THRESHOLD", 15_000_000, min_value=3_000_000, max_value=80_000_000)
+ALPHA_IMBALANCE_THRESHOLD = env_float("ALPHA_IMBALANCE_THRESHOLD", 0.76, min_value=0.55, max_value=0.95)
 
 RSS_FEEDS = (
     "https://www.coindesk.com/arc/outboundfeeds/rss/",
@@ -137,7 +180,7 @@ FETCH_WARN_COOLDOWN = timedelta(minutes=10)
 FETCH_WARN_LAST_AT: Dict[str, datetime] = {}
 RUNTIME_ENABLE_VOLUME_ALERT = True
 RUNTIME_ENABLE_ALT_VOLUME_ALERT = False
-SEND_DEDUP_WINDOW_SECONDS = 120
+SEND_DEDUP_WINDOW_SECONDS = env_int("SEND_DEDUP_WINDOW_SECONDS", 300, min_value=60, max_value=900)
 _LAST_SENT_HASH_AT: Dict[str, datetime] = {}
 
 # ============================================================
@@ -382,48 +425,6 @@ def sentiment_label(*pcts: float) -> str:
     return "🟡 혼조"
 
 
-def env_bool(name: str, default: bool = True) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    value = raw.strip().lower()
-    if value in ("1", "true", "yes", "on", "y"):
-        return True
-    if value in ("0", "false", "no", "off", "n"):
-        return False
-    return default
-
-
-def env_int(name: str, default: int, *, min_value: Optional[int] = None, max_value: Optional[int] = None) -> int:
-    raw = os.getenv(name)
-    if raw is None or not str(raw).strip():
-        return default
-    try:
-        v = int(str(raw).strip(), 10)
-    except ValueError:
-        return default
-    if min_value is not None:
-        v = max(min_value, v)
-    if max_value is not None:
-        v = min(max_value, v)
-    return v
-
-
-def env_float(name: str, default: float, *, min_value: Optional[float] = None, max_value: Optional[float] = None) -> float:
-    raw = os.getenv(name)
-    if raw is None or not str(raw).strip():
-        return default
-    try:
-        v = float(str(raw).strip())
-    except ValueError:
-        return default
-    if min_value is not None:
-        v = max(min_value, v)
-    if max_value is not None:
-        v = min(max_value, v)
-    return v
-
-
 def _parse_extra_usdt_symbols() -> tuple[str, ...]:
     raw = (os.getenv("EXTRA_USDT_SYMBOLS") or "").strip()
     if not raw:
@@ -448,8 +449,8 @@ ALT_PULSE_INTERVAL_SEC = env_int("ALT_PULSE_INTERVAL_SEC", 7200, min_value=600, 
 ENABLE_ALT_PULSE = env_bool("ENABLE_ALT_PULSE", bool(EXTRA_USDT_SYMBOLS))
 
 
-COIN_TOPIC_COOLDOWN = timedelta(minutes=env_int("LIVE_COIN_TOPIC_COOLDOWN_MINUTES", 120, min_value=30, max_value=1440))
-TOPIC_DEFAULT_COOLDOWN = timedelta(minutes=env_int("LIVE_TOPIC_DEFAULT_COOLDOWN_MINUTES", 28, min_value=5, max_value=240))
+COIN_TOPIC_COOLDOWN = timedelta(minutes=env_int("LIVE_COIN_TOPIC_COOLDOWN_MINUTES", 180, min_value=30, max_value=1440))
+TOPIC_DEFAULT_COOLDOWN = timedelta(minutes=env_int("LIVE_TOPIC_DEFAULT_COOLDOWN_MINUTES", 50, min_value=5, max_value=240))
 
 
 def format_price_level(level: float) -> str:
@@ -2666,35 +2667,33 @@ def is_weekend_mode(now: datetime) -> bool:
 
 
 # --- 코인 알람: KST 시간대 · 주말 저빈도 · 일일 횟수 · 전역 최소 간격 ---
-COIN_ALERT_GLOBAL_MIN_SEC = env_int("COIN_ALERT_GLOBAL_MIN_SEC", 480, min_value=120, max_value=3600)
-COIN_ALERT_GLOBAL_MIN_SEC_WEEKEND = env_int("COIN_ALERT_GLOBAL_MIN_SEC_WEEKEND", 900, min_value=180, max_value=7200)
+COIN_ALERT_GLOBAL_MIN_SEC = env_int("COIN_ALERT_GLOBAL_MIN_SEC", 900, min_value=120, max_value=7200)
+COIN_ALERT_GLOBAL_MIN_SEC_WEEKEND = env_int("COIN_ALERT_GLOBAL_MIN_SEC_WEEKEND", 1500, min_value=180, max_value=7200)
 
 _COIN_ALERT_DAILY_WEEKDAY: Dict[str, int] = {
-    "btc_level": env_int("ALERT_DAY_BTC_LEVEL", 12, min_value=1, max_value=40),
-    "btc_milestone": env_int("ALERT_DAY_BTC_MILESTONE", 6, min_value=1, max_value=20),
-    "btc_move": env_int("ALERT_DAY_BTC_MOVE", 8, min_value=1, max_value=30),
-    "whale": env_int("ALERT_DAY_WHALE", 10, min_value=1, max_value=40),
-    "liquidation": env_int("ALERT_DAY_LIQUIDATION", 8, min_value=1, max_value=30),
-    "liquidation_map": env_int("ALERT_DAY_LIQ_MAP", 4, min_value=1, max_value=12),
-    "flow_cvd": env_int("ALERT_DAY_FLOW_CVD", 10, min_value=1, max_value=40),
-    "flow_big": env_int("ALERT_DAY_FLOW_BIG", 10, min_value=1, max_value=40),
-    "flow_taker": env_int("ALERT_DAY_FLOW_TAKER", 8, min_value=1, max_value=30),
-    "futures_oi": env_int("ALERT_DAY_FUTURES_OI", 8, min_value=1, max_value=30),
-    "price_pulse": env_int("ALERT_DAY_PRICE_PULSE", 6, min_value=1, max_value=20),
+    "btc_level": env_int("ALERT_DAY_BTC_LEVEL", 5, min_value=1, max_value=40),
+    "btc_milestone": env_int("ALERT_DAY_BTC_MILESTONE", 3, min_value=1, max_value=20),
+    "btc_move": env_int("ALERT_DAY_BTC_MOVE", 3, min_value=1, max_value=30),
+    "whale": env_int("ALERT_DAY_WHALE", 4, min_value=1, max_value=40),
+    "liquidation": env_int("ALERT_DAY_LIQUIDATION", 4, min_value=1, max_value=30),
+    "liquidation_map": env_int("ALERT_DAY_LIQ_MAP", 2, min_value=1, max_value=12),
+    "flow_cvd": env_int("ALERT_DAY_FLOW_CVD", 3, min_value=0, max_value=40),
+    "flow_big": env_int("ALERT_DAY_FLOW_BIG", 3, min_value=0, max_value=40),
+    "flow_taker": env_int("ALERT_DAY_FLOW_TAKER", 2, min_value=0, max_value=30),
+    "futures_oi": env_int("ALERT_DAY_FUTURES_OI", 3, min_value=0, max_value=30),
+    "price_pulse": env_int("ALERT_DAY_PRICE_PULSE", 2, min_value=0, max_value=20),
 }
 
 _COIN_ALERT_DAILY_WEEKEND: Dict[str, int] = {
-    k: max(1, int(v * env_float("ALERT_WEEKEND_RATIO", 0.45, min_value=0.2, max_value=0.8)))
+    k: max(1, int(v * env_float("ALERT_WEEKEND_RATIO", 0.35, min_value=0.15, max_value=0.8)))
     for k, v in _COIN_ALERT_DAILY_WEEKDAY.items()
 }
 
 LIQUIDATION_MAP_SLOTS_WEEKDAY: Tuple[Tuple[int, int], ...] = (
-    (9, 30),
     (15, 45),
     (21, 30),
 )
 LIQUIDATION_MAP_SLOTS_WEEKEND: Tuple[Tuple[int, int], ...] = (
-    (12, 0),
     (20, 0),
 )
 
@@ -2721,9 +2720,18 @@ def kst_alert_profile(now: Optional[datetime] = None) -> str:
 
 
 def coin_alert_profile_allows(kind: str, profile: str) -> bool:
-    if profile != "minimal":
-        return True
-    return kind in ("btc_level", "btc_milestone", "btc_move", "liquidation", "whale")
+    if profile == "full":
+        return kind in (
+            "btc_level",
+            "btc_milestone",
+            "btc_move",
+            "liquidation",
+            "liquidation_map",
+            "whale",
+        )
+    if profile == "reduced":
+        return kind in ("btc_level", "btc_milestone", "btc_move", "liquidation", "whale")
+    return kind in ("btc_level", "btc_milestone", "btc_move", "liquidation")
 
 
 def coin_alert_daily_cap(kind: str, weekend: bool) -> int:
@@ -2742,7 +2750,10 @@ def coin_alert_may_send(state: State, kind: str, now: datetime, *, priority: boo
     profile = kst_alert_profile(nk)
     if not coin_alert_profile_allows(kind, profile) and not priority:
         return False
-    if state.coin_alert_daily_counts.get(kind, 0) >= coin_alert_daily_cap(kind, weekend) and not priority:
+    cap = coin_alert_daily_cap(kind, weekend)
+    if cap <= 0:
+        return False
+    if state.coin_alert_daily_counts.get(kind, 0) >= cap and not priority:
         return False
     last_any = state.coin_alert_last_any
     gap = coin_alert_global_gap_sec(weekend)
@@ -3314,7 +3325,7 @@ async def kimchi_monitor(bot: Bot, state: State) -> None:
 # LIVE MARKET ROOM QUALITY + MEDIA
 # ============================================================
 
-LIVE_NEWS_DAILY_LIMIT = env_int("LIVE_NEWS_DAILY_LIMIT", 56, min_value=12, max_value=500)
+LIVE_NEWS_DAILY_LIMIT = env_int("LIVE_NEWS_DAILY_LIMIT", 22, min_value=6, max_value=500)
 LIVE_COIN_DAILY_LIMIT = env_int(
     "LIVE_COIN_DAILY_LIMIT",
     max(12, int(LIVE_NEWS_DAILY_LIMIT * 0.42) + 2),
@@ -3323,11 +3334,11 @@ LIVE_COIN_DAILY_LIMIT = env_int(
 )
 LIVE_SOL_ETF_DAILY_LIMIT = env_int("LIVE_SOL_ETF_DAILY_LIMIT", 4, min_value=1, max_value=12)
 LIVE_NEWS_MAX_PER_SCAN = env_int("LIVE_NEWS_MAX_PER_SCAN", 1, min_value=1, max_value=30)
-LIVE_NEWS_MIN_INTERVAL = timedelta(minutes=env_int("LIVE_NEWS_MIN_INTERVAL_MINUTES", 3, min_value=1, max_value=120))
-LIVE_NIGHT_NEWS_MIN_INTERVAL = timedelta(minutes=env_int("LIVE_NEWS_NIGHT_INTERVAL_MINUTES", 18, min_value=5, max_value=90))
-LIVE_NEWS_POLL_SECONDS = env_int("LIVE_NEWS_POLL_SECONDS", 120, min_value=30, max_value=900)
-LIVE_NEWS_FEED_HEAD = env_int("LIVE_NEWS_FEED_HEAD", 18, min_value=5, max_value=40)
-LIVE_NEWS_MIN_IMPORTANCE_SEND = env_int("LIVE_NEWS_MIN_IMPORTANCE_SEND", 7, min_value=5, max_value=10)
+LIVE_NEWS_MIN_INTERVAL = timedelta(minutes=env_int("LIVE_NEWS_MIN_INTERVAL_MINUTES", 8, min_value=2, max_value=120))
+LIVE_NIGHT_NEWS_MIN_INTERVAL = timedelta(minutes=env_int("LIVE_NEWS_NIGHT_INTERVAL_MINUTES", 35, min_value=10, max_value=120))
+LIVE_NEWS_POLL_SECONDS = env_int("LIVE_NEWS_POLL_SECONDS", 180, min_value=60, max_value=900)
+LIVE_NEWS_FEED_HEAD = env_int("LIVE_NEWS_FEED_HEAD", 12, min_value=5, max_value=40)
+LIVE_NEWS_MIN_IMPORTANCE_SEND = env_int("LIVE_NEWS_MIN_IMPORTANCE_SEND", 8, min_value=5, max_value=10)
 LIVE_NEWS_DESK_VOICE_LINE = env_bool("LIVE_NEWS_DESK_VOICE_LINE", False)
 LIVE_ROOM_HOST_LINE = env_bool("LIVE_ROOM_HOST_LINE", False)
 LIVE_NEWS_BTC_CHART = env_bool("LIVE_NEWS_BTC_CHART", True)  # 코인 뉴스: TV 스냅 + 자리·흐름
@@ -3339,12 +3350,12 @@ def live_news_card_style() -> str:
     """compact=한 줄 헤드+URL(링크 프리뷰) · desk=①②③ 구형 카드."""
     raw = (os.getenv("LIVE_NEWS_CARD_STYLE") or "compact").strip().lower()
     return raw if raw in ("compact", "desk") else "compact"
-LIVE_NEWS_NIGHT_COIN_MIN = env_int("LIVE_NEWS_NIGHT_COIN_MIN", 12, min_value=8, max_value=24)
-LIVE_NEWS_NIGHT_OTHER_MIN = env_int("LIVE_NEWS_NIGHT_OTHER_MIN", 12, min_value=8, max_value=28)
+LIVE_NEWS_NIGHT_COIN_MIN = env_int("LIVE_NEWS_NIGHT_COIN_MIN", 18, min_value=10, max_value=30)
+LIVE_NEWS_NIGHT_OTHER_MIN = env_int("LIVE_NEWS_NIGHT_OTHER_MIN", 20, min_value=12, max_value=35)
 
 
 def live_news_send_grades() -> frozenset[str]:
-    raw = (os.getenv("LIVE_NEWS_SEND_GRADES") or "S,A,B").replace(" ", "").upper()
+    raw = (os.getenv("LIVE_NEWS_SEND_GRADES") or "S,A").replace(" ", "").upper()
     parts = [p for p in raw.split(",") if p in ("S", "A", "B", "C")]
     return frozenset(parts) if parts else frozenset({"S", "A", "B"})
 
@@ -3364,7 +3375,7 @@ LIVE_TITLE_SIMILARITY_THRESHOLD = env_float("LIVE_TITLE_SIMILARITY_THRESHOLD", 0
 LIVE_RECAP_HOURS = (18,)
 LIVE_BTC_MIN_IMPORTANCE = 7
 LIVE_MESSAGE_SOFT_LIMIT = 2000
-BTC_LEVEL_ALERT_COOLDOWN_SEC = env_int("BTC_LEVEL_ALERT_COOLDOWN_SEC", 3 * 60 * 60, min_value=1800, max_value=12 * 3600)
+BTC_LEVEL_ALERT_COOLDOWN_SEC = env_int("BTC_LEVEL_ALERT_COOLDOWN_SEC", 5 * 60 * 60, min_value=1800, max_value=12 * 3600)
 
 MARKET_IMPACT_TERMS = (
     "nasdaq", "s&p", "dow", "stock", "shares", "pre-market", "after hours", "earnings", "guidance",
@@ -3836,13 +3847,15 @@ def live_news_category_quota_allows(state: State, category: str, *, importance: 
     if importance >= 9:
         return True
     total = state.live_news_daily_count
-    if total < 8:
+    if total < 5:
         return True
     share = live_news_category_share(state, bucket)
     slack = 0.07
     if share <= target + slack:
         return True
-    if bucket == "코인" and share > target + 0.12:
+    if importance < 8 and bucket == "코인" and share > target + 0.08:
+        return False
+    if importance < 8 and share > target + slack:
         return False
     return share <= target + slack / 2
 
@@ -3946,11 +3959,11 @@ def live_news_min_interval(now: datetime) -> timedelta:
     nk = now_kst()
     h = nk.hour
     if is_weekend_mode(nk):
-        return timedelta(minutes=env_int("LIVE_NEWS_WEEKEND_INTERVAL_MINUTES", 6, min_value=2, max_value=60))
+        return timedelta(minutes=env_int("LIVE_NEWS_WEEKEND_INTERVAL_MINUTES", 12, min_value=3, max_value=90))
     if is_night_kst(now):
         return LIVE_NIGHT_NEWS_MIN_INTERVAL
     if 13 <= h < 18:
-        return timedelta(minutes=env_int("LIVE_NEWS_AFTERNOON_INTERVAL_MINUTES", 2, min_value=1, max_value=30))
+        return timedelta(minutes=env_int("LIVE_NEWS_AFTERNOON_INTERVAL_MINUTES", 6, min_value=2, max_value=45))
     return LIVE_NEWS_MIN_INTERVAL
 
 
@@ -3961,7 +3974,7 @@ def live_news_max_per_scan(now: datetime) -> int:
     if is_weekend_mode(nk):
         return min(base, env_int("LIVE_NEWS_WEEKEND_MAX_PER_SCAN", 1, min_value=1, max_value=3))
     if 13 <= h < 18:
-        return max(base, env_int("LIVE_NEWS_AFTERNOON_MAX_PER_SCAN", 2, min_value=1, max_value=5))
+        return min(base, env_int("LIVE_NEWS_AFTERNOON_MAX_PER_SCAN", 1, min_value=1, max_value=3))
     return base
 
 
@@ -6182,7 +6195,7 @@ def source_rank_min_importance(src_rank: str, title: str, summary: str, category
             return LIVE_NEWS_MIN_IMPORTANCE_SEND
         if category in ("세계", "미국", "한국") and has_market_impact(title, summary):
             return LIVE_NEWS_MIN_IMPORTANCE_SEND
-        return 8
+        return 9
     return 99
 
 
@@ -6201,11 +6214,11 @@ def live_news_block_reason(title: str, summary: str, category: str, now: datetim
         if coin_reason:
             return coin_reason
     combined = live_news_combined_score(title, summary, category, link)
-    min_live_score = 6 if category == "코인" else 7
+    min_live_score = 8 if category == "코인" else 9
     if combined < min_live_score and not live_news_tier_a_hit(title, summary):
         return "live_score_low"
     imp = normalize_news_importance(combined)
-    if imp <= 4 and not live_news_tier_a_hit(title, summary):
+    if imp <= 6 and not live_news_tier_a_hit(title, summary):
         return "importance_floor"
     if is_night_kst(now):
         text_low = f"{title} {summary}".lower()
@@ -7309,19 +7322,19 @@ async def btc_move_chart_monitor(bot: Bot, state: State) -> None:
                     move_pct = ((last_price - start_price) / start_price * 100.0) if start_price else 0.0
 
                     side = None
-                    if move_pct <= -1.2:
+                    if move_pct <= -2.0:
                         side = "drop"
-                    elif move_pct >= 1.2:
+                    elif move_pct >= 2.0:
                         side = "pump"
 
                     now = utc_now()
                     cooldown_ok = True
                     if state.btc_move_chart_last_sent:
-                        cooldown_ok = (now - state.btc_move_chart_last_sent).total_seconds() >= 60 * 30
+                        cooldown_ok = (now - state.btc_move_chart_last_sent).total_seconds() >= 60 * 60
 
-                    move_thresh = 1.2
+                    move_thresh = 2.0
                     if is_weekend_mode(now_kst()):
-                        move_thresh = 1.55
+                        move_thresh = 2.5
                     if side == "drop" and move_pct > -move_thresh:
                         side = None
                     if side == "pump" and move_pct < move_thresh:
@@ -8205,9 +8218,9 @@ async def liquidation_monitor(bot: Bot, state: State) -> None:
 
                 now = utc_now()
 
-                liq_thresh = 5_000_000
+                liq_thresh = 10_000_000
                 if is_weekend_mode(now_kst()):
-                    liq_thresh = 7_500_000
+                    liq_thresh = 14_000_000
 
                 if (
                     total_long >= liq_thresh
@@ -8458,15 +8471,15 @@ async def run_forever() -> None:
         "ENABLE_BTC_LEVEL": env_bool("ENABLE_BTC_LEVEL", True),
         "ENABLE_VOLUME_ALERT": env_bool("ENABLE_VOLUME_ALERT", True),
         "ENABLE_RECAP": env_bool("ENABLE_RECAP", True),
-        "ENABLE_FUTURES_FLOW": env_bool("ENABLE_FUTURES_FLOW", True),
-        "ENABLE_ALPHA_FLOW": env_bool("ENABLE_ALPHA_FLOW", True),
+        "ENABLE_FUTURES_FLOW": env_bool("ENABLE_FUTURES_FLOW", False),
+        "ENABLE_ALPHA_FLOW": env_bool("ENABLE_ALPHA_FLOW", False),
         "ENABLE_WHALE": env_bool("ENABLE_WHALE", True),
         "ENABLE_LIQUIDATION_MAP": env_bool("ENABLE_LIQUIDATION_MAP", True),
-        "ENABLE_TAKER_FLOW": env_bool("ENABLE_TAKER_FLOW", True),
+        "ENABLE_TAKER_FLOW": env_bool("ENABLE_TAKER_FLOW", False),
         "ENABLE_HEALTH": env_bool("ENABLE_HEALTH", True),
         "ENABLE_ALT_VOLUME_ALERT": env_bool("ENABLE_ALT_VOLUME_ALERT", True),
         "ENABLE_DAILY_DIGEST": env_bool("ENABLE_DAILY_DIGEST", True),
-        "ENABLE_MACRO_PULSE": env_bool("ENABLE_MACRO_PULSE", True),
+        "ENABLE_MACRO_PULSE": env_bool("ENABLE_MACRO_PULSE", False),
     }
 
     global RUNTIME_ENABLE_VOLUME_ALERT
