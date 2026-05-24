@@ -193,15 +193,37 @@ HOLIDAY_CACHE: Dict[str, set[str]] = {
     "KR": set(),
     "US": set(),
 }
+HOLIDAY_LABELS_KR: Dict[str, str] = {}
 HOLIDAY_CACHE_YEARS: set[str] = set()
 
 # API 실패 대비 최소 백업값. 필요하면 매년 여기에 추가 가능.
+FALLBACK_HOLIDAY_LABELS_KR = {
+    "2026-01-01": "신정",
+    "2026-02-16": "설날",
+    "2026-02-17": "설날",
+    "2026-02-18": "설날",
+    "2026-03-01": "삼일절",
+    "2026-05-05": "어린이날",
+    "2026-05-24": "부처님오신날",
+    "2026-05-25": "대체공휴일",
+    "2026-06-06": "현충일",
+    "2026-08-15": "광복절",
+    "2026-09-24": "추석",
+    "2026-09-25": "추석",
+    "2026-09-26": "추석",
+    "2026-10-03": "개천절",
+    "2026-10-09": "한글날",
+    "2026-12-25": "크리스마스",
+}
+
 FALLBACK_HOLIDAYS = {
     "KR": {
         "2026-01-01",
         "2026-02-16", "2026-02-17", "2026-02-18",
         "2026-03-01",
         "2026-05-05",
+        "2026-05-24",  # 부처님오신날
+        "2026-05-25",  # 대체공휴일
         "2026-06-06",
         "2026-08-15",
         "2026-09-24", "2026-09-25", "2026-09-26",
@@ -223,6 +245,32 @@ FALLBACK_HOLIDAYS = {
 }
 
 
+def _as_kst_date(day) -> date:
+    if isinstance(day, datetime):
+        return day.astimezone(KST).date()
+    return day
+
+
+def apply_kr_substitute_holidays(dates: set[str]) -> set[str]:
+    """일요일 공휴일 → 월요일 대체공휴일 자동 보강."""
+    out = set(dates)
+    for ds in list(dates):
+        try:
+            d = date.fromisoformat(ds)
+        except ValueError:
+            continue
+        if d.weekday() != 6:
+            continue
+        nxt = d + timedelta(days=1)
+        if nxt.weekday() != 0:
+            continue
+        nxt_s = nxt.isoformat()
+        if nxt_s not in out:
+            out.add(nxt_s)
+            HOLIDAY_LABELS_KR.setdefault(nxt_s, "대체공휴일")
+    return out
+
+
 async def warm_holiday_cache(session: aiohttp.ClientSession, year: int) -> None:
     key = str(year)
     if key in HOLIDAY_CACHE_YEARS:
@@ -238,13 +286,20 @@ async def warm_holiday_cache(session: aiohttp.ClientSession, year: int) -> None:
                 date_s = row.get("date")
                 if date_s:
                     loaded.add(date_s)
+                    if country == "KR":
+                        label = (row.get("localName") or row.get("name") or "").strip()
+                        if label:
+                            HOLIDAY_LABELS_KR[date_s] = label
 
-        # 미국 주식시장 휴장에 가까운 Good Friday는 공휴일 API에 없을 수 있어 수동 보강
         if country == "US":
             loaded.update(FALLBACK_HOLIDAYS.get("US", set()))
 
-        # API 실패해도 백업 공휴일은 유지
         loaded.update(FALLBACK_HOLIDAYS.get(country, set()))
+        if country == "KR":
+            for ds, label in FALLBACK_HOLIDAY_LABELS_KR.items():
+                if ds.startswith(f"{year}-"):
+                    HOLIDAY_LABELS_KR.setdefault(ds, label)
+            loaded = apply_kr_substitute_holidays(loaded)
 
         HOLIDAY_CACHE[country].update(loaded)
 
@@ -252,11 +307,57 @@ async def warm_holiday_cache(session: aiohttp.ClientSession, year: int) -> None:
 
 
 def is_kr_holiday_day(day) -> bool:
-    return day.strftime("%Y-%m-%d") in HOLIDAY_CACHE.get("KR", set())
+    return _as_kst_date(day).isoformat() in HOLIDAY_CACHE.get("KR", set())
 
 
 def is_us_holiday_day(day) -> bool:
-    return day.strftime("%Y-%m-%d") in HOLIDAY_CACHE.get("US", set())
+    return _as_kst_date(day).isoformat() in HOLIDAY_CACHE.get("US", set())
+
+
+def is_kr_red_day(day) -> bool:
+    """주말·공휴일·대체공휴일(빨간날)."""
+    d = _as_kst_date(day)
+    if d.weekday() >= 5:
+        return True
+    return is_kr_holiday_day(d)
+
+
+def kr_holiday_label(day) -> str:
+    ds = _as_kst_date(day).isoformat()
+    return HOLIDAY_LABELS_KR.get(ds, "공휴일")
+
+
+def kr_calendar_day_tag(now: datetime) -> str:
+    nk = now.astimezone(KST) if now.tzinfo else now.replace(tzinfo=KST)
+    if is_kr_holiday_day(nk.date()):
+        return f"🔴 {kr_holiday_label(nk.date())}"
+    if nk.weekday() >= 5:
+        return "🔴 주말"
+    return ""
+
+
+def desk_morning_briefing_title(now: datetime) -> str:
+    nk = now.astimezone(KST) if now.tzinfo else now.replace(tzinfo=KST)
+    if is_kr_holiday_day(nk.date()):
+        return f"아침 브리핑 · {kr_holiday_label(nk.date())}"
+    if nk.weekday() >= 5:
+        return "주말 아침 브리핑"
+    if 5 <= nk.hour < 12:
+        return "아침 브리핑"
+    if nk.hour >= 22 or nk.hour < 5:
+        return "야간 브리핑"
+    return "데스크 브리핑"
+
+
+def desk_session_open_subtitle(now: datetime) -> str:
+    nk = now.astimezone(KST) if now.tzinfo else now.replace(tzinfo=KST)
+    if is_kr_holiday_day(nk.date()):
+        return f"휴장 · {kr_holiday_label(nk.date())}"
+    if nk.weekday() >= 5:
+        return "주말 오전"
+    if not is_korean_market_weekday(now):
+        return "휴장일 오전"
+    return "한국장 직전"
 
 
 
@@ -2464,9 +2565,12 @@ def live_news_opener_line(now: datetime, title_seed: str) -> str:
 
 
 def room_line(subtitle: str, now: datetime) -> str:
-    wd = _WEEKDAY_KO[now.weekday()]
-    clock = now.strftime("%H:%M")
-    return f"{ROOM_BRAND} · {subtitle} · {now.month}/{now.day}({wd}) · {clock} KST"
+    nk = now.astimezone(KST) if now.tzinfo else now.replace(tzinfo=KST)
+    wd = _WEEKDAY_KO[nk.weekday()]
+    clock = nk.strftime("%H:%M")
+    base = f"{ROOM_BRAND} · {subtitle} · {nk.month}/{nk.day}({wd}) · {clock} KST"
+    cal = kr_calendar_day_tag(nk)
+    return f"{base} · {cal}" if cal else base
 
 
 def fmt_oi_compact(tag: str, oi: Optional[float]) -> str:
@@ -2649,21 +2753,24 @@ async def briefing_scheduler(bot: Bot, state: State) -> None:
             await asyncio.sleep(max(5, BRIEFING_CHECK_SECONDS - int(elapsed)))
 
 def is_korean_market_weekday(now: datetime) -> bool:
-    return now.weekday() < 5 and not is_kr_holiday_day(now)
+    d = _as_kst_date(now)
+    return d.weekday() < 5 and not is_kr_holiday_day(d)
 
 
 def is_us_market_premarket_day(now: datetime) -> bool:
-    return now.weekday() < 5 and not is_us_holiday_day(now)
+    d = _as_kst_date(now)
+    return d.weekday() < 5 and not is_us_holiday_day(d)
 
 
 def is_us_market_close_day(now: datetime) -> bool:
     # KST 새벽 05:00 미국장 마감 브리핑은 전날 미국 거래일 기준
-    us_session_day = now - timedelta(days=1)
+    nk = now.astimezone(KST) if now.tzinfo else now.replace(tzinfo=KST)
+    us_session_day = nk.date() - timedelta(days=1)
     return us_session_day.weekday() < 5 and not is_us_holiday_day(us_session_day)
 
 
 def is_weekend_mode(now: datetime) -> bool:
-    return now.weekday() >= 5
+    return _as_kst_date(now).weekday() >= 5
 
 
 # --- 코인 알람: KST 시간대 · 주말 저빈도 · 일일 횟수 · 전역 최소 간격 ---
@@ -2966,7 +3073,7 @@ async def market_session_scheduler(bot: Bot, state: State) -> None:
                             get_open_interest(session, "SOLUSDT"),
                         )
 
-                        sub = "주말 오전" if weekend else ("휴장일 오전" if kr_closed else "한국장 직전")
+                        sub = desk_session_open_subtitle(now)
                         msg = room_line(f"🌅 {sub}", now)
                         msg += f"\n\n{SEC_DESK_SNAP}"
                         if usd_krw:
@@ -8364,6 +8471,8 @@ async def overnight_recap_scheduler(bot: Bot, state: State) -> None:
                 if kst_session_slot_open(now, 7, 10, 40):
                     key = "overnight_0710"
                     if state.overnight_recap_sent_dates.get(key) != now.date():
+                        await warm_holiday_cache(session, now.year)
+                        await warm_holiday_cache(session, now.year + 1)
                         weekend_mode = is_weekend_mode(now)
                         holiday_mode = not is_korean_market_weekday(now)
                         logging.info("overnight_recap mode weekend=%s holiday_mode=%s", weekend_mode, holiday_mode)
@@ -8385,7 +8494,7 @@ async def overnight_recap_scheduler(bot: Bot, state: State) -> None:
                             get_funding_rate(session, "ETHUSDT"),
                             get_funding_rate(session, "SOLUSDT"),
                         )
-                        msg = room_line("야간 브리핑", now)
+                        msg = room_line(desk_morning_briefing_title(now), now)
                         msg += "\n\n① 스냅 · 코인"
                         if btc:
                             msg += f"\n· BTC {btc_price:,.0f} ({fmt_pct(btc_pct)})"
@@ -8404,7 +8513,9 @@ async def overnight_recap_scheduler(bot: Bot, state: State) -> None:
                         if dxy:
                             msg += f"\n· 달러 {fmt_pct(safe_pct_from_snapshot(dxy))}"
                         msg += f"\n\n{SEC_DESK_OPS}\n· {final_market_recap_focus(btc_pct, eth_pct, sol_pct, safe_pct_from_snapshot(nq), safe_pct_from_snapshot(sox), safe_pct_from_snapshot(wti), safe_pct_from_snapshot(dxy))}"
-                        if weekend_mode or holiday_mode:
+                        if is_kr_holiday_day(now.date()):
+                            msg += f"\n· 🔴 {kr_holiday_label(now.date())}: 코인·유가·달러·김치 위주"
+                        elif weekend_mode or holiday_mode:
                             msg += "\n· 주말·휴장: 코인·유가·달러·김치"
                         else:
                             msg += "\n· 한국장: 반도체·외국인·환율 ↔ BTC 구간"
@@ -8436,6 +8547,16 @@ async def run_forever() -> None:
         except Exception:
             logging.exception("bot_state_hydrate")
     now = now_kst()
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            await warm_holiday_cache(session, now.year)
+            await warm_holiday_cache(session, now.year + 1)
+        kr_today = [d for d in sorted(HOLIDAY_CACHE.get("KR", set())) if d.startswith(str(now.year))]
+        if kr_today:
+            logging.info("KR holidays %s: %s", now.year, ", ".join(kr_today))
+    except Exception:
+        logging.exception("warm_holiday_cache at startup")
 
     market_mode_lines = []
     if not is_korean_market_weekday(now):
