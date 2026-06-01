@@ -1960,6 +1960,13 @@ def get_price_15m_ago(history: Deque[Tuple[datetime, float]], now: datetime) -> 
     return candidate
 
 
+def is_price_milestone_on_cooldown(state: State, key: str, now: datetime) -> bool:
+    until = state.price_milestone_cooldowns.get(key)
+    if not until:
+        return False
+    return now < until
+
+
 async def maybe_send_price_milestone_alert(bot: Bot, state: State, symbol: str, prev_price: Optional[float], price: float, now: datetime) -> None:
     if symbol != "BTCUSDT" or prev_price is None or prev_price <= 0:
         state.last_market_price[symbol] = price
@@ -1977,7 +1984,7 @@ async def maybe_send_price_milestone_alert(bot: Bot, state: State, symbol: str, 
         if not direction:
             continue
 
-        key = f"milestone:{symbol}:{level}:{direction}"
+        key = f"milestone:{symbol}:{level}"
         if is_price_milestone_on_cooldown(state, key, now):
             continue
 
@@ -3435,7 +3442,7 @@ async def kimchi_monitor(bot: Bot, state: State) -> None:
 LIVE_NEWS_DAILY_LIMIT = env_int("LIVE_NEWS_DAILY_LIMIT", 22, min_value=6, max_value=500)
 LIVE_COIN_DAILY_LIMIT = env_int(
     "LIVE_COIN_DAILY_LIMIT",
-    max(12, int(LIVE_NEWS_DAILY_LIMIT * 0.42) + 2),
+    max(14, int(LIVE_NEWS_DAILY_LIMIT * 0.70)),
     min_value=3,
     max_value=200,
 )
@@ -3482,7 +3489,13 @@ LIVE_TITLE_SIMILARITY_THRESHOLD = env_float("LIVE_TITLE_SIMILARITY_THRESHOLD", 0
 LIVE_RECAP_HOURS = (18,)
 LIVE_BTC_MIN_IMPORTANCE = 7
 LIVE_MESSAGE_SOFT_LIMIT = 2000
-BTC_LEVEL_ALERT_COOLDOWN_SEC = env_int("BTC_LEVEL_ALERT_COOLDOWN_SEC", 5 * 60 * 60, min_value=1800, max_value=12 * 3600)
+BTC_LEVEL_ALERT_COOLDOWN_SEC = env_int("BTC_LEVEL_ALERT_COOLDOWN_SEC", 8 * 60 * 60, min_value=1800, max_value=24 * 3600)
+BTC_LEVEL_OPPOSITE_COOLDOWN_SEC = env_int(
+    "BTC_LEVEL_OPPOSITE_COOLDOWN_SEC", 10 * 60 * 60, min_value=3600, max_value=48 * 3600
+)
+BTC_MOVE_OPPOSITE_COOLDOWN_SEC = env_int(
+    "BTC_MOVE_OPPOSITE_COOLDOWN_SEC", 3 * 60 * 60, min_value=1800, max_value=24 * 3600
+)
 
 MARKET_IMPACT_TERMS = (
     "nasdaq", "s&p", "dow", "stock", "shares", "pre-market", "after hours", "earnings", "guidance",
@@ -3555,6 +3568,9 @@ COIN_REQUIRED_KEYWORDS = (
     "hack", "exploit", "해킹", "breach", "rug", "bridge", "rollup",
     "regulation", "cftc", "treasury", "token", "governance", "uniswap", "aave",
     "firedancer", "infrastructure", "layer 2", "layer2", "kelp", "morpho",
+    "musk", "saylor", "trump", "cathie", "wood", "cz ", "vitalik", "buterin",
+    "galaxy digital", "accumulat", "매집", "매수", "매도", "지갑", "wallet",
+    "bought", "sold", "purchased", "dump", "sell-off",
 )
 
 
@@ -3889,7 +3905,8 @@ _LIVE_COIN_GOOGLE_Q = (
     "tokenization OR Coinbase OR on-chain OR inflow OR outflow OR staking OR hack OR exploit OR "
     "Avalanche OR AVAX OR Polygon OR MATIC OR Chainlink OR LINK OR Dogecoin OR DOGE OR "
     "memecoin OR airdrop OR TVL OR Arbitrum OR Optimism OR rollup OR L2 OR "
-    "가상자산 OR 업비트 OR 온체인 OR 고래 OR 거래대금 OR 밈코인"
+    "Musk OR Saylor OR Trump OR Cathie Wood OR Galaxy Digital OR accumulation OR wallet OR "
+    "가상자산 OR 업비트 OR 온체인 OR 고래 OR 거래대금 OR 밈코인 OR 매집 OR 매수 OR 매도"
 )
 _LIVE_COIN_GOOGLE_RSS = (
     "https://news.google.com/rss/search?q=" + quote("(" + _LIVE_COIN_GOOGLE_Q + ")") + "&hl=ko&gl=KR&ceid=KR:ko"
@@ -3910,12 +3927,11 @@ _LIVE_GOOGLE_TOP_KR_RSS = "https://news.google.com/rss?hl=ko&gl=KR&ceid=KR:ko"
 _COINDESK_RSS = "https://www.coindesk.com/arc/outboundfeeds/rss/"
 _COINTELEGRAPH_RSS = "https://cointelegraph.com/rss"
 
-# 속보 비율 목표: 한국 10% · 미국 20% · 세계 30% · 코인 40% (코인 정보방 톤, 주식·매크로 혼합)
+# 속보 비율 목표: 코인 70% · 미국+세계(해외) 20% · 한국 10%
 LIVE_CATEGORY_TARGET_SHARE: Dict[str, float] = {
-    "한국": env_float("LIVE_SHARE_KR", 0.10, min_value=0.05, max_value=0.35),
-    "미국": env_float("LIVE_SHARE_US", 0.20, min_value=0.05, max_value=0.45),
-    "세계": env_float("LIVE_SHARE_WORLD", 0.30, min_value=0.10, max_value=0.55),
-    "코인": env_float("LIVE_SHARE_COIN", 0.40, min_value=0.15, max_value=0.70),
+    "한국": env_float("LIVE_SHARE_KR", 0.10, min_value=0.05, max_value=0.25),
+    "해외": env_float("LIVE_SHARE_INTL", 0.20, min_value=0.10, max_value=0.40),
+    "코인": env_float("LIVE_SHARE_COIN", 0.70, min_value=0.50, max_value=0.85),
 }
 
 LIVE_CATEGORY_FEEDS = (
@@ -3930,11 +3946,13 @@ LIVE_CATEGORY_FEEDS = (
 
 
 def live_news_quota_bucket(category: str) -> str:
-    if category in LIVE_CATEGORY_TARGET_SHARE:
-        return category
-    if category == "이슈":
-        return "세계"
-    return "세계"
+    if category == "코인":
+        return "코인"
+    if category == "한국":
+        return "한국"
+    if category in ("미국", "세계", "이슈"):
+        return "해외"
+    return "해외"
 
 
 def _reset_live_category_counts_if_new_day(state: State, today: date) -> None:
@@ -3991,7 +4009,7 @@ def kst_kr_stock_session_open(now: Optional[datetime] = None) -> bool:
 
 
 def kst_us_stock_session_open(now: Optional[datetime] = None) -> bool:
-    """미국 주식장 시간대(KST): 프리·정규·애프터(대략 21:30~익일 06:00)."""
+    """미국 주식장 시간대(KST): 평일 프리·정규·애프터(대략 21:30~익일 06:00)."""
     nk = now_kst() if now is None else now.astimezone(KST)
     if nk.weekday() >= 5:
         return False
@@ -4006,26 +4024,41 @@ def kst_us_stock_session_open(now: Optional[datetime] = None) -> bool:
     return t >= evening_start or t < morning_end
 
 
+def kst_us_news_window_open(now: Optional[datetime] = None) -> bool:
+    """미국·매크로 속보 허용 구간(KST): 저녁~새벽 21:30~06:00 · 주말·공휴일 포함."""
+    nk = now_kst() if now is None else now.astimezone(KST)
+    evening_start = env_int("KST_US_NEWS_START_MIN", 21 * 60 + 30, min_value=0, max_value=24 * 60)
+    morning_end = env_int("KST_US_NEWS_END_MIN", 6 * 60, min_value=0, max_value=24 * 60)
+    t = _kst_clock_minutes(nk)
+    return t >= evening_start or t < morning_end
+
+
 def live_news_kst_session_allows(category: str, now: datetime) -> bool:
-    """한국·미국 종목 뉴스는 각 장 시간에만 · 코인·세계(매크로)는 상시."""
+    """한국=장중만 · 미국=KST 저녁~새벽 · 코인·세계=상시."""
     bucket = live_news_quota_bucket(category)
-    if bucket in ("코인", "세계"):
+    if bucket in ("코인", "해외") and category != "미국":
         return True
     if bucket == "한국":
         return kst_kr_stock_session_open(now)
-    if bucket == "미국":
-        return kst_us_stock_session_open(now)
+    if category == "미국":
+        return kst_us_news_window_open(now)
     return True
 
 
 def live_news_kst_session_rank_boost(category: str, now: datetime) -> float:
     bucket = live_news_quota_bucket(category)
-    if bucket in ("코인", "세계"):
-        return 25.0
-    if bucket == "한국" and kst_kr_stock_session_open(now):
-        return 90.0
-    if bucket == "미국" and kst_us_stock_session_open(now):
-        return 90.0
+    if bucket == "코인":
+        return 40.0
+    if bucket == "해외":
+        if category == "미국" and kst_us_news_window_open(now):
+            return 95.0
+        if category == "세계":
+            return 35.0
+        return 20.0
+    if bucket == "한국":
+        if kst_kr_stock_session_open(now):
+            return 70.0
+        return -40.0
     return 0.0
 
 
@@ -5169,6 +5202,29 @@ def live_news_score(title: str, summary: str, category: str, link: str = "") -> 
             )
         ):
             score += 10
+        if any(
+            k in text_low
+            for k in (
+                "whale",
+                "고래",
+                "liquidation",
+                "청산",
+                "accumulat",
+                "매집",
+                "매수",
+                "매도",
+                "musk",
+                "saylor",
+                "microstrategy",
+                "blackrock",
+                "inflow",
+                "outflow",
+                "on-chain",
+                "onchain",
+                "온체인",
+            )
+        ):
+            score += 8
     if any(k in text_low for k in ("외국인", "기관", "연기금", "국민연금", "투신")):
         score += 8
     if any(k in text_low for k in ("실적", "earnings", "guidance", "가이던스", "eps", "etf")):
@@ -6276,7 +6332,8 @@ def live_news_tier_a_hit(title: str, summary: str) -> bool:
         "earnings", "guidance", "실적", "가이던스", "eps", "surprise", "etf",
         "금리", "fed", "fomc", "cpi", "pce", "ppi", "유가", "wti", "brent",
         "반도체", "hbm", "엔비디아", "nvidia", "외국인", "기관", "연기금", "국민연금",
-        "청산", "liquidation", "비트코인", "bitcoin",
+        "청산", "liquidation", "비트코인", "bitcoin", "whale", "고래", "매집", "accumulat",
+        "musk", "saylor", "microstrategy", "blackrock", "inflow", "outflow",
         "hack", "exploit", "해킹", "defi", "regulation", "tariff", "관세", "firedancer",
         "코스피", "코스닥", "삼성전자", "하이닉스", "china", "중국",
         "invest", "investment", "revenue", "profit", "quarterly", "battery", "posco", "hyosung", "투자", "매출", "분기",
@@ -6321,7 +6378,7 @@ def live_news_block_reason(title: str, summary: str, category: str, now: datetim
         if coin_reason:
             return coin_reason
     combined = live_news_combined_score(title, summary, category, link)
-    min_live_score = 8 if category == "코인" else 9
+    min_live_score = 8 if category in ("코인", "미국", "세계") else 9
     if combined < min_live_score and not live_news_tier_a_hit(title, summary):
         return "live_score_low"
     imp = normalize_news_importance(combined)
@@ -6338,6 +6395,8 @@ def live_news_block_reason(title: str, summary: str, category: str, now: datetim
             "china", "중국", "삼성", "하이닉스", "hbm", "실적", "earnings",
         )
         night_floor = LIVE_NEWS_NIGHT_COIN_MIN if category == "코인" else LIVE_NEWS_NIGHT_OTHER_MIN
+        if category in ("미국", "세계") and kst_us_news_window_open(now):
+            night_floor = max(14, night_floor - 4)
         if combined < night_floor:
             return "night_importance"
         if not any(k in text_low for k in night_terms):
@@ -7374,8 +7433,6 @@ async def btc_key_level_monitor(bot: Bot, state: State) -> None:
                         elif prev_price > level >= price:
                             crossed = True
                             event = "하향 이탈"
-                    flipped = bool(prev_side and prev_side != side and prev_side != "near")
-
                     cooldown_ok = True
                     if sent_at:
                         try:
@@ -7383,7 +7440,16 @@ async def btc_key_level_monitor(bot: Bot, state: State) -> None:
                         except Exception:
                             cooldown_ok = True
 
-                    if not (crossed or flipped) or not cooldown_ok:
+                    last_alert_side = last.get("alert_side")
+                    if (
+                        last_alert_side
+                        and last_alert_side != side
+                        and sent_at
+                        and (now - sent_at).total_seconds() < BTC_LEVEL_OPPOSITE_COOLDOWN_SEC
+                    ):
+                        cooldown_ok = False
+
+                    if not crossed or not cooldown_ok:
                         if not prev_side:
                             state.btc_key_level_last[key] = {"side": side, "sent_at": None}
                         continue
@@ -7405,7 +7471,7 @@ async def btc_key_level_monitor(bot: Bot, state: State) -> None:
                     )
                     await safe_send(bot, msg, disable_preview=True)
                     coin_alert_mark_sent(state, "btc_level", now)
-                    state.btc_key_level_last[key] = {"side": side, "sent_at": now}
+                    state.btc_key_level_last[key] = {"side": side, "sent_at": now, "alert_side": side}
 
                 state.btc_key_level_prev_price = price
             except Exception:
@@ -7447,8 +7513,24 @@ async def btc_move_chart_monitor(bot: Bot, state: State) -> None:
                     if side == "pump" and move_pct < move_thresh:
                         side = None
 
-                    if side and cooldown_ok and coin_alert_may_send(
-                        state, "btc_move", now, priority=abs(move_pct) >= move_thresh * 1.5
+                    opposite_chop = False
+                    if (
+                        side
+                        and state.btc_move_chart_last_side
+                        and state.btc_move_chart_last_side != side
+                        and state.btc_move_chart_last_sent
+                        and (now - state.btc_move_chart_last_sent).total_seconds()
+                        < BTC_MOVE_OPPOSITE_COOLDOWN_SEC
+                    ):
+                        opposite_chop = abs(move_pct) < move_thresh * 2.2
+
+                    if (
+                        side
+                        and cooldown_ok
+                        and not opposite_chop
+                        and coin_alert_may_send(
+                            state, "btc_move", now, priority=abs(move_pct) >= move_thresh * 1.5
+                        )
                     ):
                         labels = [str(i + 1) for i in range(len(candles[-18:]))]
                         values = [round(x[1], 2) for x in candles[-18:]]
